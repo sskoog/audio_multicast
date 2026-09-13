@@ -203,19 +203,19 @@ python apps\audio_ESP_NOW_broadcast\pc_audio_streamer.py [OPTIONS]
 #### 1. Stream Random MP3 Tracks from `data/mp3` (Default)
 Streams CD/Studio-quality audio at 48 kHz, 7.5 ms frame duration, Stereo:
 ```powershell
-& "C:\Git_ble_audio\venv_ble_audio\Scripts\python.exe" apps\audio_ESP_NOW_broadcast\pc_audio_streamer.py --port COM121 --source mp3 --sample-rate 48000 --duration 7.5 --channels 2
+python apps\audio_ESP_NOW_broadcast\pc_audio_streamer.py --port COM121 --source mp3 --sample-rate 48000 --duration 7.5 --channels 2
 ```
 
 #### 2. Stream Live Windows 11 System Audio (WASAPI Loopback)
 Captures all desktop audio (YouTube, Spotify, games) and broadcasts wirelessly in real-time:
 ```powershell
-& "C:\Git_ble_audio\venv_ble_audio\Scripts\python.exe" apps\audio_ESP_NOW_broadcast\pc_audio_streamer.py --port COM121 --source wasapi --sample-rate 48000 --duration 7.5 --channels 2
+python apps\audio_ESP_NOW_broadcast\pc_audio_streamer.py --port COM121 --source wasapi --sample-rate 48000 --duration 7.5 --channels 2
 ```
 
 #### 3. Stream 6-Channel Multi-Speaker Audio
 Streams 6 discrete audio channels at 32 kHz, 10.0 ms frame duration:
 ```powershell
-& "C:\Git_ble_audio\venv_ble_audio\Scripts\python.exe" apps\audio_ESP_NOW_broadcast\pc_audio_streamer.py --port COM121 --source mp3 --sample-rate 32000 --duration 10.0 --channels 6
+python apps\audio_ESP_NOW_broadcast\pc_audio_streamer.py --port COM121 --source mp3 --sample-rate 32000 --duration 10.0 --channels 6
 ```
 
 ---

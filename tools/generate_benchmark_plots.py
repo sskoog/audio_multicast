@@ -12,7 +12,8 @@ import matplotlib.pyplot as plt
 
 # Artifact destination and docs directory
 ARTIFACT_DIR = r"C:\Users\stefa\.gemini\antigravity-ide\brain\362c5e0d-1e79-487b-ac18-f1e63260ca67"
-DOCS_ASSETS_DIR = r"c:\Git_ble_audio\docs\assets"
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DOCS_ASSETS_DIR = os.path.join(REPO_ROOT, "docs", "assets")
 
 os.makedirs(ARTIFACT_DIR, exist_ok=True)
 os.makedirs(DOCS_ASSETS_DIR, exist_ok=True)

@@ -95,7 +95,7 @@ Because native Windows 11 Bluetooth drivers currently lack Host-level APIs for c
 
 ## 3. Real-Time Audio Sources & Codec Engine
 
-### 1. Google `liblc3` Audio Codec ([`lc3_encoder.py`](file:///c:/Git_ble_audio/apps/usb_ble_bumble/lc3_encoder.py))
+### 1. Google `liblc3` Audio Codec ([`lc3_encoder.py`](lc3_encoder.py))
 * **Standard Implementation**: Google's official C implementation of the Bluetooth SIG Low Complexity Communication Codec (LC3), compiled natively for Windows (`liblc3.dll`).
 * **Format**: 48,000 Hz, 10.0 ms frame duration (480 PCM samples per frame).
 * **Performance**: Sub-millisecond ctypes encoding, producing 60-byte mono frames (48 kbps) or 120-byte stereo SDUs (96 kbps).
@@ -111,7 +111,7 @@ Because native Windows 11 Bluetooth drivers currently lack Host-level APIs for c
 
 ---
 
-## 4. Basic Audio Profile (BAP) Configuration Engine ([`bap_config.py`](file:///c:/Git_ble_audio/apps/usb_ble_bumble/bap_config.py))
+## 4. Basic Audio Profile (BAP) Configuration Engine ([`bap_config.py`](bap_config.py))
 
 `bap_config.py` provides a fool-proof, user-friendly API for constructing Bluetooth SIG compliant **Broadcast Audio Source Endpoint (BASE)** descriptors for Periodic Advertising trains:
 
@@ -202,19 +202,19 @@ The ESP32-C6-WROOM-1 DevKit on-board addressable RGB LED provides real-time visu
 ### Test 1: HCI Hardware Diagnostic Probe (`test_hci.py`)
 Validates that the ESP32-C6 controller link layer is responsive and compliant with Bluetooth 5.3 specifications:
 ```powershell
-& "C:\Git_ble_audio\venv_ble_audio\Scripts\python.exe" apps\usb_ble_bumble\test_hci.py COM121
+python apps\usb_ble_bumble\test_hci.py COM121
 ```
 
 ### Test 2: BAP / PBP BASE Descriptor Unit Tests (`test_bap_config.py`)
 Validates fool-proof sample rate rounding, presentation delay byte conversions, frame duration codes, LTV 3 presets, and metadata contexts:
 ```powershell
-& "C:\Git_ble_audio\venv_ble_audio\Scripts\python.exe" apps\usb_ble_bumble\test_bap_config.py
+python apps\usb_ble_bumble\test_bap_config.py
 ```
 
 ### Test 3: Stereo Broadcaster with Custom BAP Parameters
 Validates live LC3 streaming with custom presentation delay (50ms), High-Quality preset (160 kbps), and live context:
 ```powershell
-& "C:\Git_ble_audio\venv_ble_audio\Scripts\python.exe" apps\usb_ble_bumble\bumble_broadcaster.py --port COM121 --mode stereo --source synth --sample-rate 44000 --presentation-delay 50.0 --quality-preset high_quality --context live --program-info "Live Stage" --language eng --test-duration 3
+python apps\usb_ble_bumble\bumble_broadcaster.py --port COM121 --mode stereo --source synth --sample-rate 44000 --presentation-delay 50.0 --quality-preset high_quality --context live --program-info "Live Stage" --language eng --test-duration 3
 ```
 
 ---
@@ -223,34 +223,34 @@ Validates live LC3 streaming with custom presentation delay (50ms), High-Quality
 
 ### Display BAP Configuration Reference
 ```powershell
-& "C:\Git_ble_audio\venv_ble_audio\Scripts\python.exe" apps\usb_ble_bumble\bumble_broadcaster.py --list-bap-options
+python apps\usb_ble_bumble\bumble_broadcaster.py --list-bap-options
 ```
 
 ### List All Available Audio Capture Devices
 ```powershell
-& "C:\Git_ble_audio\venv_ble_audio\Scripts\python.exe" apps\usb_ble_bumble\bumble_broadcaster.py --list-audio-devices
+python apps\usb_ble_bumble\bumble_broadcaster.py --list-audio-devices
 ```
 
 ### Broadcast LFO Sine Wave Test Tone (Stereo)
 ```powershell
-& "C:\Git_ble_audio\venv_ble_audio\Scripts\python.exe" apps\usb_ble_bumble\bumble_broadcaster.py --port COM121 --mode stereo --source synth --amplitude 0.25 --lfo-rate 0.2 --lfo-min 220 --lfo-max 880
+python apps\usb_ble_bumble\bumble_broadcaster.py --port COM121 --mode stereo --source synth --amplitude 0.25 --lfo-rate 0.2 --lfo-min 220 --lfo-max 880
 ```
 
 ### Broadcast Live from VB-Audio Virtual Cable (Custom BAP Metadata)
 ```powershell
-& "C:\Git_ble_audio\venv_ble_audio\Scripts\python.exe" apps\usb_ble_bumble\bumble_broadcaster.py --port COM121 --mode stereo --source device --audio-device "CABLE" --quality-preset high_quality --context media --program-info "Living Room Hifi" --language eng
+python apps\usb_ble_bumble\bumble_broadcaster.py --port COM121 --mode stereo --source device --audio-device "CABLE" --quality-preset high_quality --context media --program-info "Living Room Hifi" --language eng
 ```
 
 ### Broadcast 5.1 Multi-Channel Surround (6 Discrete Streams)
 ```powershell
-& "C:\Git_ble_audio\venv_ble_audio\Scripts\python.exe" apps\usb_ble_bumble\bumble_broadcaster.py --port COM121 --mode multichannel --num-bis 6 --source synth
+python apps\usb_ble_bumble\bumble_broadcaster.py --port COM121 --mode multichannel --num-bis 6 --source synth
 ```
 
 ### Flashing Firmware to ESP32-C6
 ```powershell
 . "C:\Users\stefa\OneDrive\Documents\ESP\v6.0.2\esp-idf\export.ps1"
 
-Set-Location "c:\Git_ble_audio\apps\usb_ble_bumble"
+Set-Location apps\usb_ble_bumble
 idf.py build
 python -m esptool --chip esp32c6 -p COM21 -b 460800 --before default_reset --after hard_reset write_flash --flash_mode dio --flash_size 4MB --flash_freq 40m 0x0 "build/bootloader/bootloader.bin" 0x8000 "build/partition_table/partition-table.bin" 0x10000 "build/usb_ble_bumble.bin"
 ```

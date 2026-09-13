@@ -136,7 +136,7 @@ The project utilizes Espressif's official **`esp_audio_codec`** component (`espr
 
 ### 1. Build and Flash Audio SINK (Node23 on COM23)
 ```powershell
-cd c:\Git_ble_audio\apps\node2node
+Set-Location apps\node2node
 idf.py build
 python -m esptool --chip esp32c6 -p COM23 -b 460800 --before default_reset --after hard_reset write_flash 0x0 build\bootloader\bootloader.bin 0x8000 build\partition_table\partition-table.bin 0x10000 build\esp32c6_ble_audio_broadcast.bin
 ```
@@ -145,15 +145,14 @@ python -m esptool --chip esp32c6 -p COM23 -b 460800 --before default_reset --aft
 1. Set `#define CONFIG_ACTIVE_NODE_ROLE NODE_ROLE_SOURCE` in `main/config.h`.
 2. Compile and flash:
 ```powershell
-cd c:\Git_ble_audio\apps\node2node
+Set-Location apps\node2node
 idf.py build
 python -m esptool --chip esp32c6 -p COM21 -b 460800 --before default_reset --after hard_reset write_flash 0x0 build\bootloader\bootloader.bin 0x8000 build\partition_table\partition-table.bin 0x10000 build\esp32c6_ble_audio_broadcast.bin
 ```
 
 ### 3. Running the Python Bumble Broadcaster (Node21 on COM121)
 ```powershell
-cd c:\Git_ble_audio
-& venv_ble_audio\Scripts\python.exe apps\usb_ble_bumble\bumble_broadcaster.py --port COM121 --sample-rate 48000
+python apps\usb_ble_bumble\bumble_broadcaster.py --port COM121 --sample-rate 48000
 ```
 
 ---

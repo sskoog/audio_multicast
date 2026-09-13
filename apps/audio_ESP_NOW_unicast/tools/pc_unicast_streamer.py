@@ -37,8 +37,8 @@ try:
     import lc3_encoder
 except ImportError:
     alt_dirs = [
-        r"C:\Git_ble_audio\apps\usb_ble_bumble",
-        os.path.join(os.path.dirname(__file__), "..", "..", "apps", "usb_ble_bumble")
+        os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "usb_ble_bumble")),
+        os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "audio_ESP_NOW_broadcast")),
     ]
     imported = False
     for ad in alt_dirs:

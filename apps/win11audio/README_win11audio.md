@@ -117,8 +117,8 @@ Assuming stereo output:
 
 ### 1. Activate the `ble_audio` Virtual Environment:
 ```powershell
-# From the repository root (c:\Git_ble_audio)
-.\ble_audio\Scripts\Activate.ps1
+# From the repository root
+.\venv_audio_multicast\Scripts\Activate.ps1
 
 # Or from the win11audio app folder:
 ..\..\ble_audio\Scripts\Activate.ps1
@@ -226,7 +226,7 @@ python dsp_app.py --mode stream --loopback --input-mode ms --algo heterodyne --c
 Windows 11 drivers does not natively support BLE Audio Broadcasting with the setup listed above.
 Microsoft has introduced experimental Auracast broadcasting in Windows 11 Insider preview builds for specific Copilot+ PCs (Qualcomm Snapdragon X Elite / select Intel Core Ultra).
 
-Best alternative to broadcast PC audio to multiple Bluetooth speakers is to use a dedicated BLE-audio 5.3/5.4 USB dongle or an **ESP32-C6 DevKit HCI Controller** with Google Bumble (see [`apps/usb_ble_bumble`](file:///c:/Git_ble_audio/apps/usb_ble_bumble)).
+Best alternative to broadcast PC audio to multiple Bluetooth speakers is to use a dedicated BLE-audio 5.3/5.4 USB dongle or an **ESP32-C6 DevKit HCI Controller** with Google Bumble (see [`apps/usb_ble_bumble`](../usb_ble_bumble)).
 
 ---
 
@@ -265,9 +265,9 @@ When broadcasting audio via Bluetooth Low Energy Audio (Auracast / BAP / PBP), t
 ### LC3 Codec Implementation
 
 * **Library**: [Google `liblc3`](https://github.com/google/liblc3) (Google's official, high-performance C reference implementation of the **Bluetooth SIG Low Complexity Communication Codec** standard).
-* **Location in Repo**: [`apps/usb_ble_bumble/liblc3/`](file:///c:/Git_ble_audio/apps/usb_ble_bumble/liblc3/).
-* **Native Shared Library**: [`apps/usb_ble_bumble/liblc3.dll`](file:///c:/Git_ble_audio/apps/usb_ble_bumble/liblc3.dll) (compiled for 64-bit Windows with MinGW GCC).
-* **Python Binding**: [`apps/usb_ble_bumble/lc3_encoder.py`](file:///c:/Git_ble_audio/apps/usb_ble_bumble/lc3_encoder.py) via Python `ctypes`.
+* **Location in Repo**: [`apps/usb_ble_bumble/liblc3/`](../usb_ble_bumble/liblc3/).
+* **Native Shared Library**: [`apps/usb_ble_bumble/liblc3.dll`](../usb_ble_bumble/liblc3.dll) (compiled for 64-bit Windows with MinGW GCC).
+* **Python Binding**: [`apps/usb_ble_bumble/lc3_encoder.py`](../usb_ble_bumble/lc3_encoder.py) via Python `ctypes`.
 * **Standard Audio Frame Format**:
   * Sampling Rate: **48,000 Hz** (or 44.1 kHz, 32 kHz, 24 kHz, 16 kHz)
   * Frame Duration: **10.0 ms** (480 PCM samples per frame per channel)

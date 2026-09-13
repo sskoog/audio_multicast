@@ -1,8 +1,9 @@
-# BLE Audio & ESP-NOW Audio Broadcast System
+# Audio Multicast System (ESP-NOW & LC3)
 
 ## Overview
-This repository contains several apps for low-latency digital audio broadcasting systems using either Bluetooth Low Energy Audio, or ESP-NOW (802.11 layer 2) as the transport protocol.
-Audio compression is in all cases utilizing the LC3 encoder and decoder, available from Google's liblc3 open library, or ESP-IDF's fixed-point implementation of LC3 encoder/decoder (for ESP32 SoCs without FPU support).
+This repository contains firmware applications and host utilities for low-latency digital audio multicast and multi-unicast systems using 802.11 Wi-Fi (ESP-NOW Layer 1 & 2) as the primary wireless transport protocol.
+Audio compression utilizes the LC3 encoder and decoder via Google's `liblc3` library (hardware FPU on ESP32-S3) or ESP-IDF's fixed-point LC3 codec (for RISC-V ESP32-C6).
+Legacy / exploratory experiments in Bluetooth Low Energy Audio (Auracast) are also archived within the repository.
 
 ---
 
