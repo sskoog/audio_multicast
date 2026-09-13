@@ -89,13 +89,13 @@ if (Test-Path "C:\Users\stefa\OneDrive\Documents\ESP\v6.0.2\esp-idf\export.ps1")
     . "C:\Users\stefa\OneDrive\Documents\ESP\v6.0.2\export.ps1"
 }
 
-# Automated Build and Flash for audioESP-NOW:
+# Automated Build and Flash for audio_ESP_NOW_broadcast:
 # Flash SOURCE (ESP32-S3 on COM16)
-powershell -ExecutionPolicy Bypass -File apps\audioESP-NOW\build_and_flash.ps1 -Role SOURCE -Port COM16
+powershell -ExecutionPolicy Bypass -File apps\audio_ESP_NOW_broadcast\build_and_flash.ps1 -Role SOURCE -Port COM16
 
 # Flash SINK Left (ESP32-C6 on COM23)
-powershell -ExecutionPolicy Bypass -File apps\audioESP-NOW\build_and_flash.ps1 -Role SINK -Port COM23 -NodeId 23
+powershell -ExecutionPolicy Bypass -File apps\audio_ESP_NOW_broadcast\build_and_flash.ps1 -Role SINK -Port COM23 -NodeId 23
 
 # Flash SINK Right (ESP32-C6 on COM24)
-powershell -ExecutionPolicy Bypass -File apps\audioESP-NOW\build_and_flash.ps1 -Role SINK -Port COM24 -NodeId 24
+powershell -ExecutionPolicy Bypass -File apps\audio_ESP_NOW_broadcast\build_and_flash.ps1 -Role SINK -Port COM24 -NodeId 24
 ```

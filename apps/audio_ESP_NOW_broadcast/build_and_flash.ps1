@@ -68,7 +68,7 @@ if (Test-Path "C:\Users\stefa\OneDrive\Documents\ESP\v6.0.2\esp-idf\export.ps1")
 }
 
 # 2. Select target build dir and sdkconfig
-$appDir = "c:\Git_ble_audio\apps\audioESP-NOW"
+$appDir = $PSScriptRoot
 if ($Chip -eq "esp32s3") {
     $buildDir = "$appDir\build_s3"
     if (Test-Path "$appDir\sdkconfig.s3") {

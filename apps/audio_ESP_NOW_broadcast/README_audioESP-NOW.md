@@ -162,12 +162,12 @@ Use the provided PowerShell helper script [`build_and_flash.ps1`](build_and_flas
 
 ### Flash Node 21 as SOURCE
 ```powershell
-powershell -ExecutionPolicy Bypass -File apps\audioESP-NOW\build_and_flash.ps1 -Role SOURCE -Port COM21
+powershell -ExecutionPolicy Bypass -File apps\audio_ESP_NOW_broadcast\build_and_flash.ps1 -Role SOURCE -Port COM21
 ```
 
 ### Flash Node 23 as SINK
 ```powershell
-powershell -ExecutionPolicy Bypass -File apps\audioESP-NOW\build_and_flash.ps1 -Role SINK -Port COM23
+powershell -ExecutionPolicy Bypass -File apps\audio_ESP_NOW_broadcast\build_and_flash.ps1 -Role SINK -Port COM23
 ```
 
 ---
@@ -178,7 +178,7 @@ The Windows 11 streaming application captures, resamples, encodes, and transmits
 
 ### Usage Syntax
 ```powershell
-python apps\audioESP-NOW\pc_audio_streamer.py [OPTIONS]
+python apps\audio_ESP_NOW_broadcast\pc_audio_streamer.py [OPTIONS]
 ```
 
 ### Command-Line Options
@@ -203,19 +203,19 @@ python apps\audioESP-NOW\pc_audio_streamer.py [OPTIONS]
 #### 1. Stream Random MP3 Tracks from `data/mp3` (Default)
 Streams CD/Studio-quality audio at 48 kHz, 7.5 ms frame duration, Stereo:
 ```powershell
-& "C:\Git_ble_audio\venv_ble_audio\Scripts\python.exe" apps\audioESP-NOW\pc_audio_streamer.py --port COM121 --source mp3 --sample-rate 48000 --duration 7.5 --channels 2
+& "C:\Git_ble_audio\venv_ble_audio\Scripts\python.exe" apps\audio_ESP_NOW_broadcast\pc_audio_streamer.py --port COM121 --source mp3 --sample-rate 48000 --duration 7.5 --channels 2
 ```
 
 #### 2. Stream Live Windows 11 System Audio (WASAPI Loopback)
 Captures all desktop audio (YouTube, Spotify, games) and broadcasts wirelessly in real-time:
 ```powershell
-& "C:\Git_ble_audio\venv_ble_audio\Scripts\python.exe" apps\audioESP-NOW\pc_audio_streamer.py --port COM121 --source wasapi --sample-rate 48000 --duration 7.5 --channels 2
+& "C:\Git_ble_audio\venv_ble_audio\Scripts\python.exe" apps\audio_ESP_NOW_broadcast\pc_audio_streamer.py --port COM121 --source wasapi --sample-rate 48000 --duration 7.5 --channels 2
 ```
 
 #### 3. Stream 6-Channel Multi-Speaker Audio
 Streams 6 discrete audio channels at 32 kHz, 10.0 ms frame duration:
 ```powershell
-& "C:\Git_ble_audio\venv_ble_audio\Scripts\python.exe" apps\audioESP-NOW\pc_audio_streamer.py --port COM121 --source mp3 --sample-rate 32000 --duration 10.0 --channels 6
+& "C:\Git_ble_audio\venv_ble_audio\Scripts\python.exe" apps\audio_ESP_NOW_broadcast\pc_audio_streamer.py --port COM121 --source mp3 --sample-rate 32000 --duration 10.0 --channels 6
 ```
 
 ---
@@ -287,7 +287,7 @@ Key metrics to monitor:
 
 Run the full end-to-end hardware regression test suite using:
 ```powershell
-powershell -ExecutionPolicy Bypass -File apps\audioESP-NOW\run_automated_tests.ps1
+powershell -ExecutionPolicy Bypass -File apps\audio_ESP_NOW_broadcast\run_automated_tests.ps1
 ```
 
 This verifies magic word rejection, startup state transitions, stream re-connection, microsecond clock synchronization, packet drop recovery, 7.5 ms / 10.0 ms live transitions, and sustained audio streaming stability.

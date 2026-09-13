@@ -160,11 +160,11 @@ All benchmark test runners, audio codec engines, automation scripts, and plottin
 ### 7.1 Firmware Source Code
 * **Standalone Benchmark Application**: [`apps/lc3_benchmark/main/main.cpp`](../apps/lc3_benchmark/main/main.cpp)
 * **LC3 Benchmark Runner Engine**: [`apps/lc3_benchmark/main/lc3_benchmark_runner.cpp`](../apps/lc3_benchmark/main/lc3_benchmark_runner.cpp) / [`lc3_benchmark_runner.hpp`](../apps/lc3_benchmark/main/lc3_benchmark_runner.hpp)
-* **Integrated Interactive Benchmark (audioESP-NOW)**: [`apps/audioESP-NOW/main/lc3_benchmark.cpp`](../apps/audioESP-NOW/main/lc3_benchmark.cpp) / [`lc3_benchmark.hpp`](../apps/audioESP-NOW/main/lc3_benchmark.hpp)
+* **Integrated Interactive Benchmark (audioESP-NOW)**: [`apps/audio_ESP_NOW_broadcast/main/lc3_benchmark.cpp`](../apps/audio_ESP_NOW_broadcast/main/lc3_benchmark.cpp) / [`lc3_benchmark.hpp`](../apps/audio_ESP_NOW_broadcast/main/lc3_benchmark.hpp)
 
 ### 7.2 Codec Components
 * **Floating-Point Engine (`liblc3` with Hardware FPU)**: [`components/liblc3/`](../components/liblc3)
-* **Fixed-Point Engine Wrapper (`esp_audio_codec`)**: [`apps/audioESP-NOW/main/lc3_codec.cpp`](../apps/audioESP-NOW/main/lc3_codec.cpp) / [`lc3_codec.hpp`](../apps/audioESP-NOW/main/lc3_codec.hpp)
+* **Fixed-Point Engine Wrapper (`esp_audio_codec`)**: [`apps/audio_ESP_NOW_broadcast/main/lc3_codec.cpp`](../apps/audio_ESP_NOW_broadcast/main/lc3_codec.cpp) / [`lc3_codec.hpp`](../apps/audio_ESP_NOW_broadcast/main/lc3_codec.hpp)
 
 ### 7.3 Test Automation & Analysis Scripts
 * **ESP32-S3 Automation & Flash Runner**: [`tools/run_s3_benchmark.py`](../tools/run_s3_benchmark.py) / [`tools/flash_s3_node.py`](../tools/flash_s3_node.py)
