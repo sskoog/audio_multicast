@@ -2,4 +2,7 @@ dependencies:
   espressif/esp_audio_codec: '*'
   idf:
     version: '>=4.1.0'
-  espressif/esp_tinyusb: '*'
+  espressif/esp_tinyusb:
+    version: '*'
+    rules:
+      - if: "target in [esp32s2, esp32s3, esp32p4]"
