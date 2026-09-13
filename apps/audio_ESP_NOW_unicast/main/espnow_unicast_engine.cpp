@@ -7,6 +7,7 @@
 #include "esp_wifi.h"
 #include "nvs_flash.h"
 #include "esp_idf_version.h"
+#include "usb_audio.hpp"
 #include <cstring>
 #include <cmath>
 
@@ -1115,12 +1116,25 @@ void EspNowUnicastEngine::runSourceLoop() {
             continue;
         }
 
-        // ======================= MODE 2: CAST (Internal Test Tone) =======================
+        // ======================= MODE 2: CAST (Internal Test Tone or UAC) =======================
         size_t samples_per_frame = (m_telemetry.sample_rate * m_frame_duration_us) / 1000000;
         if (samples_per_frame > MAX_PCM_FRAME_SAMPLES) samples_per_frame = MAX_PCM_FRAME_SAMPLES;
 
-        if (m_tone_gen) m_tone_gen->generateFrame(pcm_ch0, samples_per_frame);
-        m_tone_gen_r.generateFrame(pcm_ch1, samples_per_frame);
+        size_t bytes_to_read = samples_per_frame * 2 * 2; // Stereo, 16-bit
+        uint8_t usb_pcm_buf[MAX_PCM_FRAME_SAMPLES * 4];
+        size_t bytes_read = usb_audio_read_pcm(usb_pcm_buf, bytes_to_read);
+
+        if (bytes_read == bytes_to_read) {
+            int16_t* interleaved = reinterpret_cast<int16_t*>(usb_pcm_buf);
+            for (size_t i = 0; i < samples_per_frame; i++) {
+                pcm_ch0[i] = interleaved[i * 2];
+                pcm_ch1[i] = interleaved[i * 2 + 1];
+            }
+        } else {
+            // Fallback to internal test tone if USB audio underruns or is inactive
+            if (m_tone_gen) m_tone_gen->generateFrame(pcm_ch0, samples_per_frame);
+            m_tone_gen_r.generateFrame(pcm_ch1, samples_per_frame);
+        }
 
         int64_t enc_start = esp_timer_get_time();
         size_t len_ch0 = 0, len_ch1 = 0;

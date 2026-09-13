@@ -10,6 +10,7 @@ idf_component_register(
         "espnow_unicast_engine.cpp"
         "diagnostics.cpp"
         "lc3_benchmark.cpp"
+        "usb_audio.cpp"
     INCLUDE_DIRS 
         "."
     REQUIRES 
@@ -30,6 +31,7 @@ idf_component_register(
         esp_netif
         lwip
         espressif__esp_audio_codec
+        espressif__esp_tinyusb
         liblc3
         vfs
         esp_partition

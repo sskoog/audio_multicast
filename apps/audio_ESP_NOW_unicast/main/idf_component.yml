@@ -1,4 +1,5 @@
 dependencies:
-  espressif/esp_audio_codec: "*"
+  espressif/esp_audio_codec: '*'
   idf:
-    version: ">=4.1.0"
+    version: '>=4.1.0'
+  espressif/esp_tinyusb: '*'

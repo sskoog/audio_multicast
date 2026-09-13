@@ -7,7 +7,7 @@
 #include "button.hpp"
 #include "diagnostics.hpp"
 #include "lc3_benchmark.hpp"
-
+#include "usb_audio.hpp"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_task_wdt.h"
@@ -15,9 +15,15 @@
 #include "esp_mac.h"
 #include "nvs_flash.h"
 #include "driver/uart.h"
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#include "tusb.h"
+#include "soc/rtc_cntl_reg.h"
+#endif
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
 #include "driver/usb_serial_jtag.h"
 #include "soc/usb_serial_jtag_struct.h"
 #include "hal/usb_serial_jtag_ll.h"
+#endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -76,6 +82,19 @@ static void print_console(const char* format, ...) {
     vprintf(format, args);
     va_end(args);
     fflush(stdout);
+
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+    if (tud_cdc_connected()) {
+        char buf[256];
+        va_start(args, format);
+        int len = vsnprintf(buf, sizeof(buf), format, args);
+        va_end(args);
+        if (len > 0) {
+            tud_cdc_write(buf, (uint32_t)len);
+            tud_cdc_write_flush();
+        }
+    }
+#endif
 }
 
 static bool parse_mac_address(const char* str, uint8_t* out_mac) {
@@ -369,6 +388,13 @@ static void handle_ascii_command(const char* raw_line) {
         print_console("[SYS] Rebooting system...\n");
         vTaskDelay(pdMS_TO_TICKS(100));
         esp_restart();
+    } else if (strcasecmp(line, "bootloader") == 0 || strcasecmp(line, "download") == 0) {
+        print_console("[SYS] Rebooting into ROM download bootloader (COM16)...\n");
+        vTaskDelay(pdMS_TO_TICKS(100));
+#if defined(RTC_CNTL_OPTION1_REG) && defined(RTC_CNTL_FORCE_DOWNLOAD_BOOT)
+        REG_WRITE(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
+#endif
+        esp_restart();
     } else {
         print_console("[UNKNOWN CMD] '%s'. Type 'help' for command list.\n", line);
     }
@@ -381,12 +407,22 @@ static void usb_serial_cli_task(void* pvParameters) {
     static uint8_t ring_buf[8192];
     size_t ring_len = 0;
 
-    // 1. Install USB-SERIAL-JTAG driver with 4KB buffer
-    usb_serial_jtag_driver_config_t jtag_cfg = {
-        .tx_buffer_size = 512,
-        .rx_buffer_size = 4096,
-    };
-    usb_serial_jtag_driver_install(&jtag_cfg);
+    const system_config_t* cfg = get_system_config();
+    bool is_s3_source = false;
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+    is_s3_source = (cfg && cfg->node_role == NODE_ROLE_SOURCE);
+#endif
+
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+    // On ESP32-S3 SOURCE, TinyUSB owns the USB OTG PHY. Do NOT install USB-Serial-JTAG driver!
+    if (!is_s3_source) {
+        usb_serial_jtag_driver_config_t jtag_cfg = {
+            .tx_buffer_size = 512,
+            .rx_buffer_size = 4096,
+        };
+        usb_serial_jtag_driver_install(&jtag_cfg);
+    }
+#endif
 
     // 2. Install UART0 driver (2MBaud)
     int uart_baud = 2000000;
@@ -406,14 +442,33 @@ static void usb_serial_cli_task(void* pvParameters) {
 
     uint8_t rx_buf[1024];
     while (true) {
-        // Read available bytes from USB-Serial-JTAG
-        int n_usb = usb_serial_jtag_read_bytes(rx_buf, sizeof(rx_buf), pdMS_TO_TICKS(1));
-        if (n_usb > 0) {
-            if (ring_len + n_usb <= sizeof(ring_buf)) {
-                memcpy(ring_buf + ring_len, rx_buf, n_usb);
-                ring_len += n_usb;
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+        if (!is_s3_source) {
+            // Read available bytes from USB-Serial-JTAG
+            int n_usb = usb_serial_jtag_read_bytes(rx_buf, sizeof(rx_buf), pdMS_TO_TICKS(1));
+            if (n_usb > 0) {
+                if (ring_len + n_usb <= sizeof(ring_buf)) {
+                    memcpy(ring_buf + ring_len, rx_buf, n_usb);
+                    ring_len += n_usb;
+                }
             }
         }
+#endif
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+        if (is_s3_source) {
+            // Read from TinyUSB CDC ACM
+            if (tud_cdc_available()) {
+                uint32_t n_cdc = tud_cdc_read(rx_buf, sizeof(rx_buf));
+                if (n_cdc > 0 && ring_len + n_cdc <= sizeof(ring_buf)) {
+                    memcpy(ring_buf + ring_len, rx_buf, n_cdc);
+                    ring_len += n_cdc;
+                }
+            }
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
+#else
+        vTaskDelay(pdMS_TO_TICKS(1));
+#endif
 
         // Read available bytes from UART0
         int n_uart = uart_read_bytes(UART_NUM_0, rx_buf, sizeof(rx_buf), 0);
@@ -544,6 +599,9 @@ extern "C" void app_main(void) {
         } else {
             s_unicast_engine->setTargetChannel(0);
         }
+    } else if (cfg->node_role == NODE_ROLE_SOURCE) {
+        // Initialize USB Audio + CDC for SOURCE
+        usb_audio_init();
     }
 
     s_unicast_engine->init(cfg->node_role, cfg->node_id, cfg->default_channel);

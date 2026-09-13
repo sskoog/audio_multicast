@@ -295,3 +295,67 @@ To optimize overall network airtime while delivering uncompromised bass response
 - `sublp <hz>`: Dynamically adjusts the Linkwitz-Riley cutoff frequency (20 Hz to 1,000 Hz) on the SOURCE in real time.
 - `ch 5`: Configures a SINK speaker node to receive and decode the Subwoofer channel.
 - `peer add <MAC> 5 [Name]`: Registers a dedicated Subwoofer peer node on the SOURCE.
+
+---
+
+## 10. USB Audio Class (UAC) Native Streaming Firmware
+
+To eliminate scheduling jitter and UART bottlenecks associated with Python-based host streaming scripts, the SOURCE node firmware now fully supports acting as a native **USB Audio Class 1.0 (UAC1)** Speaker device when plugged into a PC.
+
+```
++---------------------------------------------------------------------------------------------+
+|                                  UAC1 Native Audio Streaming Pipeline                       |
+|                                                                                             |
+|   [Windows / macOS / Linux Host PC]                                                         |
+|   (Recognizes ESP32-S3 as a 48kHz Stereo USB Speaker)                                       |
+|               |                                                                             |
+|               v (Isochronous USB Audio Data)                                                |
+|                                                                                             |
+|   +---------------------------------------+                                                 |
+|   | ESP32-S3 SOURCE Node                  |                                                 |
+|   |                                       |                                                 |
+|   | [TinyUSB UAC1 Endpoint]               |                                                 |
+|   |       |                               |                                                 |
+|   |       v (48kHz 16-bit PCM Stream)     |                                                 |
+|   | [FreeRTOS Stream Buffer]              |                                                 |
+|   |       |                               |                                                 |
+|   |       v                               |                                                 |
+|   | [CAST Mode: usb_audio_read_pcm()]     |                                                 |
+|   |       |                               |                                                 |
+|   |       v (Synchronous 10ms Blocks)     |                                                 |
+|   | [LC3 Dual-Core Encoders]              |                                                 |
+|   |       |                               |                                                 |
+|   |       v                               |                                                 |
+|   | [ESP-NOW Unicast Dispatcher]          |                                                 |
+|   +---------------------------------------+                                                 |
+|               |                                                                             |
+|               v (Wireless 802.11 LC3 Frames)                                                |
+|       [SINK Nodes]                                                                          |
++---------------------------------------------------------------------------------------------+
+```
+
+### 10.1 Advantages over Python Serial Streamer
+- **Zero OS Scheduling Jitter**: Traditional Python serial transmission suffers from non-real-time OS thread suspension. UAC relies on strictly timed USB isochronous hardware endpoints, guaranteeing flawless 10 ms real-time delivery.
+- **Driverless Plug-and-Play**: The SOURCE node enumerates as a standard USB audio interface requiring no custom drivers or Python scripts.
+- **Combined CDC Interface**: A composite USB device profile is utilized, presenting both the Audio Speaker (UAC1) interface and a Virtual Serial Port (CDC). This allows the standard diagnostic CLI to remain accessible simultaneously alongside the audio stream.
+- **Automatic Fallback**: If the USB audio stream stops or underruns, the engine automatically falls back to generating a continuous internal test tone to maintain the 802.11 broadcast rhythm until the USB stream resumes.
+
+### 10.2 Hardware Topology & COM Port Mappings (Node 16)
+On the Seeed Studio XIAO ESP32-S3, the physical USB data lines (GPIO 19/20) are shared between the silicon ROM USB-Serial-JTAG controller and the internal USB OTG PHY:
+- **Flashing / Download Mode (`COM16`)**:
+  - Activated when holding the `B` (Boot) button and tapping `R` (Reset), via the `bootloader` CLI command, or via 1200-baud touch reset.
+  - Enumerates as `USB\VID_303A&PID_1001` (ESP32-S3 ROM Bootloader) on **COM16**.
+  - Flashed using `esptool.py` or the automated script `flash_s3.ps1`.
+- **Runtime Application Mode (`COM116` + UAC1 Speaker)**:
+  - After flashing, pressing the `R` button boots into flash firmware.
+  - TinyUSB initializes the composite USB device (`USB\VID_303A&PID_4002`).
+  - CDC Serial port enumerates on secondary port **COM116** (mapped in Device Manager).
+  - Audio interface enumerates as a 48 kHz stereo USB speaker (`Node16 audio`).
+
+### 10.3 Windows Audio Endpoint Configuration
+- **Default Device**: In Windows Sound Settings, set `Speakers (Node16 audio)` as the Default Playback Device.
+- **Sample Rate**: The UAC1 descriptor advertises 48,000 Hz, 16-bit stereo PCM.
+- **Renaming the Audio Endpoint**:
+  - If Windows caches the generic device name, open the classic Sound Control Panel (`mmsys.cpl`).
+  - Under the **Playback** tab, double-click the speaker device, navigate to the **General** tab, and enter `Node16 audio`. Alternatively, use Windows Settings -> System -> Sound -> Output Properties -> Rename.
+
