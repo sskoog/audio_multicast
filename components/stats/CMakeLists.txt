@@ -1,0 +1,12 @@
+idf_component_register(
+    SRCS
+        "src/stats.cpp"
+        "src/stats_domain.cpp"
+        "src/stats_test.cpp"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        freertos
+        esp_timer
+        log
+)

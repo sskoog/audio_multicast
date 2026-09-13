@@ -13,6 +13,7 @@ set(srcs
 )
 
 set(requires
+    stats
     audio_metering
     nvs_flash
     driver

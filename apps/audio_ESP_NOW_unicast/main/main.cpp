@@ -9,6 +9,7 @@
 #include "diagnostics.hpp"
 #include "lc3_benchmark.hpp"
 #include "usb_audio.hpp"
+#include "stats_test.hpp"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_task_wdt.h"
@@ -617,6 +618,9 @@ extern "C" void app_main(void) {
 
     // 6. Benchmark Suite
     s_bench_suite = new Benchmark::Lc3BenchmarkSuite(s_lc3_codec);
+
+    // Run stats component self-test suite
+    run_stats_self_test();
 
     // 7. Start Background CLI Task
     xTaskCreatePinnedToCore(usb_serial_cli_task, "cli_task", 4096, nullptr, 2, nullptr, 0);

@@ -86,18 +86,34 @@ if (Test-Path "C:\Users\stefa\OneDrive\Documents\ESP\v6.0.2\esp-idf\export.ps1")
     . "C:\Users\stefa\OneDrive\Documents\ESP\v6.0.2\export.ps1"
 }
 
+# 1.5 Target sdkconfig isolation (Rule 01_esp32_specific.md)
+if ($Chip -eq "esp32s3") {
+    if (Test-Path "$appDir\sdkconfig.s3") {
+        Copy-Item "$appDir\sdkconfig.s3" "$appDir\sdkconfig" -Force
+    } elseif (Test-Path "$appDir\sdkconfig") {
+        Remove-Item "$appDir\sdkconfig" -Force
+    }
+} else {
+    if (Test-Path "$appDir\sdkconfig.c6") {
+        Copy-Item "$appDir\sdkconfig.c6" "$appDir\sdkconfig" -Force
+    }
+}
+
 # 2. Compile Firmware (unless -OnlyFlash)
 if (-not $OnlyFlash) {
     Write-Host "[BUILD] Compiling firmware for $Role ($Chip) in $buildDir..." -ForegroundColor Yellow
-    if (-not (Test-Path $buildDir)) {
-        Push-Location $appDir
-        try {
-            & idf.py -B "$buildDir" -D "IDF_TARGET=$Chip" build
-        } finally {
-            Pop-Location
+    Push-Location $appDir
+    try {
+        & idf.py -B "$buildDir" -D "IDF_TARGET=$Chip" build
+        if ($LASTEXITCODE -eq 0) {
+            if ($Chip -eq "esp32s3") {
+                Copy-Item "$appDir\sdkconfig" "$appDir\sdkconfig.s3" -Force
+            } else {
+                Copy-Item "$appDir\sdkconfig" "$appDir\sdkconfig.c6" -Force
+            }
         }
-    } else {
-        & ninja -C "$buildDir"
+    } finally {
+        Pop-Location
     }
 
     if ($LASTEXITCODE -ne 0) {
