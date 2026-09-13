@@ -45,7 +45,6 @@ static const char* getState5Char(AudioNet::NetworkState state) {
         case AudioNet::NetworkState::PREFILL:      return "FILL ";
         case AudioNet::NetworkState::STREAM:       return "STRM ";
         case AudioNet::NetworkState::CAST:         return "CAST ";
-        case AudioNet::NetworkState::PC_STREAM:    return "PC_ST";
         default:                                   return "UNKWN";
     }
 }
@@ -145,7 +144,6 @@ void SystemDiagnostics::tick() {
 
         bool is_audio_active = (m_unicast_engine.getState() == AudioNet::NetworkState::STREAM ||
                                 m_unicast_engine.getState() == AudioNet::NetworkState::CAST ||
-                                m_unicast_engine.getState() == AudioNet::NetworkState::PC_STREAM ||
                                 m_unicast_engine.getState() == AudioNet::NetworkState::PREFILL);
 
         float rms_db = is_audio_active ? m_unicast_engine.getAudioFrameRMS_dBFS() : -INFINITY;
@@ -237,13 +235,7 @@ void SystemDiagnostics::tick() {
             // SOURCE specifics: Node status string (e.g. '1OOOO1' for 6 slots: Ch 0..5)
             m_unicast_engine.getNodeStatusString(role_col_str, sizeof(role_col_str));
 
-            size_t usb_q_len = m_unicast_engine.getUsbQueueLength();
-            char usb_q_str[8];
-            snprintf(usb_q_str, sizeof(usb_q_str), "%3u", (unsigned int)usb_q_len);
-
-            uint32_t usb_ovr = m_unicast_engine.getUsbOverrunCount();
-            char usb_ovr_str[8];
-            snprintf(usb_ovr_str, sizeof(usb_ovr_str), "%3lu", (unsigned long)usb_ovr);
+            const char* input_str = m_unicast_engine.isToneTestMode() ? "TONE  " : "UAC2  ";
 
             uint32_t raw_tx_pkts = m_unicast_engine.getAndResetTxPacketsSec();
             uint32_t tx_pkts_sec = static_cast<uint32_t>((static_cast<uint64_t>(raw_tx_pkts) * 1000000ULL) / elapsed_us);
@@ -254,27 +246,35 @@ void SystemDiagnostics::tick() {
                 snprintf(tx_pkts_str, sizeof(tx_pkts_str), "%4lu", (unsigned long)tx_pkts_sec);
             }
 
-            uint32_t acks_total = m_unicast_engine.getTxAcksTotal();
-            uint32_t ack_fails = m_unicast_engine.getTxAckFailsTotal();
-            uint32_t total_attempts = acks_total + ack_fails;
+            uint32_t acks_sec = m_unicast_engine.getAndResetTxAcksSec();
+            uint32_t ack_fails_sec = m_unicast_engine.getAndResetTxAckFailsSec();
+            uint32_t attempts_sec = acks_sec + ack_fails_sec;
             char ack_pct_str[8];
-            if (total_attempts > 0) {
-                float ack_pct = (static_cast<float>(acks_total) * 100.0f) / static_cast<float>(total_attempts);
+            if (attempts_sec > 0) {
+                float ack_pct = (static_cast<float>(acks_sec) * 100.0f) / static_cast<float>(attempts_sec);
                 snprintf(ack_pct_str, sizeof(ack_pct_str), "%3.0f%%", ack_pct);
+            } else if (!is_audio_active) {
+                snprintf(ack_pct_str, sizeof(ack_pct_str), "   -");
             } else {
                 snprintf(ack_pct_str, sizeof(ack_pct_str), "100%%");
             }
 
             char ack_fails_str[8];
-            snprintf(ack_fails_str, sizeof(ack_fails_str), "%3lu", (unsigned long)ack_fails);
+            snprintf(ack_fails_str, sizeof(ack_fails_str), "%4lu", (unsigned long)ack_fails_sec);
 
-            uint32_t usb_udr = m_unicast_engine.getUsbUnderrunCount();
-            char usb_udr_str[8];
-            snprintf(usb_udr_str, sizeof(usb_udr_str), "%3lu", (unsigned long)usb_udr);
+            uint32_t tx_pkts_total = m_unicast_engine.getTxPacketsTotal();
+            char tx_tot_str[8];
+            if (tx_pkts_total >= 1000000) {
+                snprintf(tx_tot_str, sizeof(tx_tot_str), "%4.1fM", tx_pkts_total / 1000000.0f);
+            } else if (tx_pkts_total >= 1000) {
+                snprintf(tx_tot_str, sizeof(tx_tot_str), "%4luK", (unsigned long)(tx_pkts_total / 1000));
+            } else {
+                snprintf(tx_tot_str, sizeof(tx_tot_str), "%4lu ", (unsigned long)tx_pkts_total);
+            }
 
             snprintf(mid_block, sizeof(mid_block),
-                     " %3.3s  %3.3s   %4.4s  %4.4s  %3.3s  %3.3s ",
-                     usb_q_str, usb_ovr_str, tx_pkts_str, ack_pct_str, ack_fails_str, usb_udr_str);
+                     "  %-6.6s    %4.4s  %4.4s  %4.4s  %5.5s ",
+                     input_str, tx_pkts_str, ack_pct_str, ack_fails_str, tx_tot_str);
         } else {
             // SINK specifics: Target Channel string
             snprintf(role_col_str, sizeof(role_col_str), "%-6.6s", getChannelStr(m_unicast_engine.getTargetChannel()));
@@ -393,8 +393,8 @@ void SystemDiagnostics::tick() {
         if ((m_header_counter % 10) == 0) {
             print_console("%s\n", border_line);
             if (cfg->node_role == NODE_ROLE_SOURCE) {
-                print_console("|    CPU      | STATE | NODES  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | USB_FIFO     PKTS  ACK%%  FAIL UDR |         TIME & SYNCHRONIZATION (ms)    |\n");
-                print_console("|  %%   C  MHz |       | 012345 | GAIN Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   | len  OVR      1/s   tot   tot tot |  Local  Master  EMA_offs RB_med RB_rng |\n");
+                print_console("|    CPU      | STATE | NODES  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  |  SOURCE      PKTS  ACK%%  FAIL   TOT  |         TIME & SYNCHRONIZATION (ms)    |\n");
+                print_console("|  %%   C  MHz |       | 012345 | GAIN Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  INPUT        1/s   1/s   1/s  pkts   |  Local  Master  EMA_offs RB_med RB_rng |\n");
             } else {
                 print_console("|    CPU      | STATE |  CHAN  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | AMP dB   PKTS  PLC  DMA   FIFO    |         TIME & SYNCHRONIZATION (ms)    |\n");
                 print_console("|  %%   C  MHz |       |        | RSSI Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  SW  HW   1/s  tot  UDR  UDR  OVR |  Local  Master  EMA_offs RB_med RB_rng |\n");

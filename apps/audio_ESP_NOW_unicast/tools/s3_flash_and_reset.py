@@ -111,6 +111,11 @@ def wait_for_bootloader_port(timeout=60):
     return None
 
 
+RTC_CNTL_WDTCONFIG0_REG = 0x60008098
+RTC_CNTL_WDTCONFIG1_REG = 0x6000809C
+RTC_CNTL_WDTWPROTECT_REG = 0x600080B0
+
+
 def execute_watchdog_reset(esp):
     """Execute hands-free hardware reset on ESP32-S3 via RTC Watchdog Timer."""
     print("[RESET] Clearing RTC_CNTL_FORCE_DOWNLOAD_BOOT flag (0x6000812C)...")
@@ -120,6 +125,18 @@ def execute_watchdog_reset(esp):
         print(f"[DEBUG] RTC flag clear: {e}")
 
     print("[RESET] Arming ESP32-S3 hardware RTC Watchdog for system reset...")
+    try:
+        # Unlock RTC WDT write protection
+        esp.write_reg(RTC_CNTL_WDTWPROTECT_REG, 0x50D83AA1)
+        # Set short timeout (~50 us)
+        esp.write_reg(RTC_CNTL_WDTCONFIG1_REG, 2000)
+        # Arm RTC WDT with system reset action (stage 0 = reset system)
+        esp.write_reg(RTC_CNTL_WDTCONFIG0_REG, 0xD0000102)
+        # Re-lock write protection
+        esp.write_reg(RTC_CNTL_WDTWPROTECT_REG, 0)
+    except Exception as e:
+        print(f"[DEBUG] RTC WDT arm error: {e}")
+
     try:
         esp.hard_reset(using_usb=False)
     except Exception:

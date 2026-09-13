@@ -67,11 +67,7 @@ Write-Host " Audio Unicast: $Role (Chip: $Chip, Node $NodeId on $targetPort)" -F
 Write-Host "==========================================================" -ForegroundColor Cyan
 
 # 1. Environment Setup (ESP-IDF v6.0.2)
-if (Test-Path "C:\Users\stefa\OneDrive\Documents\ESP\.esptools") {
-    $env:IDF_TOOLS_PATH = "C:\Users\stefa\OneDrive\Documents\ESP\.esptools"
-} else {
-    $env:IDF_TOOLS_PATH = "C:\Users\stefa\.espressif"
-}
+$env:IDF_TOOLS_PATH = "C:\Users\stefa\.espressif"
 
 if (Test-Path "$env:IDF_TOOLS_PATH\python_env\idf6.0_py3.13_env") {
     $env:IDF_PYTHON_ENV_PATH = "$env:IDF_TOOLS_PATH\python_env\idf6.0_py3.13_env"

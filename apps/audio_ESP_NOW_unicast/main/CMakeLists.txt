@@ -9,7 +9,7 @@ set(srcs
     "button.cpp"
     "espnow_unicast_engine.cpp"
     "diagnostics.cpp"
-    "lc3_benchmark.cpp"
+    # "lc3_benchmark.cpp" (Disabled)
 )
 
 set(requires

@@ -28,8 +28,7 @@ enum class NetworkState {
     SCANNING,
     PREFILL,
     STREAM,
-    CAST,       // SOURCE actively multicasting/unicasting internal test tone
-    PC_STREAM   // SOURCE actively streaming LC3 packets from Host PC / Bumble
+    CAST        // SOURCE actively multicasting/unicasting audio stream
 };
 
 enum class PeerStatus : uint8_t {
@@ -58,6 +57,8 @@ struct SinkPeerConfig {
     uint32_t   ack_failures;
     uint32_t   consecutive_ack_fails;  // Circuit breaker: track consecutive missing ACKs
     int8_t     last_rssi;
+    uint32_t   last_tx_duration_us;    // Measured hardware airtime + ACK turnaround (us)
+    uint32_t   ema_tx_duration_us;     // Smoothed airtime quality metric (us) for priority sorting
 };
 
 #pragma pack(push, 1)
@@ -79,69 +80,8 @@ typedef struct {
     };
 } vsaf_packet_t;
 typedef vsaf_packet_t vsaf_unicast_header_t;
-
-// USB LC3 Ingest Header (10 Bytes)
-typedef struct {
-    uint16_t magic;           // 0x1337 (VSAF USB Magic)
-    uint8_t  seq;             // Sequence number (0..255)
-    uint8_t  channel_id;      // Target Channel: 0 = Left, 1 = Right, 5 = Subwoofer
-    uint8_t  octets;          // LC3 payload length (e.g. 120 for Left @ 48kHz, 80 for Sub @ 8kHz)
-    uint8_t  flags;           // Bit 0..2: SR code, Bit 3: Dur, Bit 5..7: Pres delay code
-    uint32_t master_time_us;  // Master timestamp in microseconds
-} vsaf_usb_header_t;
 #pragma pack(pop)
 
-struct UsbLc3Frame {
-    uint8_t  channel_id;
-    uint8_t  seq;
-    uint8_t  octets;
-    uint16_t flags;
-    uint32_t master_time_us;
-    uint8_t  data[MAX_LC3_FRAME_OCTETS];
-};
-
-#define USB_LC3_FIFO_CAPACITY 8
-
-class UsbLc3Fifo {
-public:
-    UsbLc3Fifo() : m_head(0), m_tail(0), m_count(0) {}
-
-    bool push(const UsbLc3Frame& frame) {
-        if (m_count >= USB_LC3_FIFO_CAPACITY) {
-            // Drop oldest frame on overrun to preserve live temporal alignment
-            m_tail = (m_tail + 1) % USB_LC3_FIFO_CAPACITY;
-            m_count--;
-        }
-        m_frames[m_head] = frame;
-        m_head = (m_head + 1) % USB_LC3_FIFO_CAPACITY;
-        m_count++;
-        return true;
-    }
-
-    bool pop(UsbLc3Frame& out_frame) {
-        if (m_count == 0) {
-            return false;
-        }
-        out_frame = m_frames[m_tail];
-        m_tail = (m_tail + 1) % USB_LC3_FIFO_CAPACITY;
-        m_count--;
-        return true;
-    }
-
-    void clear() {
-        m_head = 0;
-        m_tail = 0;
-        m_count = 0;
-    }
-
-    size_t count() const { return m_count; }
-
-private:
-    UsbLc3Frame m_frames[USB_LC3_FIFO_CAPACITY];
-    size_t      m_head;
-    size_t      m_tail;
-    size_t      m_count;
-};
 
 struct StreamTelemetry {
     uint32_t sample_rate = CONFIG_ESPNOW_SAMPLE_RATE_HZ;
@@ -294,20 +234,6 @@ public:
     }
     uint8_t getTargetChannel() const { return m_target_channel; }
 
-    // Real-Time USB LC3 Audio Stream Ingestion (SOURCE node)
-    void processUsbVsafPacket(const uint8_t* data, size_t len);
-    bool isUsbStreamActive() const { return m_usb_stream_active.load(std::memory_order_relaxed); }
-    uint32_t getUsbUnderrunCount() const { return m_usb_underrun_count.load(std::memory_order_relaxed); }
-    uint32_t getUsbOverrunCount() const { return m_usb_overrun_count.load(std::memory_order_relaxed); }
-    uint32_t getAndResetUsbUnderrunCount() { return m_usb_underrun_count.exchange(0, std::memory_order_relaxed); }
-    uint32_t getAndResetUsbOverrunCount() { return m_usb_overrun_count.exchange(0, std::memory_order_relaxed); }
-    size_t   getUsbQueueLength() const {
-        size_t total = 0;
-        for (int i = 0; i < MAX_UNICAST_SINKS; i++) {
-            total += m_usb_lc3_fifo[i].count();
-        }
-        return total;
-    }
 
     // Packet Callbacks
     void onPacketSent(const uint8_t* mac_addr, esp_now_send_status_t status);
@@ -339,6 +265,10 @@ public:
     uint32_t getAndResetTxPacketsSec() { return m_tx_packets_sec.exchange(0, std::memory_order_relaxed); }
     uint32_t getTxAcksTotal() const { return m_tx_acks_total.load(std::memory_order_relaxed); }
     uint32_t getTxAckFailsTotal() const { return m_tx_ack_fails_total.load(std::memory_order_relaxed); }
+    uint32_t getTxAcksSec() const { return m_tx_acks_sec.load(std::memory_order_relaxed); }
+    uint32_t getTxAckFailsSec() const { return m_tx_ack_fails_sec.load(std::memory_order_relaxed); }
+    uint32_t getAndResetTxAcksSec() { return m_tx_acks_sec.exchange(0, std::memory_order_relaxed); }
+    uint32_t getAndResetTxAckFailsSec() { return m_tx_ack_fails_sec.exchange(0, std::memory_order_relaxed); }
 
     uint32_t getRxPacketsTotal() const { return m_rx_packets_total.load(std::memory_order_relaxed); }
     uint32_t getAndResetRxPacketsSec() { return m_rx_packets_sec.exchange(0, std::memory_order_relaxed); }
@@ -444,19 +374,15 @@ private:
     int                        m_peer_count = 0;
     portMUX_TYPE               m_peer_mux = portMUX_INITIALIZER_UNLOCKED;
 
-    // USB LC3 Ingest State (SOURCE node)
+    // Stereo / Multi-channel Audio State (SOURCE node)
     std::atomic<bool>          m_is_stereo{true};
-    std::atomic<bool>          m_usb_stream_active{false};
-    std::atomic<int64_t>       m_last_usb_packet_time_us{0};
-    std::atomic<uint32_t>      m_usb_underrun_count{0};
-    std::atomic<uint32_t>      m_usb_overrun_count{0};
-    UsbLc3Fifo                 m_usb_lc3_fifo[MAX_UNICAST_SINKS];
-    portMUX_TYPE               m_usb_fifo_mux = portMUX_INITIALIZER_UNLOCKED;
 
     std::atomic<uint32_t>      m_tx_packets_total{0};
     std::atomic<uint32_t>      m_tx_packets_sec{0};
     std::atomic<uint32_t>      m_tx_acks_total{0};
     std::atomic<uint32_t>      m_tx_ack_fails_total{0};
+    std::atomic<uint32_t>      m_tx_acks_sec{0};
+    std::atomic<uint32_t>      m_tx_ack_fails_sec{0};
 
     std::atomic<uint32_t>      m_rx_packets_total{0};
     std::atomic<uint32_t>      m_rx_packets_sec{0};
@@ -464,8 +390,8 @@ private:
     std::atomic<uint32_t>      m_fifo_underrun{0};
     std::atomic<int8_t>        m_last_rx_rssi{-127};
     std::atomic<uint8_t>       m_last_rx_rate{0};
-    wifi_phy_mode_t            m_tx_phy_mode = WIFI_PHY_MODE_HT20;
-    wifi_phy_rate_t            m_tx_phy_rate = WIFI_PHY_RATE_MCS1_LGI; // 13.0 Mbps default
+    wifi_phy_mode_t            m_tx_phy_mode = WIFI_PHY_MODE_11G;
+    wifi_phy_rate_t            m_tx_phy_rate = WIFI_PHY_RATE_24M; // 24.0 Mbps locked OFDM (Strategy C)
 };
 
 } // namespace AudioNet

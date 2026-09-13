@@ -126,6 +126,10 @@ static void lc3_encoder_worker_core0(void* pvParameters) {
 }
 #endif
 
+// Wi-Fi TX Completion Synchronization Semaphore
+static SemaphoreHandle_t s_tx_done_sem = nullptr;
+static StaticSemaphore_t s_tx_done_sem_buf;
+
 // Thread-safe SPSC FIFO for SINK LC3 frames
 struct Lc3RxFrame {
     uint8_t  data[MAX_LC3_FRAME_OCTETS];
@@ -310,6 +314,14 @@ esp_err_t EspNowUnicastEngine::init(uint8_t role, uint8_t node_id, uint8_t wifi_
         // Lock to specified Wi-Fi channel
         ESP_ERROR_CHECK(esp_wifi_set_channel(wifi_channel, WIFI_SECOND_CHAN_NONE));
 
+        // Standard 2.4 GHz protocols (11b/g/n on S3, 11b/g/n/ax on C6).
+        // Rate locking to 24 Mbps OFDM is enforced via esp_wifi_config_espnow_rate and peer_info.rate
+#if defined(CONFIG_IDF_TARGET_ESP32C6)
+        ESP_ERROR_CHECK(esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N | WIFI_PROTOCOL_11AX));
+#else
+        ESP_ERROR_CHECK(esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N));
+#endif
+
         // Set transmit power (+9.0 dBm = 36 * 0.25 dBm)
         esp_wifi_set_max_tx_power(36);
 
@@ -327,8 +339,8 @@ esp_err_t EspNowUnicastEngine::init(uint8_t role, uint8_t node_id, uint8_t wifi_
         bcast_peer.encrypt = false;
         esp_now_add_peer(&bcast_peer);
 
-        // Configure default PHY rate (HT20 MCS1 = 13.0 Mbps)
-        setWifiPhyRate(WIFI_PHY_MODE_HT20, WIFI_PHY_RATE_MCS1_LGI);
+        // Configure default locked PHY rate (24.0 Mbps OFDM: ~100 us airtime, high RF robustness)
+        setWifiPhyRate(WIFI_PHY_MODE_11G, WIFI_PHY_RATE_24M);
 
         m_wifi_initialized = true;
     }
@@ -359,6 +371,9 @@ esp_err_t EspNowUnicastEngine::start() {
     if (m_audio_task_running) return ESP_OK;
 
     m_audio_task_running = true;
+    if (!s_tx_done_sem) {
+        s_tx_done_sem = xSemaphoreCreateBinaryStatic(&s_tx_done_sem_buf);
+    }
     uint32_t stack_size = 16384;
     UBaseType_t priority = 5;
     BaseType_t core_id = (m_node_role == NODE_ROLE_SOURCE) ? 1 : 0;
@@ -423,15 +438,27 @@ void EspNowUnicastEngine::sendVolumeCommand(uint8_t channel_id, uint8_t vol_u8, 
     vol_pkt.ctrl.volume_u8 = vol_u8;
     vol_pkt.ctrl.flags = instant ? 0x01 : 0x00;
 
+    uint8_t target_macs[MAX_UNICAST_SINKS][6];
+    int target_count = 0;
+
     taskENTER_CRITICAL(&m_peer_mux);
     for (int i = 0; i < m_peer_count; i++) {
         if (m_peers[i].is_enabled && m_peers[i].status == PeerStatus::ONLINE) {
             if (channel_id == 0xFF || m_peers[i].channel_id == channel_id) {
-                esp_now_send(m_peers[i].mac, reinterpret_cast<const uint8_t*>(&vol_pkt), sizeof(vol_pkt));
+                if (target_count < MAX_UNICAST_SINKS) {
+                    memcpy(target_macs[target_count++], m_peers[i].mac, 6);
+                }
             }
         }
     }
     taskEXIT_CRITICAL(&m_peer_mux);
+
+    for (int i = 0; i < target_count; i++) {
+        if (s_tx_done_sem) xSemaphoreTake(s_tx_done_sem, 0);
+        if (esp_now_send(target_macs[i], reinterpret_cast<const uint8_t*>(&vol_pkt), sizeof(vol_pkt)) == ESP_OK) {
+            if (s_tx_done_sem) xSemaphoreTake(s_tx_done_sem, pdMS_TO_TICKS(3));
+        }
+    }
 
     float db = volume_u8_to_db(vol_u8);
     ESP_LOGI(TAG, "SOURCE dispatched VOLUME_SET -> Channel %u : %u/255 (%+5.1f dB)%s",
@@ -469,6 +496,8 @@ bool EspNowUnicastEngine::addPeer(const uint8_t* mac, uint8_t channel_id, const 
     m_peers[idx].ack_failures = 0;
     m_peers[idx].consecutive_ack_fails = 0;
     m_peers[idx].last_rssi = -127;
+    m_peers[idx].last_tx_duration_us = 200;
+    m_peers[idx].ema_tx_duration_us = 200;
     taskEXIT_CRITICAL(&m_peer_mux);
 
     if (m_wifi_initialized) {
@@ -498,17 +527,10 @@ bool EspNowUnicastEngine::addOrUpdatePeerFromHello(const uint8_t* mac, uint8_t c
             m_peers[i].channel_id = channel_id;
             m_peers[i].status = PeerStatus::ONLINE;
             m_peers[i].is_enabled = true;
-            m_peers[i].consecutive_ack_fails = 0;
             if (m_peers[i].session_start_time_us == 0) {
                 m_peers[i].session_start_time_us = esp_timer_get_time();
             }
             taskEXIT_CRITICAL(&m_peer_mux);
-
-            if (channel_id < MAX_UNICAST_SINKS) {
-                taskENTER_CRITICAL(&m_usb_fifo_mux);
-                m_usb_lc3_fifo[channel_id].clear();
-                taskEXIT_CRITICAL(&m_usb_fifo_mux);
-            }
             return true;
         }
     }
@@ -529,6 +551,8 @@ bool EspNowUnicastEngine::addOrUpdatePeerFromHello(const uint8_t* mac, uint8_t c
     m_peers[idx].ack_failures = 0;
     m_peers[idx].consecutive_ack_fails = 0;
     m_peers[idx].last_rssi = -127;
+    m_peers[idx].last_tx_duration_us = 200;
+    m_peers[idx].ema_tx_duration_us = 200;
     taskEXIT_CRITICAL(&m_peer_mux);
 
     if (m_wifi_initialized) {
@@ -641,6 +665,8 @@ void EspNowUnicastEngine::resetPeerStats() {
     m_tx_packets_total.store(0, std::memory_order_relaxed);
     m_tx_acks_total.store(0, std::memory_order_relaxed);
     m_tx_ack_fails_total.store(0, std::memory_order_relaxed);
+    m_tx_acks_sec.store(0, std::memory_order_relaxed);
+    m_tx_ack_fails_sec.store(0, std::memory_order_relaxed);
 }
 
 esp_err_t EspNowUnicastEngine::setSampleRate(uint32_t sample_rate_hz) {
@@ -699,20 +725,35 @@ esp_err_t EspNowUnicastEngine::setWifiPhyRate(wifi_phy_mode_t phymode, wifi_phy_
             .ersu = false,
             .dcm = false
         };
+        // Lock broadcast peer rate
+        const uint8_t bcast_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+        esp_now_set_peer_rate_config(bcast_mac, &rate_cfg);
+
+        taskENTER_CRITICAL(&m_peer_mux);
         for (int i = 0; i < m_peer_count; i++) {
             if (m_peers[i].is_enabled) {
                 esp_now_set_peer_rate_config(m_peers[i].mac, &rate_cfg);
             }
         }
+        taskEXIT_CRITICAL(&m_peer_mux);
         esp_wifi_config_80211_tx_rate(WIFI_IF_STA, rate);
     }
     return ESP_OK;
 }
 
 void EspNowUnicastEngine::onPacketSent(const uint8_t* mac_addr, esp_now_send_status_t status) {
+    if (s_tx_done_sem) {
+        xSemaphoreGive(s_tx_done_sem);
+    }
+
     if (!mac_addr) {
-        if (status == ESP_NOW_SEND_SUCCESS) m_tx_acks_total.fetch_add(1, std::memory_order_relaxed);
-        else m_tx_ack_fails_total.fetch_add(1, std::memory_order_relaxed);
+        if (status == ESP_NOW_SEND_SUCCESS) {
+            m_tx_acks_total.fetch_add(1, std::memory_order_relaxed);
+            m_tx_acks_sec.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            m_tx_ack_fails_total.fetch_add(1, std::memory_order_relaxed);
+            m_tx_ack_fails_sec.fetch_add(1, std::memory_order_relaxed);
+        }
         return;
     }
     taskENTER_CRITICAL(&m_peer_mux);
@@ -726,14 +767,19 @@ void EspNowUnicastEngine::onPacketSent(const uint8_t* mac_addr, esp_now_send_sta
                     m_peers[i].status = PeerStatus::ONLINE;
                 }
                 m_tx_acks_total.fetch_add(1, std::memory_order_relaxed);
+                m_tx_acks_sec.fetch_add(1, std::memory_order_relaxed);
             } else {
                 m_peers[i].ack_failures++;
                 m_peers[i].consecutive_ack_fails++;
-                // If 5 consecutive ACKs are missed (50 ms), trip circuit breaker to OFFLINE (0 Hz transmission)
-                if (m_peers[i].consecutive_ack_fails >= 5) {
+                // Immediate circuit breaker: Trip to OFFLINE on the very first missing ACK!
+                // This guarantees that a dead or deeply faded peer is immediately removed
+                // from the next 10 ms streaming cycle so it cannot steal radio airtime.
+                if (m_peers[i].consecutive_ack_fails >= 1) {
                     m_peers[i].status = PeerStatus::OFFLINE;
+                    m_peers[i].ema_tx_duration_us = 20000; // Heavily demote priority sort
                 }
                 m_tx_ack_fails_total.fetch_add(1, std::memory_order_relaxed);
+                m_tx_ack_fails_sec.fetch_add(1, std::memory_order_relaxed);
             }
             break;
         }
@@ -811,48 +857,8 @@ void EspNowUnicastEngine::onPacketReceived(const uint8_t* mac_addr, const uint8_
 }
 
 
-void EspNowUnicastEngine::processUsbVsafPacket(const uint8_t* data, size_t len) {
-    if (m_node_role != NODE_ROLE_SOURCE || !data || len < sizeof(vsaf_usb_header_t)) return;
-
-    const auto* hdr = reinterpret_cast<const vsaf_usb_header_t*>(data);
-    if (hdr->magic != 0x1337) return;
-
-    uint8_t ch = hdr->channel_id;
-    if (ch >= MAX_UNICAST_SINKS) return;
-
-    size_t payload_len = len - sizeof(vsaf_usb_header_t);
-    if (payload_len == 0 || payload_len > MAX_LC3_FRAME_OCTETS || payload_len != hdr->octets) return;
-
-    // Transition to PC_STREAM if not already
-    if (m_state != NetworkState::PC_STREAM) {
-        transitionTo(NetworkState::PC_STREAM);
-        m_usb_underrun_count.store(0, std::memory_order_relaxed);
-        m_usb_overrun_count.store(0, std::memory_order_relaxed);
-    }
-
-    UsbLc3Frame frame = {};
-    frame.channel_id = ch;
-    frame.seq = hdr->seq;
-    frame.octets = hdr->octets;
-    frame.flags = hdr->flags;
-    frame.master_time_us = hdr->master_time_us;
-    memcpy(frame.data, data + sizeof(vsaf_usb_header_t), payload_len);
-
-    taskENTER_CRITICAL(&m_usb_fifo_mux);
-    bool pushed = m_usb_lc3_fifo[ch].push(frame);
-    taskEXIT_CRITICAL(&m_usb_fifo_mux);
-
-    if (!pushed) {
-        m_usb_overrun_count.fetch_add(1, std::memory_order_relaxed);
-    }
-
-    m_last_usb_packet_time_us.store(esp_timer_get_time(), std::memory_order_relaxed);
-    m_usb_stream_active.store(true, std::memory_order_relaxed);
-}
-
 void EspNowUnicastEngine::transitionTo(NetworkState new_state) {
     if (m_state == new_state) return;
-    NetworkState old_state = m_state;
     const char* old_str = getStateString();
     m_state = new_state;
     const char* new_str = getStateString();
@@ -860,7 +866,7 @@ void EspNowUnicastEngine::transitionTo(NetworkState new_state) {
     print_console("\n[STATE CHANGE] %s ---> %s (Node %u)\n", old_str, new_str, m_node_id);
 
     // Reset error and PLC counters on stream activation
-    if (new_state == NetworkState::CAST || new_state == NetworkState::STREAM || new_state == NetworkState::PREFILL || new_state == NetworkState::PC_STREAM) {
+    if (new_state == NetworkState::CAST || new_state == NetworkState::STREAM || new_state == NetworkState::PREFILL) {
         m_lc3_codec.resetPlcCount();
         m_fifo_underrun.store(0, std::memory_order_relaxed);
         m_fifo_overflow.store(0, std::memory_order_relaxed);
@@ -882,7 +888,6 @@ void EspNowUnicastEngine::transitionTo(NetworkState new_state) {
         case NetworkState::CAST:
             Hardware::getStatusLed().setSystemState(Hardware::SystemState::BROADCASTING_TONE);
             break;
-        case NetworkState::PC_STREAM:
         case NetworkState::STREAM:
         case NetworkState::PREFILL:
             Hardware::getStatusLed().setSystemState(Hardware::SystemState::STREAM);
@@ -912,7 +917,6 @@ const char* EspNowUnicastEngine::getStateString() const {
         case NetworkState::PREFILL:     return "PREFILL";
         case NetworkState::STREAM:      return "STREAM";
         case NetworkState::CAST:        return "CAST";
-        case NetworkState::PC_STREAM:   return "PC STRM";
         default:                        return "UNKNOWN";
     }
 }
@@ -1043,28 +1047,9 @@ void EspNowUnicastEngine::runSourceLoop() {
             }
         }
 #endif
-        if (m_state != NetworkState::CAST && m_state != NetworkState::PC_STREAM) {
+        if (m_state != NetworkState::CAST) {
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
-        }
-
-
-        // 2. Check for PC Stream Timeout (> 200 ms) in PC_STREAM mode -> Transition to IDLE
-        if (m_state == NetworkState::PC_STREAM) {
-            int64_t last_usb = m_last_usb_packet_time_us.load(std::memory_order_relaxed);
-            if (last_usb > 0 && (now_us - last_usb) > 200000) {
-                ESP_LOGI(TAG, "SOURCE: PC Stream Timed Out (> 200 ms) -> Transition to IDLE");
-                taskENTER_CRITICAL(&m_usb_fifo_mux);
-                for (int i = 0; i < MAX_UNICAST_SINKS; i++) {
-                    m_usb_lc3_fifo[i].clear();
-                }
-                taskEXIT_CRITICAL(&m_usb_fifo_mux);
-                m_usb_underrun_count.store(0, std::memory_order_relaxed);
-                m_usb_overrun_count.store(0, std::memory_order_relaxed);
-                m_usb_stream_active.store(false, std::memory_order_relaxed);
-                transitionTo(NetworkState::IDLE);
-                continue;
-            }
         }
 
         // Snapshot registered peers
@@ -1082,61 +1067,29 @@ void EspNowUnicastEngine::runSourceLoop() {
         }
         taskEXIT_CRITICAL(&m_peer_mux);
 
-        // ======================= MODE 1: PC_STREAM =======================
-        if (m_state == NetworkState::PC_STREAM) {
-            uint32_t pts_us = static_cast<uint32_t>(now_us + CONFIG_ESPNOW_PRESENTATION_DELAY_US);
-
-            // 1. Lockstep pop: Pop 1 frame from ALL channel FIFOs simultaneously (advancing online and offline channels together)
-            UsbLc3Frame channel_frames[MAX_UNICAST_SINKS];
-            bool has_channel_frame[MAX_UNICAST_SINKS] = {false};
-
-            taskENTER_CRITICAL(&m_usb_fifo_mux);
-            for (uint8_t ch = 0; ch < MAX_UNICAST_SINKS; ch++) {
-                has_channel_frame[ch] = m_usb_lc3_fifo[ch].pop(channel_frames[ch]);
-            }
-            taskEXIT_CRITICAL(&m_usb_fifo_mux);
-
-            // 2. Dispatch to registered ONLINE peers (offline channels were popped and discarded above)
-            for (int i = 0; i < peer_count_snap; i++) {
-                uint8_t ch = peers_snap[i].channel_id;
-                if (ch >= MAX_UNICAST_SINKS || !has_channel_frame[ch]) {
-                    if (peers_snap[i].is_enabled && peers_snap[i].status == PeerStatus::ONLINE) {
-                        m_usb_underrun_count.fetch_add(1, std::memory_order_relaxed);
+        // Priority Sorting by Airtime Quality:
+        // 1. ONLINE peers always precede OFFLINE/DISABLED peers.
+        // 2. Among ONLINE peers, sort by lowest ema_tx_duration_us first.
+        // Rock-solid peers (acknowledged in ~150 us) transmit first;
+        // failing/sluggish peers (retrying for several ms) transmit last, preventing them from blocking healthy peers!
+        for (int i = 0; i < peer_count_snap - 1; i++) {
+            for (int j = i + 1; j < peer_count_snap; j++) {
+                bool a_online = (peers_snap[i].is_enabled && peers_snap[i].status == PeerStatus::ONLINE);
+                bool b_online = (peers_snap[j].is_enabled && peers_snap[j].status == PeerStatus::ONLINE);
+                bool swap_needed = false;
+                if (!a_online && b_online) {
+                    swap_needed = true;
+                } else if (a_online && b_online) {
+                    if (peers_snap[j].ema_tx_duration_us < peers_snap[i].ema_tx_duration_us) {
+                        swap_needed = true;
                     }
-                    continue;
                 }
-
-                if (!peers_snap[i].is_enabled || peers_snap[i].status != PeerStatus::ONLINE) {
-                    continue;
-                }
-
-                const auto& frame = channel_frames[ch];
-                vsaf_unicast_header_t* hdr = reinterpret_cast<vsaf_unicast_header_t*>(tx_packet);
-                hdr->seq = frame.seq;
-                hdr->octets = frame.octets;
-                hdr->audio.flags = (ch == SUB_CHANNEL_ID) ?
-                                    encode_vsaf_flags(CONFIG_ESPNOW_SUB_SAMPLE_RATE_HZ, m_frame_duration_us) :
-                                    encode_vsaf_flags(m_telemetry.sample_rate, m_frame_duration_us);
-                hdr->audio.master_time_us = now_us;
-
-                memcpy(tx_packet + sizeof(vsaf_unicast_header_t), frame.data, frame.octets);
-                size_t packet_size = sizeof(vsaf_unicast_header_t) + frame.octets;
-
-                esp_err_t send_err = esp_now_send(peers_snap[i].mac, tx_packet, packet_size);
-                if (send_err == ESP_OK) {
-                    m_tx_packets_total.fetch_add(1, std::memory_order_relaxed);
-                    m_tx_packets_sec.fetch_add(1, std::memory_order_relaxed);
-                    taskENTER_CRITICAL(&m_peer_mux);
-                    for (int p = 0; p < m_peer_count; p++) {
-                        if (memcmp(m_peers[p].mac, peers_snap[i].mac, 6) == 0) {
-                            m_peers[p].packets_sent++;
-                            break;
-                        }
-                    }
-                    taskEXIT_CRITICAL(&m_peer_mux);
+                if (swap_needed) {
+                    SinkPeerConfig tmp = peers_snap[i];
+                    peers_snap[i] = peers_snap[j];
+                    peers_snap[j] = tmp;
                 }
             }
-            continue;
         }
 
         // ======================= MODE 2: CAST (Internal Test Tone or UAC) =======================
@@ -1213,8 +1166,6 @@ void EspNowUnicastEngine::runSourceLoop() {
         m_codec_duration_ring_buffer.push(static_cast<uint32_t>(enc_end - enc_start));
         m_audio_meter.pushFramePcm(pcm_ch0, samples_per_frame);
 
-        uint32_t pts_us = static_cast<uint32_t>(now_us + CONFIG_ESPNOW_PRESENTATION_DELAY_US);
-
         for (int i = 0; i < peer_count_snap; i++) {
             if (!peers_snap[i].is_enabled || peers_snap[i].status != PeerStatus::ONLINE) {
                 continue;
@@ -1250,14 +1201,66 @@ void EspNowUnicastEngine::runSourceLoop() {
             memcpy(tx_packet + sizeof(vsaf_unicast_header_t), payload, payload_len);
             size_t packet_size = sizeof(vsaf_unicast_header_t) + payload_len;
 
+            // Measure actual hardware airtime + ACK turnaround duration with microsecond timer
+            int64_t t_tx_start = esp_timer_get_time();
+
+            // Strategy D: Strict Send-Done Synchronization
+            // 1. Drain any residual token from previous frames before transmitting
+            if (s_tx_done_sem) {
+                xSemaphoreTake(s_tx_done_sem, 0);
+            }
+
             esp_err_t send_err = esp_now_send(peers_snap[i].mac, tx_packet, packet_size);
             if (send_err == ESP_OK) {
+                // 2. Wait strictly for Wi-Fi MAC to finish transmitting before proceeding to the next peer.
+                // With 24 Mbps locked rate, healthy ACK returns in < 250 us.
+                // On missing ACK, the hardware executes retries for up to ~12 ms.
+                // We use a 20 ms safety watchdog timeout so we never push another packet while the radio is busy!
+                BaseType_t tx_done = pdFALSE;
+                if (s_tx_done_sem) {
+                    tx_done = xSemaphoreTake(s_tx_done_sem, pdMS_TO_TICKS(20));
+                }
+                int64_t t_tx_end = esp_timer_get_time();
+                uint32_t measured_airtime_us = (t_tx_end > t_tx_start) ? static_cast<uint32_t>(t_tx_end - t_tx_start) : 200;
+
                 m_tx_packets_total.fetch_add(1, std::memory_order_relaxed);
                 m_tx_packets_sec.fetch_add(1, std::memory_order_relaxed);
+
                 taskENTER_CRITICAL(&m_peer_mux);
                 for (int p = 0; p < m_peer_count; p++) {
                     if (memcmp(m_peers[p].mac, peers_snap[i].mac, 6) == 0) {
                         m_peers[p].packets_sent++;
+                        m_peers[p].last_tx_duration_us = measured_airtime_us;
+
+                        // Smooth airtime quality with EMA (75% history, 25% new sample)
+                        if (m_peers[p].ema_tx_duration_us == 0) {
+                            m_peers[p].ema_tx_duration_us = measured_airtime_us;
+                        } else {
+                            m_peers[p].ema_tx_duration_us = (m_peers[p].ema_tx_duration_us * 3 + measured_airtime_us) / 4;
+                        }
+
+                        // If safety watchdog timed out (>20 ms), immediately trip circuit breaker
+                        if (tx_done != pdTRUE) {
+                            m_peers[p].consecutive_ack_fails++;
+                            m_peers[p].status = PeerStatus::OFFLINE;
+                            m_peers[p].ema_tx_duration_us = 20000; // Heavily penalize priority sort
+                        }
+                        break;
+                    }
+                }
+                taskEXIT_CRITICAL(&m_peer_mux);
+            } else if (send_err == ESP_ERR_ESPNOW_NO_MEM) {
+                // Hardware Wi-Fi queue was blocked by previous un-ACKed transmission
+                m_tx_ack_fails_total.fetch_add(1, std::memory_order_relaxed);
+                m_tx_ack_fails_sec.fetch_add(1, std::memory_order_relaxed);
+
+                taskENTER_CRITICAL(&m_peer_mux);
+                for (int p = 0; p < m_peer_count; p++) {
+                    if (memcmp(m_peers[p].mac, peers_snap[i].mac, 6) == 0) {
+                        m_peers[p].ack_failures++;
+                        m_peers[p].consecutive_ack_fails++;
+                        m_peers[p].status = PeerStatus::OFFLINE;
+                        m_peers[p].ema_tx_duration_us = 20000;
                         break;
                     }
                 }
