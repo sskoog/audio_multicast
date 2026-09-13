@@ -164,6 +164,10 @@ def main():
             flash_port = "COM16"
         elif "com3" in ports:
             flash_port = "COM3"
+        elif "app" in ports or "com116" in ports:
+            app_p = ports.get("app") or ports.get("com116")
+            trigger_app_to_bootloader(app_p)
+            flash_port = wait_for_bootloader_port(timeout=15)
 
         if not flash_port:
             print("[INFO] Waiting for ESP32-S3 ROM bootloader (COM16 or COM3)...")

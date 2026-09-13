@@ -1,5 +1,6 @@
 idf_component_register(
     SRCS 
+        "console.cpp"
         "main.cpp"
         "config.c"
         "lc3_codec.cpp"

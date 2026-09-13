@@ -1,4 +1,5 @@
 #include "espnow_unicast_engine.hpp"
+#include "console.hpp"
 #include "config.h"
 #include "status_led.hpp"
 #include "esp_log.h"
@@ -856,8 +857,7 @@ void EspNowUnicastEngine::transitionTo(NetworkState new_state) {
     m_state = new_state;
     const char* new_str = getStateString();
 
-    printf("\n[STATE CHANGE] %s ---> %s (Node %u)\n", old_str, new_str, m_node_id);
-    fflush(stdout);
+    print_console("\n[STATE CHANGE] %s ---> %s (Node %u)\n", old_str, new_str, m_node_id);
 
     // Reset error and PLC counters on stream activation
     if (new_state == NetworkState::CAST || new_state == NetworkState::STREAM || new_state == NetworkState::PREFILL || new_state == NetworkState::PC_STREAM) {

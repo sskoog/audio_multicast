@@ -1,4 +1,5 @@
 #include "diagnostics.hpp"
+#include "console.hpp"
 #include "config.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -390,17 +391,16 @@ void SystemDiagnostics::tick() {
                  time_sync_block);
 
         if ((m_header_counter % 10) == 0) {
-            printf("%s\n", border_line);
+            print_console("%s\n", border_line);
             if (cfg->node_role == NODE_ROLE_SOURCE) {
-                printf("|    CPU      | STATE | NODES  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | USB_FIFO     PKTS  ACK%%  FAIL UDR |         TIME & SYNCHRONIZATION (ms)    |\n");
-                printf("|  %%   C  MHz |       | 012345 | GAIN Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   | len  OVR      1/s   tot   tot tot |  Local  Master  EMA_offs RB_med RB_rng |\n");
+                print_console("|    CPU      | STATE | NODES  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | USB_FIFO     PKTS  ACK%%  FAIL UDR |         TIME & SYNCHRONIZATION (ms)    |\n");
+                print_console("|  %%   C  MHz |       | 012345 | GAIN Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   | len  OVR      1/s   tot   tot tot |  Local  Master  EMA_offs RB_med RB_rng |\n");
             } else {
-                printf("|    CPU      | STATE |  CHAN  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | AMP dB   PKTS  PLC  DMA   FIFO    |         TIME & SYNCHRONIZATION (ms)    |\n");
-                printf("|  %%   C  MHz |       |        | RSSI Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  SW  HW   1/s  tot  UDR  UDR  OVR |  Local  Master  EMA_offs RB_med RB_rng |\n");
+                print_console("|    CPU      | STATE |  CHAN  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | AMP dB   PKTS  PLC  DMA   FIFO    |         TIME & SYNCHRONIZATION (ms)    |\n");
+                print_console("|  %%   C  MHz |       |        | RSSI Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  SW  HW   1/s  tot  UDR  UDR  OVR |  Local  Master  EMA_offs RB_med RB_rng |\n");
             }
         }
-        printf("%s\n", row_buf);
-        fflush(stdout);
+        print_console("%s\n", row_buf);
         m_header_counter++;
     }
 }

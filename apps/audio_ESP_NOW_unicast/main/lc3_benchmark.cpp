@@ -1,4 +1,5 @@
 #include "lc3_benchmark.hpp"
+#include "console.hpp"
 #include "esp_partition.h"
 #include "esp_timer.h"
 #include "esp_log.h"
@@ -135,28 +136,28 @@ esp_err_t Lc3BenchmarkSuite::runSingleBenchmark(uint32_t sample_rate, uint32_t f
 }
 
 void Lc3BenchmarkSuite::printResultsTable(const std::vector<BenchmarkResult>& results) {
-    printf("\n\n");
-    printf("+======================================================================================================================+\n");
-    printf("|                             ESP32-C6 HARDWARE LC3 ENCODER BENCHMARK RESULTS (10-SECOND REAL MUSIC)                   |\n");
-    printf("+======================================================================================================================+\n");
-    printf("|  Sample Rate | Frame Dur | Frame Octets |  Bitrate  | Total Frames | Min (ms) | Avg (ms) | P95 (ms) | Max (ms) |  CPU %%  |  RT Factor |\n");
-    printf("+--------------+-----------+--------------+-----------+--------------+----------+----------+----------+----------+---------+------------+\n");
+    print_console("\n\n");
+    print_console("+======================================================================================================================+\n");
+    print_console("|                             ESP32-C6 HARDWARE LC3 ENCODER BENCHMARK RESULTS (10-SECOND REAL MUSIC)                   |\n");
+    print_console("+======================================================================================================================+\n");
+    print_console("|  Sample Rate | Frame Dur | Frame Octets |  Bitrate  | Total Frames | Min (ms) | Avg (ms) | P95 (ms) | Max (ms) |  CPU %%  |  RT Factor |\n");
+    print_console("+--------------+-----------+--------------+-----------+--------------+----------+----------+----------+----------+---------+------------+\n");
 
     for (const auto& r : results) {
-        printf("| %6.1f kHz  | %4.1f ms  |   %3u B/fr   | %3lu kbps |   %5lu fr   |  %5.2f   |  %5.2f   |  %5.2f   |  %5.2f   |  %5.1f%% |   %5.2fx   |\n",
-               r.sample_rate / 1000.0f,
-               r.frame_duration_us / 1000.0f,
-               r.octets_per_frame,
-               r.bitrate_bps / 1000UL,
-               (unsigned long)r.total_frames,
-               r.min_ms,
-               r.avg_ms,
-               r.p95_ms,
-               r.max_ms,
-               r.cpu_load_pct,
-               r.realtime_factor);
+        print_console("| %6.1f kHz  | %4.1f ms  |   %3u B/fr   | %3lu kbps |   %5lu fr   |  %5.2f   |  %5.2f   |  %5.2f   |  %5.2f   |  %5.1f%% |   %5.2fx   |\n",
+                      r.sample_rate / 1000.0f,
+                      r.frame_duration_us / 1000.0f,
+                      r.octets_per_frame,
+                      r.bitrate_bps / 1000UL,
+                      (unsigned long)r.total_frames,
+                      r.min_ms,
+                      r.avg_ms,
+                      r.p95_ms,
+                      r.max_ms,
+                      r.cpu_load_pct,
+                      r.realtime_factor);
     }
-    printf("+======================================================================================================================+\n\n");
+    print_console("+======================================================================================================================+\n\n");
 }
 
 void Lc3BenchmarkSuite::runAllBenchmarks() {

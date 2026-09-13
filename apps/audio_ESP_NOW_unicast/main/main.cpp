@@ -1,4 +1,5 @@
 #include "config.h"
+#include "console.hpp"
 #include "lc3_codec.hpp"
 #include "tone_generator.hpp"
 #include "i2s_audio.hpp"
@@ -76,26 +77,6 @@ static void on_user_button_pressed(void* user_data) {
     }
 }
 
-static void print_console(const char* format, ...) {
-    va_list args;
-    va_start(args, format);
-    vprintf(format, args);
-    va_end(args);
-    fflush(stdout);
-
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
-    if (tud_cdc_connected()) {
-        char buf[256];
-        va_start(args, format);
-        int len = vsnprintf(buf, sizeof(buf), format, args);
-        va_end(args);
-        if (len > 0) {
-            tud_cdc_write(buf, (uint32_t)len);
-            tud_cdc_write_flush();
-        }
-    }
-#endif
-}
 
 static bool parse_mac_address(const char* str, uint8_t* out_mac) {
     if (!str || !out_mac) return false;
