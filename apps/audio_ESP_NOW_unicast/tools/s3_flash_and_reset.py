@@ -74,7 +74,7 @@ def trigger_app_to_bootloader(app_port):
         return True
     except serial.SerialException as e:
         if "PermissionError" in str(e) or "Access is denied" in str(e):
-            print(f"[WARNING] Cannot access {app_port}: Port is open by another program (e.g. Serial Studio Pro).")
+            print(f"[WARNING] Cannot access {app_port}: Port is open by another program.")
         else:
             print(f"[INFO] CLI command skipped: {e}")
 
@@ -121,12 +121,7 @@ def execute_watchdog_reset(esp):
 
     print("[RESET] Arming ESP32-S3 hardware RTC Watchdog for system reset...")
     try:
-        esp.watchdog_reset()
-    except Exception as e:
-        print(f"[DEBUG] Watchdog response: {e}")
-
-    try:
-        esp._port.close()
+        esp.hard_reset(using_usb=False)
     except Exception:
         pass
 
@@ -134,10 +129,16 @@ def execute_watchdog_reset(esp):
 
 
 def main():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    app_dir = os.path.dirname(script_dir) if os.path.basename(script_dir) == "tools" else script_dir
+    default_bin_dir = os.path.join(app_dir, "build_s3")
+    if not os.path.isdir(default_bin_dir):
+        default_bin_dir = "build_s3"
+
     parser = argparse.ArgumentParser(description="ESP32-S3 Hands-Free Flash and Reset Tool")
     parser.add_argument("--port", "-p", default="AUTO", help="Serial port (COM16, COM3, COM116, or AUTO)")
     parser.add_argument("--baud", "-b", type=int, default=921600, help="Flashing baud rate (default: 921600)")
-    parser.add_argument("--bin-dir", default="apps/audio_ESP_NOW_unicast/build_s3", help="Path to build_s3 directory")
+    parser.add_argument("--bin-dir", default=default_bin_dir, help="Path to build_s3 directory")
     parser.add_argument("--only-reset", action="store_true", help="Only perform hardware watchdog reset without flashing")
     args = parser.parse_args()
 
@@ -151,11 +152,15 @@ def main():
                 print(f"[ERROR] Firmware file not found: {f}")
                 sys.exit(1)
 
+    ports = find_com_ports()
     flash_port = None
-    if args.port != "AUTO":
+
+    if args.port == "COM116" or (args.port != "AUTO" and ports.get("app") == args.port):
+        trigger_app_to_bootloader(args.port)
+        flash_port = wait_for_bootloader_port(timeout=15)
+    elif args.port != "AUTO":
         flash_port = args.port
     else:
-        ports = find_com_ports()
         if "jtag" in ports:
             flash_port = ports["jtag"]
         elif "otg" in ports:
@@ -169,10 +174,10 @@ def main():
             trigger_app_to_bootloader(app_p)
             flash_port = wait_for_bootloader_port(timeout=15)
 
-        if not flash_port:
-            print("[INFO] Waiting for ESP32-S3 ROM bootloader (COM16 or COM3)...")
-            print("       Please hold 'B' (Boot) and tap 'R' (Reset) on Node 16.")
-            flash_port = wait_for_bootloader_port(timeout=180)
+    if not flash_port:
+        print("[INFO] Waiting for ESP32-S3 ROM bootloader (COM16 or COM3)...")
+        print("       Please hold 'B' (Boot) and tap 'R' (Reset) on Node 16.")
+        flash_port = wait_for_bootloader_port(timeout=180)
 
     if not flash_port:
         print("[ERROR] Could not find bootloader port (COM16 or COM3)!")

@@ -346,9 +346,9 @@ On the Seeed Studio XIAO ESP32-S3, the physical USB data lines (GPIO 19/20) are 
 - **Flashing / Download Mode (`COM16`)**:
   - Activated when holding the `B` (Boot) button and tapping `R` (Reset), via the `bootloader` CLI command, or via 1200-baud touch reset.
   - Enumerates as `USB\VID_303A&PID_1001` (ESP32-S3 ROM Bootloader) on **COM16**.
-  - Flashed using `esptool.py` or the automated script `flash_s3.ps1`.
+  - Flashed using `esptool.py` or the automated script `tools/build_and_flash.ps1` / `tools/flash_s3.ps1`.
 - **Runtime Application Mode (`COM116` + UAC1 Speaker)**:
-  - After flashing, the automated tool (`flash_s3.ps1` / `s3_flash_and_reset.py`) clears `RTC_CNTL_FORCE_DOWNLOAD_BOOT` and triggers an internal RTC Watchdog reset, automatically rebooting the board into SPI flash without requiring any manual button press.
+  - After flashing, the automated tool (`tools/build_and_flash.ps1` / `tools/s3_flash_and_reset.py`) clears `RTC_CNTL_FORCE_DOWNLOAD_BOOT` and triggers an internal RTC Watchdog reset, automatically rebooting the board into SPI flash without requiring any manual button press.
   - TinyUSB initializes the composite USB device (`USB\VID_303A&PID_4002`).
   - CDC Serial port enumerates on secondary port **COM116** (mapped in Device Manager).
   - Audio interface enumerates as a 48 kHz stereo USB speaker (`Node16 audio`).
@@ -363,7 +363,7 @@ On the Seeed Studio XIAO ESP32-S3, the physical USB data lines (GPIO 19/20) are 
 ### 10.4 Hands-Free Post-Flash Reset Architecture
 On Seeed Studio XIAO ESP32-S3, standard `esptool --after hard-reset` fails to reset the board because the native USB interface has no physical RTS-to-EN transistor circuit. Previously, this left the chip in ROM download mode and required the user to physically tap the `R` button.
 
-The repository resolves this through `apps/audio_ESP_NOW_unicast/s3_flash_and_reset.py` (wrapped by `flash_s3.ps1`):
+The repository resolves this through `apps/audio_ESP_NOW_unicast/tools/s3_flash_and_reset.py` (wrapped by `tools/build_and_flash.ps1` and `tools/flash_s3.ps1`):
 1. **Flashing**: Uploads the high-speed flasher stub and writes bootloader, partition table, and application binaries at 921,600 baud.
 2. **Clear Boot Strapping Flag**: Clears `RTC_CNTL_FORCE_DOWNLOAD_BOOT` (bit 0 of `RTC_CNTL_OPTION1_REG` at `0x6000812C`) so the silicon ROM does not re-enter download boot on restart.
 3. **Hardware RTC Watchdog Trigger**: Programs the ESP32-S3 RTC Watchdog timer (`RTC_CNTL_WDTCONFIG0_REG`) via the running stub to trigger a 2000-cycle hardware system reset.

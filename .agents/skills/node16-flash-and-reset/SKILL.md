@@ -35,41 +35,26 @@ On the **Seeed Studio XIAO ESP32-S3**:
 
 ## 3. Autonomous Post-Flash Reset Architecture
 
-Instead of relying on nonexistent physical RTS-to-EN hardware, the flashing sequence utilizes the **ESP32-S3 Internal RTC Watchdog Timer (WDT)** via the running flasher stub.
+Instead of relying on nonexistent physical RTS-to-EN hardware, the flashing sequence utilizes the **ESP32-S3 Internal RTC Watchdog Timer (WDT)** via the running flasher stub:
 
-```
-+-------------------------------------------------------------------------------+
-|                             Flashing & Reset Pipeline                         |
-|                                                                               |
-|  1. Upload Stub Flasher (921,600 baud)                                        |
-|  2. Write & Verify: bootloader.bin (0x0), partition-table.bin (0x8000),      |
-|     audio_ESP_NOW_unicast.bin (0x10000)                                       |
-|                                                                               |
-|  3. [CLEAR STRAP] Write 0 to Bit 0 of RTC_CNTL_OPTION1_REG (0x6000812C)       |
-|     --> Eliminates RTC_CNTL_FORCE_DOWNLOAD_BOOT flag                          |
-|                                                                               |
-|  4. [ARM WATCHDOG] Program RTC WDT Registers via Stub:                        |
-|     - Unlock: Write 0x50D83AA1 to RTC_CNTL_WDTWPROTECT_REG (0x600080B0)       |
-|     - Timeout: Write 2000 cycles (~50 us) to RTC_CNTL_WDTCONFIG1_REG (0x6000809C)|
-|     - Arm: Write 0xD0000102 to RTC_CNTL_WDTCONFIG0_REG (0x60008098)           |
-|     - Lock: Write 0 to RTC_CNTL_WDTWPROTECT_REG (0x600080B0)                  |
-|                                                                               |
-|  5. [HARDWARE RESET] RTC Watchdog fires ~50 us later:                         |
-|     - Resets CPU, digital core, memory buses, and USB PHY                     |
-|     - ROM reads strapping: GPIO 0 is HIGH, FORCE_DOWNLOAD_BOOT is 0          |
-|     - Launches SPI Flash Application immediately                              |
-|                                                                               |
-|  6. [ENUMERATION] Windows registers:                                          |
-|     - Speakers (Node16 audio)                                                 |
-|     - USB Serial Device (COM116)                                              |
-+-------------------------------------------------------------------------------+
-```
+1. **Upload Stub Flasher**: Establish communication with the ROM bootloader and upload the high-speed flasher stub (921,600 baud).
+2. **Write & Verify Binaries**: Flash and verify `bootloader.bin` (at `0x0`), `partition-table.bin` (at `0x8000`), and `audio_ESP_NOW_unicast.bin` (at `0x10000`).
+3. **Clear Boot Strap Flag**: Write `0` to Bit 0 of `RTC_CNTL_OPTION1_REG` (`0x6000812C`) to clear the `RTC_CNTL_FORCE_DOWNLOAD_BOOT` flag, ensuring the chip will not reboot back into download mode.
+4. **Arm RTC Watchdog Timer**: Configure the RTC WDT registers directly via the stub:
+   - Unlock: Write `0x50D83AA1` to `RTC_CNTL_WDTWPROTECT_REG` (`0x600080B0`).
+   - Timeout: Write 2000 cycles (~50 us) to `RTC_CNTL_WDTCONFIG1_REG` (`0x6000809C`).
+   - Arm: Write `0xD0000102` to `RTC_CNTL_WDTCONFIG0_REG` (`0x60008098`).
+   - Lock: Write `0` to `RTC_CNTL_WDTWPROTECT_REG` (`0x600080B0`).
+5. **Execute Hardware Reset**: The RTC Watchdog expires after ~50 us, resetting the CPU, digital core, memory buses, and USB PHY. The ROM reads strapping pins (GPIO 0 HIGH, download boot flag 0) and boots directly into the SPI flash application.
+6. **Windows Enumeration**: Windows detects the rebooted device after ~3 seconds and registers:
+   - Audio endpoint: `Node16 audio (USB Speaker)`
+   - Serial CLI/telemetry: `USB Serial Device (COM116)`
 
 ---
 
 ## 4. Scripting Tools in Repository
 
-### A. Python Flashing Engine (`apps/audio_ESP_NOW_unicast/s3_flash_and_reset.py`)
+### A. Python Flashing Engine (`apps/audio_ESP_NOW_unicast/tools/s3_flash_and_reset.py`)
 Direct Python utility executing chip detection, stub upload, high-speed flash programming, and the atomic RTC watchdog reset sequence.
 
 Key reset implementation:
@@ -84,11 +69,10 @@ def execute_watchdog_reset(esp):
         pass
 
     # Arm RTC Watchdog for immediate digital core reset
-    esp.watchdog_reset()
-    esp._port.close()
+    esp.hard_reset(using_usb=False)
 ```
 
-### B. PowerShell Automation Wrapper (`apps/audio_ESP_NOW_unicast/flash_s3.ps1`)
+### B. PowerShell Automation Wrapper (`apps/audio_ESP_NOW_unicast/tools/flash_s3.ps1`)
 Handles lingering monitor process termination, activates the ESP-IDF v6.0.2 environment, and invokes `s3_flash_and_reset.py`:
 
 ```powershell
@@ -106,7 +90,8 @@ Get-CimInstance Win32_Process -Filter "CommandLine LIKE '%device monitor%' OR Co
 $env:IDF_TOOLS_PATH = "C:\Users\stefa\.espressif"
 . "C:\Users\stefa\OneDrive\Documents\ESP\v6.0.2\esp-idf\export.ps1"
 
-python -u apps\audio_ESP_NOW_unicast\s3_flash_and_reset.py --port $Port --baud $Baud
+$toolsDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+python -u "$toolsDir\s3_flash_and_reset.py" --port $Port --baud $Baud
 ```
 
 ---
@@ -119,7 +104,11 @@ Close any active serial monitors (e.g., Serial Studio Pro, PuTTY, `idf.py monito
 ### Step 2: Initiate Flashing Tool
 Run the script from the repository root in PowerShell:
 ```powershell
-powershell -ExecutionPolicy Bypass -File apps\audio_ESP_NOW_unicast\flash_s3.ps1
+powershell -ExecutionPolicy Bypass -File apps\audio_ESP_NOW_unicast\tools\flash_s3.ps1
+```
+Or use the unified builder/flasher:
+```powershell
+powershell -ExecutionPolicy Bypass -File apps\audio_ESP_NOW_unicast\tools\build_and_flash.ps1 -Role SOURCE
 ```
 
 ### Step 3: Enter Bootloader Mode (If in Application Mode)
@@ -170,6 +159,6 @@ OK     CM_PROB_NONE USB Composite Device       USB\VID_303A&PID_4002\...
 If Node 16 is stuck in the ROM bootloader on `COM16` or `COM3` and you want to boot into flash without re-flashing or touching the hardware buttons:
 
 ```powershell
-python apps\audio_ESP_NOW_unicast\s3_flash_and_reset.py --only-reset
+python apps\audio_ESP_NOW_unicast\tools\s3_flash_and_reset.py --only-reset
 ```
 This connects to the existing bootloader stub, clears the strapping register, and triggers the hardware watchdog reboot.
