@@ -131,6 +131,8 @@ static void handle_ascii_command(const char* raw_line) {
                       "  peer disable <mac>         - Disable unicast transmission to peer\n"
                       "  start / play / cast     - Transition SOURCE to CAST / SINK to SCANNING\n"
                       "  stop / pause               - Stop transmission / receiver (transition to IDLE)\n"
+                      "  tone [on|off]              - Toggle internal test tone generator (overrides auto-USB)\n"
+
                       "  phy <rate>                 - Switch PHY rate (mc0..mc7, 6m, 9m, 12m, 18m, 24m)\n"
                       "  mode mono|stereo|surround  - Switch audio channel generation mode\n"
                       "  ch <0..5>                  - Set SINK target channel (0: Left, 1: Right, 5: Sub)\n"
@@ -226,7 +228,7 @@ static void handle_ascii_command(const char* raw_line) {
             const system_config_t* cfg = get_system_config();
             if (cfg->node_role == NODE_ROLE_SOURCE) {
                 s_unicast_engine->transitionTo(AudioNet::NetworkState::CAST);
-                print_console("[OK] SOURCE transitioned to CAST\n");
+                print_console("[OK] SOURCE transitioned to CAST (will stream when USB audio active)\n");
             } else {
                 s_unicast_engine->transitionTo(AudioNet::NetworkState::SCANNING);
                 print_console("[OK] SINK transitioned to SCANNING\n");
@@ -234,10 +236,31 @@ static void handle_ascii_command(const char* raw_line) {
         }
     } else if (strcasecmp(line, "stop") == 0 || strcasecmp(line, "pause") == 0) {
         if (s_unicast_engine) {
+            s_unicast_engine->setToneTestMode(false);
             s_unicast_engine->transitionTo(AudioNet::NetworkState::IDLE);
-            print_console("[OK] Transitioned to IDLE\n");
+            print_console("[OK] Transitioned to IDLE (streaming paused)\n");
         }
-    } else if (strncasecmp(line, "phy ", 4) == 0) {
+    } else if (strncasecmp(line, "tone", 4) == 0) {
+        if (s_unicast_engine) {
+            if (strcasestr(line, "on")) {
+                s_unicast_engine->setToneTestMode(true);
+                s_unicast_engine->transitionTo(AudioNet::NetworkState::CAST);
+                print_console("[OK] Internal test tone ENABLED (CAST mode forced)\n");
+            } else if (strcasestr(line, "off")) {
+                s_unicast_engine->setToneTestMode(false);
+                s_unicast_engine->transitionTo(AudioNet::NetworkState::IDLE);
+                print_console("[OK] Internal test tone DISABLED (Auto-USB streaming mode)\n");
+            } else {
+                bool cur = s_unicast_engine->isToneTestMode();
+                s_unicast_engine->setToneTestMode(!cur);
+                if (!cur) {
+                    s_unicast_engine->transitionTo(AudioNet::NetworkState::CAST);
+                }
+                print_console("[OK] Internal test tone %s\n", (!cur) ? "ENABLED (CAST mode forced)" : "DISABLED (Auto-USB streaming mode)");
+            }
+        }
+    }
+ else if (strncasecmp(line, "phy ", 4) == 0) {
         const char* rate_str = line + 4;
         wifi_phy_mode_t mode = WIFI_PHY_MODE_HT20;
         wifi_phy_rate_t rate = WIFI_PHY_RATE_MCS1_LGI;

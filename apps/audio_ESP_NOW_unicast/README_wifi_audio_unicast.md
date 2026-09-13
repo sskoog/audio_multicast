@@ -338,7 +338,8 @@ To eliminate scheduling jitter and UART bottlenecks associated with Python-based
 - **Zero OS Scheduling Jitter**: Traditional Python serial transmission suffers from non-real-time OS thread suspension. UAC relies on strictly timed USB isochronous hardware endpoints, guaranteeing flawless 10 ms real-time delivery.
 - **Driverless Plug-and-Play**: The SOURCE node enumerates as a standard USB audio interface requiring no custom drivers or Python scripts.
 - **Combined CDC Interface**: A composite USB device profile is utilized, presenting both the Audio Speaker (UAC1) interface and a Virtual Serial Port (CDC). This allows the standard diagnostic CLI to remain accessible simultaneously alongside the audio stream.
-- **Automatic Fallback**: If the USB audio stream stops or underruns, the engine automatically falls back to generating a continuous internal test tone to maintain the 802.11 broadcast rhythm until the USB stream resumes.
+- **Automatic Power & Airtime Saving (Auto-Cast)**: The engine monitors the USB Audio Streaming alternate setting and isochronous packet flow. When no audio is streaming to the endpoint from the PC, the SOURCE remains in the `IDLE` state and completely stops transmitting 802.11 packets, keeping the radio quiet and conserving airtime. As soon as audio playback starts, it automatically transitions to `CAST` within 10 ms. The internal test tone can still be manually enabled via the `tone on` CLI command.
+
 
 ### 10.2 Hardware Topology & COM Port Mappings (Node 16)
 On the Seeed Studio XIAO ESP32-S3, the physical USB data lines (GPIO 19/20) are shared between the silicon ROM USB-Serial-JTAG controller and the internal USB OTG PHY:
@@ -347,7 +348,7 @@ On the Seeed Studio XIAO ESP32-S3, the physical USB data lines (GPIO 19/20) are 
   - Enumerates as `USB\VID_303A&PID_1001` (ESP32-S3 ROM Bootloader) on **COM16**.
   - Flashed using `esptool.py` or the automated script `flash_s3.ps1`.
 - **Runtime Application Mode (`COM116` + UAC1 Speaker)**:
-  - After flashing, pressing the `R` button boots into flash firmware.
+  - After flashing, the automated tool (`flash_s3.ps1` / `s3_flash_and_reset.py`) clears `RTC_CNTL_FORCE_DOWNLOAD_BOOT` and triggers an internal RTC Watchdog reset, automatically rebooting the board into SPI flash without requiring any manual button press.
   - TinyUSB initializes the composite USB device (`USB\VID_303A&PID_4002`).
   - CDC Serial port enumerates on secondary port **COM116** (mapped in Device Manager).
   - Audio interface enumerates as a 48 kHz stereo USB speaker (`Node16 audio`).
@@ -358,4 +359,13 @@ On the Seeed Studio XIAO ESP32-S3, the physical USB data lines (GPIO 19/20) are 
 - **Renaming the Audio Endpoint**:
   - If Windows caches the generic device name, open the classic Sound Control Panel (`mmsys.cpl`).
   - Under the **Playback** tab, double-click the speaker device, navigate to the **General** tab, and enter `Node16 audio`. Alternatively, use Windows Settings -> System -> Sound -> Output Properties -> Rename.
+
+### 10.4 Hands-Free Post-Flash Reset Architecture
+On Seeed Studio XIAO ESP32-S3, standard `esptool --after hard-reset` fails to reset the board because the native USB interface has no physical RTS-to-EN transistor circuit. Previously, this left the chip in ROM download mode and required the user to physically tap the `R` button.
+
+The repository resolves this through `apps/audio_ESP_NOW_unicast/s3_flash_and_reset.py` (wrapped by `flash_s3.ps1`):
+1. **Flashing**: Uploads the high-speed flasher stub and writes bootloader, partition table, and application binaries at 921,600 baud.
+2. **Clear Boot Strapping Flag**: Clears `RTC_CNTL_FORCE_DOWNLOAD_BOOT` (bit 0 of `RTC_CNTL_OPTION1_REG` at `0x6000812C`) so the silicon ROM does not re-enter download boot on restart.
+3. **Hardware RTC Watchdog Trigger**: Programs the ESP32-S3 RTC Watchdog timer (`RTC_CNTL_WDTCONFIG0_REG`) via the running stub to trigger a 2000-cycle hardware system reset.
+4. **Autonomous Boot**: The hardware watchdog resets the entire digital core and USB PHY, cleanly launching the flash application and re-enumerating `COM116` and `Speakers (Node16 audio)` without touching any physical hardware buttons.
 

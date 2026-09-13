@@ -1,12 +1,18 @@
 #include "usb_audio.hpp"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "tinyusb.h"
 #include "tusb.h"
 #include "soc/rtc_cntl_reg.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/stream_buffer.h"
+#include <atomic>
 
 static const char *TAG = "USBaudio";
+
+static std::atomic<bool> s_audio_alt_active(false);
+static std::atomic<int64_t> s_last_audio_rx_us(0);
+
 
 // -----------------------------------------------------------------------------
 // Audio Class configuration
@@ -252,6 +258,33 @@ extern "C" bool tud_audio_get_req_ep_cb(uint8_t rhport, tusb_control_request_t c
     return false;
 }
 
+extern "C" bool tud_audio_set_itf_cb(uint8_t rhport, tusb_control_request_t const *p_request) {
+    (void)rhport;
+    uint8_t const itf = tu_u16_low(p_request->wIndex);
+    uint8_t const alt = tu_u16_low(p_request->wValue);
+    if (itf == ITF_NUM_AUDIO_STREAMING) {
+        if (alt != 0) {
+            s_audio_alt_active.store(true, std::memory_order_relaxed);
+            ESP_LOGI(TAG, "Audio stream OPENED (Alt %u)", alt);
+        } else {
+            s_audio_alt_active.store(false, std::memory_order_relaxed);
+            ESP_LOGI(TAG, "Audio stream CLOSED (Alt 0)");
+        }
+    }
+    return true;
+}
+
+extern "C" bool tud_audio_set_itf_close_ep_cb(uint8_t rhport, tusb_control_request_t const *p_request) {
+    (void)rhport;
+    uint8_t const itf = tu_u16_low(p_request->wIndex);
+    uint8_t const alt = tu_u16_low(p_request->wValue);
+    if (itf == ITF_NUM_AUDIO_STREAMING && alt == 0) {
+        s_audio_alt_active.store(false, std::memory_order_relaxed);
+        ESP_LOGI(TAG, "Audio stream CLOSED via EP close (Alt 0)");
+    }
+    return true;
+}
+
 extern "C" bool tud_audio_rx_done_isr(uint8_t rhport, uint16_t n_bytes_received, uint8_t func_id, uint8_t ep_out, uint8_t cur_alt_setting) {
     (void)rhport;
     (void)func_id;
@@ -262,6 +295,9 @@ extern "C" bool tud_audio_rx_done_isr(uint8_t rhport, uint16_t n_bytes_received,
     uint16_t read_bytes = tud_audio_read(rx_buf, n_bytes_received);
 
     if (s_audio_stream_buf && read_bytes > 0) {
+        s_last_audio_rx_us.store(esp_timer_get_time(), std::memory_order_relaxed);
+        s_audio_alt_active.store(true, std::memory_order_relaxed);
+
         BaseType_t xHigherPriorityTaskWoken = pdFALSE;
         xStreamBufferSendFromISR(s_audio_stream_buf, rx_buf, read_bytes, &xHigherPriorityTaskWoken);
         if (xHigherPriorityTaskWoken) {
@@ -310,6 +346,29 @@ size_t usb_audio_read_pcm(void* dest, size_t max_bytes) {
     if (!s_audio_stream_buf) return 0;
     return xStreamBufferReceive(s_audio_stream_buf, dest, max_bytes, 0);
 }
+
+bool usb_audio_is_streaming(void) {
+    if (!s_audio_alt_active.load(std::memory_order_relaxed)) {
+        return false;
+    }
+    int64_t last_rx = s_last_audio_rx_us.load(std::memory_order_relaxed);
+    if (last_rx == 0) {
+        return false;
+    }
+    int64_t now_us = esp_timer_get_time();
+    // Inactive if no audio packet received for > 150 ms (15 missing 10ms frames)
+    if ((now_us - last_rx) > 150000) {
+        return false;
+    }
+    return true;
+}
+
+void usb_audio_clear_buffer(void) {
+    if (s_audio_stream_buf) {
+        xStreamBufferReset(s_audio_stream_buf);
+    }
+}
+
 
 extern "C" void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts) {
     (void)rts;

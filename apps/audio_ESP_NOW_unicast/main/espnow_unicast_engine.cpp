@@ -372,10 +372,19 @@ esp_err_t EspNowUnicastEngine::start() {
     xTaskCreatePinnedToCore(audioTaskRoutine, "unicast_audio_tsk", stack_size, this, priority, &s_audio_task_handle, core_id);
 
     if (m_node_role == NODE_ROLE_SOURCE) {
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+        if (m_tone_test_mode || usb_audio_is_streaming()) {
+            transitionTo(NetworkState::CAST);
+        } else {
+            transitionTo(NetworkState::IDLE);
+        }
+#else
         transitionTo(NetworkState::CAST);
+#endif
     } else {
         transitionTo(NetworkState::SCANNING);
     }
+
 
     return ESP_OK;
 }
@@ -1022,9 +1031,23 @@ void EspNowUnicastEngine::runSourceLoop() {
         next_frame_time_us += m_frame_duration_us;
 
         // 1. Check if node is IDLE or OFF: sleep and do not transmit
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+        if (m_state == NetworkState::IDLE) {
+            if (m_tone_test_mode || usb_audio_is_streaming()) {
+                ESP_LOGI(TAG, "SOURCE: Active audio stream detected -> Transition to CAST");
+                transitionTo(NetworkState::CAST);
+                next_frame_time_us = esp_timer_get_time() + m_frame_duration_us;
+            } else {
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
+        }
+#endif
         if (m_state != NetworkState::CAST && m_state != NetworkState::PC_STREAM) {
+            vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
+
 
         // 2. Check for PC Stream Timeout (> 200 ms) in PC_STREAM mode -> Transition to IDLE
         if (m_state == NetworkState::PC_STREAM) {
@@ -1117,24 +1140,40 @@ void EspNowUnicastEngine::runSourceLoop() {
         }
 
         // ======================= MODE 2: CAST (Internal Test Tone or UAC) =======================
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+        if (!m_tone_test_mode && !usb_audio_is_streaming()) {
+            ESP_LOGI(TAG, "SOURCE: USB audio stream stopped/inactive -> Transition to IDLE");
+            usb_audio_clear_buffer();
+            transitionTo(NetworkState::IDLE);
+            continue;
+        }
+#endif
         size_t samples_per_frame = (m_telemetry.sample_rate * m_frame_duration_us) / 1000000;
         if (samples_per_frame > MAX_PCM_FRAME_SAMPLES) samples_per_frame = MAX_PCM_FRAME_SAMPLES;
 
-        size_t bytes_to_read = samples_per_frame * 2 * 2; // Stereo, 16-bit
-        uint8_t usb_pcm_buf[MAX_PCM_FRAME_SAMPLES * 4];
-        size_t bytes_read = usb_audio_read_pcm(usb_pcm_buf, bytes_to_read);
-
-        if (bytes_read == bytes_to_read) {
-            int16_t* interleaved = reinterpret_cast<int16_t*>(usb_pcm_buf);
-            for (size_t i = 0; i < samples_per_frame; i++) {
-                pcm_ch0[i] = interleaved[i * 2];
-                pcm_ch1[i] = interleaved[i * 2 + 1];
-            }
-        } else {
-            // Fallback to internal test tone if USB audio underruns or is inactive
+        if (m_tone_test_mode) {
             if (m_tone_gen) m_tone_gen->generateFrame(pcm_ch0, samples_per_frame);
             m_tone_gen_r.generateFrame(pcm_ch1, samples_per_frame);
+        } else {
+            size_t bytes_to_read = samples_per_frame * 2 * 2; // Stereo, 16-bit
+            uint8_t usb_pcm_buf[MAX_PCM_FRAME_SAMPLES * 4];
+            size_t bytes_read = 0;
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+            bytes_read = usb_audio_read_pcm(usb_pcm_buf, bytes_to_read);
+#endif
+            if (bytes_read == bytes_to_read) {
+                int16_t* interleaved = reinterpret_cast<int16_t*>(usb_pcm_buf);
+                for (size_t i = 0; i < samples_per_frame; i++) {
+                    pcm_ch0[i] = interleaved[i * 2];
+                    pcm_ch1[i] = interleaved[i * 2 + 1];
+                }
+            } else {
+                // Brief underrun during active stream: zero-pad rather than blasting tone
+                memset(pcm_ch0, 0, samples_per_frame * sizeof(int16_t));
+                memset(pcm_ch1, 0, samples_per_frame * sizeof(int16_t));
+            }
         }
+
 
         int64_t enc_start = esp_timer_get_time();
         size_t len_ch0 = 0, len_ch1 = 0;

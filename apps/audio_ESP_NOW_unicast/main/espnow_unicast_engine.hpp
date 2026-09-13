@@ -320,7 +320,13 @@ public:
     const char* getWifiPhyRateString() const;
     int8_t getLastRssi() const { return m_last_rx_rssi.load(std::memory_order_relaxed); }
     bool hasLocalAudioOutput() const { return (m_i2s_dac != nullptr && m_node_role == NODE_ROLE_SINK); }
+    void setToneTestMode(bool enable) { m_tone_test_mode = enable; }
+    bool isToneTestMode() const { return m_tone_test_mode; }
     const StreamTelemetry& getStreamTelemetry() const { return m_telemetry; }
+
+
+
+
 
     // Audio Metering
     int16_t getAudioFrameRMS_int16() { return m_audio_meter.getAudioFrameRMS_int16(); }
@@ -418,7 +424,9 @@ private:
 
     bool                       m_wifi_initialized = false;
     bool                       m_audio_task_running = false;
+    bool                       m_tone_test_mode = false;
     esp_timer_handle_t         m_i2s_start_timer = nullptr;
+
     uint8_t                    m_last_rx_seq = 0;
     bool                       m_has_last_rx_seq = false;
 

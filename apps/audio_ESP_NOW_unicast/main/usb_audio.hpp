@@ -14,6 +14,13 @@ void usb_audio_init(void);
 // Returns the number of bytes read
 size_t usb_audio_read_pcm(void* dest, size_t max_bytes);
 
+// Returns true if the host is actively streaming audio (Alt != 0 and recent packets received)
+bool usb_audio_is_streaming(void);
+
+// Clears the internal audio stream buffer
+void usb_audio_clear_buffer(void);
+
 #ifdef __cplusplus
 }
 #endif
+
