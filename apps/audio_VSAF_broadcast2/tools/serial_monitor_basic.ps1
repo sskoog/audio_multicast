@@ -1,0 +1,1 @@
+pio device monitor -p COM116 -b 115200 --dtr 0 --rts 0

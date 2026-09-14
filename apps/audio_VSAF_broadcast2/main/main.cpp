@@ -3,7 +3,7 @@
 #include "lc3_codec.hpp"
 #include "tone_generator.hpp"
 #include "i2s_audio.hpp"
-#include "espnow_unicast_engine.hpp"
+#include "vsaf_broadcast_engine.hpp"
 #include "status_led.hpp"
 #include "button.hpp"
 #include "diagnostics.hpp"
@@ -321,7 +321,11 @@ extern "C" void app_main(void) {
              cfg->node_id,
              (cfg->node_role == NODE_ROLE_SOURCE) ? "SOURCE (Transmitter)" : "SINK (Receiver)",
              cfg->device_name);
-    ESP_LOGI(TAG, "System initialization complete! Streaming started.");
+    if (cfg->node_role == NODE_ROLE_SOURCE) {
+        ESP_LOGI(TAG, "System initialization complete! SOURCE ready in IDLE state (send 'synth on' or 'start' via CLI).");
+    } else {
+        ESP_LOGI(TAG, "System initialization complete! SINK listening/scanning.");
+    }
 
     // Main 10 Hz telemetry loop
     while (true) {

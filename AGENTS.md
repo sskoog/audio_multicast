@@ -9,15 +9,15 @@ Legacy / exploratory experiments in Bluetooth Low Energy Audio (Auracast) are al
 
 ## Hardware Registry & Node Topology
 
-| Node ID | Board / Hardware | SoC Target | Flash / RAM | Default COM Port(s) | Default Role / Function |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Node 16** | Seeed Studio XIAO ESP32-S3 | ESP32-S3 (Xtensa LX7 + FPU) | 4 MB / 512 KB | **COM16** | **Audio SOURCE** (Stereo/Mono LC3 Encoder + Broadcaster) |
-| **Node 20** | Waveshare ESP32-C6-LCD-1.47 | ESP32-C6 (RISC-V) | 8 MB / 512 KB | **COM20** | Audio SINK (ST7789 LCD Console + WS2812B RGB) |
-| **Node 21** | ESP32-C6-WROOM-1 DevKit | ESP32-C6 (RISC-V) | 8 MB / 512 KB | **COM21** (Flash) & **COM121** (Bumble) | Audio SOURCE / USB Host Bridge |
-| **Node 23** | Waveshare ESP32-C6-Zero | ESP32-C6 (RISC-V) | 8 MB / 512 KB | **COM23** | **Audio SINK Left (Ch 0)** (MAX98357A I2S DAC + WS2812B) |
-| **Node 24** | Waveshare ESP32-C6-Zero | ESP32-C6 (RISC-V) | 8 MB / 512 KB | **COM24** | **Audio SINK Right (Ch 1)** (MAX98357A I2S DAC + WS2812B) |
-| **Node 25** | Heemol ESP32-C6 Mini | ESP32-C6 (RISC-V) | 8 MB / 512 KB | **COM25** | Audio SINK / Test Node |
-| **Node 26** | Heemol ESP32-C6 Mini | ESP32-C6 (RISC-V) | 8 MB / 512 KB | **COM26** | Audio SINK / Test Node |
+| Node ID | Board / Hardware | SoC Target | Flash / RAM | Factory MAC Address | Default COM Port(s) | Default Role / Function |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Node 16** | Seeed Studio XIAO ESP32-S3 | ESP32-S3 (Xtensa LX7 + FPU) | 4 MB / 512 KB | `E0:72:A1:D8:4C:D0` | **COM16** (Boot) / **COM116** (App) | **Audio SOURCE** (Stereo/Mono LC3 Encoder + Broadcaster) |
+| **Node 20** | Waveshare ESP32-C6-LCD-1.47 | ESP32-C6 (RISC-V) | 8 MB / 512 KB | `AC:EB:E6:23:DC:24` | **COM20** | Audio SINK / Subwoofer (Ch 5) (ST7789 LCD Console + WS2812B RGB) |
+| **Node 21** | ESP32-C6-WROOM-1 DevKit | ESP32-C6 (RISC-V) | 8 MB / 512 KB | `98:A3:16:9D:57:EC` | **COM21** (Flash) & **COM121** (Bumble/App) | Audio SINK (Ch 2: Center) / USB Host Bridge |
+| **Node 23** | Waveshare ESP32-C6-Zero | ESP32-C6 (RISC-V) | 8 MB / 512 KB | `B0:A6:04:99:38:44` | **COM23** | **Audio SINK Left (Ch 0)** (MAX98357A I2S DAC + WS2812B) |
+| **Node 24** | Waveshare ESP32-C6-Zero | ESP32-C6 (RISC-V) | 8 MB / 512 KB | `B0:A6:04:99:18:E4` | **COM24** | **Audio SINK Right (Ch 1)** (MAX98357A I2S DAC + WS2812B) |
+| **Node 25** | Heemol ESP32-C6 Mini | ESP32-C6 (RISC-V) | 8 MB / 512 KB | `E8:3D:C1:FB:DC:C4` | **COM25** (or COM10) | Audio SINK (Ch 3: Surround Left) / Test Node |
+| **Node 26** | Heemol ESP32-C6 Mini | ESP32-C6 (RISC-V) | 8 MB / 512 KB | `98:A3:16:AC:13:38` | **COM26** (or COM22) | Audio SINK (Ch 4: Surround Right) / Test Node |
 
 ### Pinout Reference
 - **Node 23 & Node 24 (SINK DACs)**:

@@ -40,18 +40,21 @@ def find_com_ports():
     ports = {}
     for p in serial.tools.list_ports.comports():
         hwid = p.hwid.upper()
+        dev = p.device.upper()
+        if dev in ["COM23", "COM24", "COM20", "COM21", "COM22", "COM25", "COM26", "COM121"]:
+            continue
         if "VID_303A" in hwid:
-            if "PID_1001" in hwid:
+            if "PID_1001" in hwid or dev == "COM16":
                 ports["jtag"] = p.device      # Native USB-Serial/JTAG ROM bootloader (COM16)
-            elif "PID_0009" in hwid:
+            elif "PID_0009" in hwid or dev == "COM3":
                 ports["otg"] = p.device       # Native USB-OTG ROM bootloader (COM3)
-            elif "PID_4002" in hwid:
+            elif "PID_4002" in hwid or dev == "COM116":
                 ports["app"] = p.device       # Running TinyUSB Application (COM116)
-        if p.device == "COM16":
+        if dev == "COM16":
             ports["com16"] = p.device
-        elif p.device == "COM3":
+        elif dev == "COM3":
             ports["com3"] = p.device
-        elif p.device == "COM116":
+        elif dev == "COM116":
             ports["com116"] = p.device
     return ports
 
@@ -59,9 +62,33 @@ def find_com_ports():
 def trigger_app_to_bootloader(app_port):
     """Attempt to reboot running TinyUSB app into ROM bootloader via CLI or 1200bps touch."""
     print(f"[INFO] Attempting to reboot Node 16 on {app_port} into ROM bootloader...")
+    target_port = rf"\\.\{app_port}" if not app_port.startswith("\\\\.\\") else app_port
+    # Try 0: Direct Win32 CreateFile / WriteFile to bypass pyserial SetCommState failure on TinyUSB CDC
     try:
-        # Try 1: CLI 'bootloader' command
-        s = serial.serial_for_url(app_port, baudrate=115200, do_not_open=True)
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.windll.kernel32
+        k32.CreateFileW.restype = wintypes.HANDLE
+        h = k32.CreateFileW(target_port, 0xC0000000, 0, None, 3, 0, None)
+        if h != -1 and h != 0xFFFFFFFF and h != 0:
+            k32.EscapeCommFunction(h, 5) # SETDTR
+            k32.EscapeCommFunction(h, 3) # SETRTS
+            written = wintypes.DWORD()
+            msg = b"\r\nbootloader\r\n"
+            res = k32.WriteFile(h, msg, len(msg), ctypes.byref(written), None)
+            time.sleep(0.2)
+            k32.CloseHandle(h)
+            if res and written.value > 0:
+                print(f"[OK] Sent 'bootloader' command via Win32 to {app_port}.")
+                return True
+    except Exception as e:
+        print(f"[DEBUG] Win32 command skipped: {e}")
+
+    try:
+        # Try 1: CLI 'bootloader' command via pyserial
+        s = serial.Serial()
+        s.port = target_port
+        s.baudrate = 115200
         s.dtr = False
         s.rts = False
         s.timeout = 1.0
@@ -80,10 +107,16 @@ def trigger_app_to_bootloader(app_port):
 
     try:
         # Try 2: 1200-baud touch reset
-        s = serial.Serial(app_port, 1200, timeout=0.5, write_timeout=0.5)
+        s = serial.Serial()
+        s.port = target_port
+        s.baudrate = 1200
+        s.timeout = 0.5
+        s.write_timeout = 0.5
+        s.dtr = True
+        s.open()
+        time.sleep(0.05)
         s.dtr = False
-        s.rts = False
-        time.sleep(0.1)
+        time.sleep(0.05)
         s.close()
         print(f"[OK] Sent 1200-baud touch to {app_port}.")
         return True
@@ -217,7 +250,11 @@ def main():
 
     bootloader_bin = os.path.join(args.bin_dir, "bootloader", "bootloader.bin")
     partition_bin = os.path.join(args.bin_dir, "partition_table", "partition-table.bin")
-    app_bin = os.path.join(args.bin_dir, "audio_ESP_NOW_unicast.bin")
+    app_bin = os.path.join(args.bin_dir, "audio_VSAF_broadcast2.bin")
+    if not os.path.isfile(app_bin):
+        fallback_bin = os.path.join(args.bin_dir, "audio_ESP_NOW_unicast.bin")
+        if os.path.isfile(fallback_bin):
+            app_bin = fallback_bin
 
     if not args.only_reset:
         for f in [bootloader_bin, partition_bin, app_bin]:
