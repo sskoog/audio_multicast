@@ -274,9 +274,11 @@ public:
     static SemaphoreHandle_t s_tx_done_sem;
 
 private:
-    static void sourceTaskTrampoline(void* arg);
+    static void sourceEncTaskTrampoline(void* arg);
+    static void sourceTxTaskTrampoline(void* arg);
     static void sinkTaskTrampoline(void* arg);
-    void runSourceLoop();
+    void runSourceEncLoop();
+    void runSourceTxLoop();
     void runSinkLoop();
 
     void handleAudioPacket(const vsaf_audio_packet_t* pkt, int8_t rssi, int64_t t_rx1_us);
@@ -315,8 +317,20 @@ private:
     float                      m_current_gain_db;
     bool                       m_instant_vol_update;
 
-    TaskHandle_t               m_source_task_handle;
+    TaskHandle_t               m_source_enc_task_handle;
+    TaskHandle_t               m_source_tx_task_handle;
     TaskHandle_t               m_sink_task_handle;
+
+    // Double-buffered encoded audio frame from Encode Task to TX Task
+    struct EncodedAudioBuffer {
+        uint8_t  data[120];
+        uint16_t octets;
+        bool     valid;
+    };
+    EncodedAudioBuffer         m_enc_ping_pong[2];
+    std::atomic<uint8_t>       m_enc_write_idx{0};
+    std::atomic<uint8_t>       m_enc_read_idx{0};
+    std::atomic<bool>          m_enc_ready{false};
 
     mutable SpscDurationRingBuffer<float, 64> m_codec_duration_buf;
     mutable TimeOffsetRingBuffer              m_time_offset_buf;
@@ -330,8 +344,10 @@ private:
     std::atomic<uint32_t>      m_fifo_overflows;
     uint16_t                   m_last_rx_seq;
     bool                       m_first_packet_received;
+    uint16_t                   m_expected_seq;
+    bool                       m_has_expected_seq;
 
-    static constexpr size_t    SINK_FIFO_PACKETS = 8;
+    static constexpr size_t    SINK_FIFO_PACKETS = 24;
     struct SinkFifoItem {
         uint16_t seq;
         uint8_t  len;

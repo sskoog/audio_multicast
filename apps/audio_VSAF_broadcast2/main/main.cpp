@@ -17,6 +17,7 @@
 #include "esp_mac.h"
 #include "nvs_flash.h"
 #include "driver/uart.h"
+#include "driver/gpio.h"
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
 #include "tusb.h"
 #include "soc/rtc_cntl_reg.h"
@@ -217,6 +218,75 @@ static void usb_serial_cli_task(void* pvParameters) {
     }
 }
 
+static void configure_unused_gpios_pulldown(const system_config_t* cfg) {
+    uint32_t pulled_count = 0;
+#if defined(CONFIG_IDF_TARGET_ESP32C6)
+    // ESP32-C6 GPIOs: 0..30
+    for (int pin = 0; pin <= 30; ++pin) {
+        // Critical system pins to NEVER touch:
+        // SPI Flash: GPIO 24..30 (SPICS0, SPIQ, SPIWP, VDD_SPI, SPIHD, SPICLK, SPID)
+        // USB Serial/JTAG: GPIO 12, 13
+        // UART0 Console: GPIO 16, 17
+        if (pin >= 24 && pin <= 30) continue;
+        if (pin == 12 || pin == 13) continue;
+        if (pin == 16 || pin == 17) continue;
+
+        // Configured active peripherals:
+        if (pin == cfg->status_led_gpio) continue;
+        if (pin == cfg->user_button_gpio) continue;
+        if (pin == cfg->i2s_bclk_gpio) continue;
+        if (pin == cfg->i2s_ws_gpio) continue;
+        if (pin == cfg->i2s_dout_gpio) continue;
+        if (cfg->node_role == NODE_ROLE_SINK && pin == 0) continue; // MAX98357A GAIN pin
+
+        gpio_config_t io_conf = {};
+        io_conf.pin_bit_mask = (1ULL << pin);
+        io_conf.mode = GPIO_MODE_INPUT;
+        io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+        io_conf.pull_down_en = GPIO_PULLDOWN_ENABLE;
+        io_conf.intr_type = GPIO_INTR_DISABLE;
+        gpio_config(&io_conf);
+        pulled_count++;
+    }
+    ESP_LOGI("GPIO_INIT", "ESP32-C6: Configured %lu unused GPIOs as INPUT with weak PULL-DOWN", (unsigned long)pulled_count);
+
+#elif defined(CONFIG_IDF_TARGET_ESP32S3)
+    // ESP32-S3 GPIOs: 0..48 (excluding non-existent 22..25)
+    for (int pin = 0; pin <= 48; ++pin) {
+        // Non-existent silicon pins on S3
+        if (pin >= 22 && pin <= 25) continue;
+
+        // Critical system pins to NEVER touch:
+        // Flash & Octal PSRAM: GPIO 26..37, 47, 48
+        // USB Native CDC: GPIO 19, 20
+        // UART0 Console: GPIO 43, 44
+        // JTAG: GPIO 39..42
+        if (pin >= 26 && pin <= 37) continue;
+        if (pin == 47 || pin == 48) continue;
+        if (pin == 19 || pin == 20) continue;
+        if (pin == 43 || pin == 44) continue;
+        if (pin >= 39 && pin <= 42) continue;
+
+        // Configured active peripherals:
+        if (pin == cfg->status_led_gpio) continue;
+        if (pin == cfg->user_button_gpio) continue;
+        if (pin == cfg->i2s_bclk_gpio) continue;
+        if (pin == cfg->i2s_ws_gpio) continue;
+        if (pin == cfg->i2s_dout_gpio) continue;
+
+        gpio_config_t io_conf = {};
+        io_conf.pin_bit_mask = (1ULL << pin);
+        io_conf.mode = GPIO_MODE_INPUT;
+        io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+        io_conf.pull_down_en = GPIO_PULLDOWN_ENABLE;
+        io_conf.intr_type = GPIO_INTR_DISABLE;
+        gpio_config(&io_conf);
+        pulled_count++;
+    }
+    ESP_LOGI("GPIO_INIT", "ESP32-S3: Configured %lu unused GPIOs as INPUT with weak PULL-DOWN", (unsigned long)pulled_count);
+#endif
+}
+
 extern "C" void app_main(void) {
 #if defined(CONFIG_IDF_TARGET_ESP32C6)
     USB_SERIAL_JTAG.chip_rst.usb_uart_chip_rst_dis = 1;
@@ -227,7 +297,11 @@ extern "C" void app_main(void) {
     // 0. Configure Task Watchdog Timer (TWDT) to 1.0 second (1000 ms)
     esp_task_wdt_config_t twdt_config = {
         .timeout_ms = 1000,
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+        .idle_core_mask = (1 << 0), // Core 1 is dedicated real-time audio pump; monitor Core 0
+#else
         .idle_core_mask = (1 << portNUM_PROCESSORS) - 1,
+#endif
         .trigger_panic = true,
     };
     if (esp_task_wdt_reconfigure(&twdt_config) != ESP_OK) {
@@ -241,6 +315,7 @@ extern "C" void app_main(void) {
     ESP_LOGI(TAG, "==================================================");
 
     const system_config_t* cfg = get_system_config();
+    configure_unused_gpios_pulldown(cfg);
 
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -252,7 +327,6 @@ extern "C" void app_main(void) {
     // 1. Status LED
     s_status_led = &Hardware::getStatusLed();
     s_status_led->init(cfg->status_led_gpio, cfg->status_led_num, (cfg->status_led_gpio == 21));
-    s_status_led->setSystemState(Hardware::SystemState::IDLE);
 
     // 2. User Button
     if (cfg->user_button_gpio >= 0) {

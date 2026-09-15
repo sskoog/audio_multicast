@@ -18,6 +18,7 @@ static IRAM_ATTR bool i2s_dma_tx_done_cb(i2s_chan_handle_t handle, i2s_event_dat
 I2sAudioDriver::I2sAudioDriver(int bclk_pin, int ws_pin, int dout_pin, int din_pin, int gain_pin)
     : m_bclk_pin(bclk_pin), m_ws_pin(ws_pin), m_dout_pin(dout_pin), m_din_pin(din_pin), m_gain_pin(gain_pin) {
     m_dma_free_sem = xSemaphoreCreateBinary();
+    configurePinElectricalProperties();
 }
 
 I2sAudioDriver::~I2sAudioDriver() {
@@ -30,6 +31,28 @@ I2sAudioDriver::~I2sAudioDriver() {
         vSemaphoreDelete(m_dma_free_sem);
         m_dma_free_sem = nullptr;
     }
+}
+
+void I2sAudioDriver::configurePinElectricalProperties() {
+    auto configure_pin = [](int pin, bool is_output) {
+        if (pin < 0) return;
+        gpio_num_t gpio = static_cast<gpio_num_t>(pin);
+        // Enable internal pull-down resistor to prevent line floating during idle/init
+        gpio_set_pull_mode(gpio, GPIO_PULLDOWN_ONLY);
+        if (is_output) {
+            // Set pad drive strength to 20 mA (GPIO_DRIVE_CAP_2) for fast, crisp square clock/data edges
+            gpio_set_drive_capability(gpio, GPIO_DRIVE_CAP_2);
+        }
+    };
+
+    configure_pin(m_bclk_pin, true);
+    configure_pin(m_ws_pin, true);
+    configure_pin(m_dout_pin, true);
+    if (m_din_pin >= 0) {
+        configure_pin(m_din_pin, false);
+    }
+    ESP_LOGI(TAG, "I2S electrical properties applied: Pull-down enabled, Drive strength set to 20 mA (GPIO_DRIVE_CAP_2) on BCLK=%d, WS=%d, DOUT=%d",
+             m_bclk_pin, m_ws_pin, m_dout_pin);
 }
 
 void I2sAudioDriver::setHardwareGain(Max98357Gain gain) {
@@ -139,8 +162,7 @@ esp_err_t I2sAudioDriver::reconfigureAudioFormat(uint32_t sample_rate, i2s_data_
     i2s_channel_register_event_callback(m_tx_handle, &cbs, this);
 
     // Philips I2S Slot Configuration:
-    // 16-bit audio: 16-bit slot per channel (32 BCLK cycles per stereo frame)
-    // 24-bit / 32-bit audio: 32-bit slot per channel (64 BCLK cycles per stereo frame)
+    // 16-bit slot width per channel (32 BCLK cycles per stereo frame: 1.536 MHz at 48 kHz).
     i2s_slot_bit_width_t slot_bit_width = (bits_per_sample == I2S_DATA_BIT_WIDTH_16BIT) ? 
                                            I2S_SLOT_BIT_WIDTH_16BIT : I2S_SLOT_BIT_WIDTH_32BIT;
     uint32_t ws_width = (bits_per_sample == I2S_DATA_BIT_WIDTH_16BIT) ? 16 : 32;
@@ -175,6 +197,7 @@ esp_err_t I2sAudioDriver::reconfigureAudioFormat(uint32_t sample_rate, i2s_data_
 
     ret = i2s_channel_init_std_mode(m_tx_handle, &std_cfg);
     if (ret == ESP_OK) {
+        configurePinElectricalProperties();
         m_sample_rate = sample_rate;
         m_frame_duration_us = frame_duration_us;
         m_bits_per_sample = bits_per_sample;
@@ -225,6 +248,7 @@ esp_err_t I2sAudioDriver::stop() {
     esp_err_t ret = i2s_channel_disable(m_tx_handle);
     if (ret == ESP_OK) {
         m_is_running = false;
+        configurePinElectricalProperties();
         if (m_dma_free_sem) {
             xSemaphoreTake(m_dma_free_sem, 0);
         }

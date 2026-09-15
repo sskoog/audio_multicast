@@ -98,24 +98,23 @@ void SystemDiagnostics::tick() {
         m_last_plc_count = plc_count;
         m_last_fifo_udr = fifo_ud;
 
-        // FreeRTOS CPU load measurement sampled over the 1-second interval
+        // FreeRTOS CPU load measurement sampled over the 1-second interval (zero dynamic allocation)
         int cpu_load_pct = m_cpu_pct;
 #if (configGENERATE_RUN_TIME_STATS == 1 && configUSE_TRACE_FACILITY == 1)
+        static TaskStatus_t s_task_status_array[32];
         UBaseType_t task_count = uxTaskGetNumberOfTasks();
         if (task_count > 0) {
-            TaskStatus_t* task_status_array = static_cast<TaskStatus_t*>(pvPortMalloc(task_count * sizeof(TaskStatus_t)));
-            if (task_status_array) {
-                uint32_t total_runtime_dummy = 0;
-                UBaseType_t num_tasks = uxTaskGetSystemState(task_status_array, task_count, &total_runtime_dummy);
-                uint32_t total_tasks_runtime = 0;
-                uint32_t idle_runtime = 0;
-                for (UBaseType_t i = 0; i < num_tasks; ++i) {
-                    total_tasks_runtime += task_status_array[i].ulRunTimeCounter;
-                    if (strncmp(task_status_array[i].pcTaskName, "IDLE", 4) == 0) {
-                        idle_runtime += task_status_array[i].ulRunTimeCounter;
-                    }
+            UBaseType_t query_count = (task_count <= 32) ? task_count : 32;
+            uint32_t total_runtime_dummy = 0;
+            UBaseType_t num_tasks = uxTaskGetSystemState(s_task_status_array, query_count, &total_runtime_dummy);
+            uint32_t total_tasks_runtime = 0;
+            uint32_t idle_runtime = 0;
+            for (UBaseType_t i = 0; i < num_tasks; ++i) {
+                total_tasks_runtime += s_task_status_array[i].ulRunTimeCounter;
+                if (strncmp(s_task_status_array[i].pcTaskName, "IDLE", 4) == 0) {
+                    idle_runtime += s_task_status_array[i].ulRunTimeCounter;
                 }
-                vPortFree(task_status_array);
+            }
 
                 if (m_has_prev_runtime) {
                     uint32_t delta_total = total_tasks_runtime - m_last_total_runtime;
@@ -132,7 +131,6 @@ void SystemDiagnostics::tick() {
                 }
                 m_last_total_runtime = total_tasks_runtime;
                 m_last_idle_runtime = idle_runtime;
-            }
         }
 #endif
 

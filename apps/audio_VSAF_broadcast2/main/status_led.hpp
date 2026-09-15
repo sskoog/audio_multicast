@@ -31,9 +31,9 @@ inline constexpr RgbColor LED_COLOR_ORANGE{255, 100, 0};
 inline constexpr RgbColor LED_COLOR_YELLOW{200, 200, 0};
 
 // Default brightness: 25% (64/255) for RGB
-// Default max duty cycle for pulsing discrete LED (S3): 70% (179/255)
+// Default max duty cycle for pulsing discrete LED (S3) and WS2812 RGB: 63/255 (~25%)
 inline constexpr uint8_t DEFAULT_LED_BRIGHTNESS = 64; 
-inline constexpr uint8_t DEFAULT_PULSE_MAX_BRIGHTNESS = 179; // 70% max duty cycle
+inline constexpr uint8_t DEFAULT_PULSE_MAX_BRIGHTNESS = 63; // 63/255 max duty/brightness for all PULSE patterns
 inline constexpr uint8_t DEFAULT_LED_DUTY_CYCLE = 48; 
 
 // =====================================================================
@@ -48,7 +48,7 @@ enum class LedPatternMode {
 };
 
 struct BlinkConfig {
-    uint8_t duty_cycle; // 0 to 255 (0 = OFF, 255 = SOLID ON, 48 = ~19% pulse, 179 = ~70% max pulse)
+    uint8_t duty_cycle; // 0 to 255 (0 = OFF, 255 = SOLID ON, 48 = ~19% pulse, 63 = ~25% max pulse)
     float   blink_freq; // Frequency in Hz (0.05 Hz to 10.0 Hz)
     LedPatternMode mode = LedPatternMode::BLINK;
 

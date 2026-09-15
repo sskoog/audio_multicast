@@ -76,6 +76,8 @@ public:
     void resetUnderrunCount() { m_underrun_count.store(0, std::memory_order_relaxed); }
 
 private:
+    void configurePinElectricalProperties();
+
     int m_bclk_pin;
     int m_ws_pin;
     int m_dout_pin;

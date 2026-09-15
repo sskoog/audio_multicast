@@ -99,7 +99,7 @@ esp_err_t StatusLed::init(int gpio_num, int num_leds, bool active_low) {
     if (!m_running) {
         m_running = true;
 #if SOC_CPU_CORES_NUM > 1
-        BaseType_t task_ret = xTaskCreatePinnedToCore(ledTaskRoutine, "status_led_task", 4096, this, 4, &m_task_handle, 1);
+        BaseType_t task_ret = xTaskCreatePinnedToCore(ledTaskRoutine, "status_led_task", 4096, this, 4, &m_task_handle, 0);
 #else
         BaseType_t task_ret = xTaskCreate(ledTaskRoutine, "status_led_task", 4096, this, 4, &m_task_handle);
 #endif
@@ -294,7 +294,9 @@ void StatusLed::ledTaskRoutine(void* pvParameters) {
             // Quadratic easing: q1 = l1 * l1
             float q1 = l1 * l1;
             
-            uint8_t current_brightness = static_cast<uint8_t>(max_brightness * q1 + 0.5f);
+            // Enforce max brightness cap of 63/255 for all PULSE patterns
+            uint8_t effective_max = (max_brightness > 63) ? 63 : max_brightness;
+            uint8_t current_brightness = static_cast<uint8_t>(effective_max * q1 + 0.5f);
             instance->updateHardwareLed(r, g, b, current_brightness);
             vTaskDelay(pdMS_TO_TICKS(UPDATE_INTERVAL_MS));
             continue;

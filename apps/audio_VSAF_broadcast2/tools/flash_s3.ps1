@@ -6,7 +6,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 # Terminate lingering monitors
-Get-CimInstance Win32_Process -Filter "CommandLine LIKE '%device monitor%' OR CommandLine LIKE '%idf_monitor%' OR CommandLine LIKE '%test_audio_matrix%' OR CommandLine LIKE '%pc_audio_streamer%'" | ForEach-Object { Stop-Process -Id $_.ProcessId -Force } -ErrorAction SilentlyContinue
+Get-CimInstance Win32_Process -Filter "CommandLine LIKE '%device monitor%' OR CommandLine LIKE '%idf_monitor%' OR CommandLine LIKE '%test_audio_matrix%' OR CommandLine LIKE '%pc_audio_streamer%' OR CommandLine LIKE '%test_broadcast_cluster%'" | ForEach-Object { Stop-Process -Id $_.ProcessId -Force } -ErrorAction SilentlyContinue
 
 # Environment Setup
 if (Test-Path "C:\Users\stefa\OneDrive\Documents\ESP\.esptools") {
