@@ -64,7 +64,7 @@ public:
     esp_err_t reconfigureEncoder(uint32_t sample_rate_hz, uint16_t octets_per_frame, uint32_t frame_duration_us = 10000);
     esp_err_t reconfigureDecoder(uint32_t sample_rate_hz, uint16_t octets_per_frame, uint32_t frame_duration_us = 10000);
 
-    esp_err_t encodeFrame(const int16_t* pcm_in, size_t pcm_samples, uint8_t* out_lc3_buf, size_t max_out_bytes, size_t* actual_out_bytes);
+    esp_err_t encodeFrame(const int16_t* pcm_in, size_t pcm_samples, uint8_t* out_lc3_buf, size_t max_out_bytes, size_t* actual_out_bytes, uint8_t channel_idx = 0);
     esp_err_t decodeFrame(const uint8_t* in_lc3_buf, size_t in_bytes, int16_t* pcm_out, size_t max_pcm_samples,
                           size_t* actual_pcm_samples, uint32_t stream_sample_rate = 0, uint32_t stream_duration_us = 0);
 
@@ -81,8 +81,8 @@ public:
 private:
     void* m_enc_handle = nullptr;
     void* m_dec_handle = nullptr;
-    void* m_google_encoder = nullptr;
-    void* m_google_enc_mem = nullptr;
+    void* m_google_encoder[2] = {nullptr, nullptr};
+    void* m_google_enc_mem[2] = {nullptr, nullptr};
     uint32_t m_sample_rate = AUDIO_SAMPLE_RATE_HZ;
     uint8_t  m_channels = AUDIO_CHANNELS_NUM;
     uint32_t m_frame_duration_us = AUDIO_FRAME_DURATION_US;

@@ -169,7 +169,7 @@ esp_err_t EspNowBroadcastEngine::init(uint8_t role, uint8_t node_id, uint8_t wif
 
     // 4. Initialize Codec
     if (m_node_role == NODE_ROLE_SOURCE) {
-        m_lc3_codec.initEncoder(m_telemetry.sample_rate, 1, m_frame_duration_us, m_octets_per_frame);
+        m_lc3_codec.initEncoder(m_telemetry.sample_rate, 2, m_frame_duration_us, m_octets_per_frame);
     } else {
         m_lc3_codec.initDecoder(m_telemetry.sample_rate, 1, m_frame_duration_us, m_octets_per_frame);
     }
@@ -219,7 +219,6 @@ esp_err_t EspNowBroadcastEngine::stop() {
 }
 
 void EspNowBroadcastEngine::transitionTo(NetworkState new_state) {
-    NetworkState old_state = m_state.load(std::memory_order_relaxed);
     m_state.store(new_state, std::memory_order_release);
 
     // Synchronize Status LED with network state
@@ -247,7 +246,7 @@ void EspNowBroadcastEngine::transitionTo(NetworkState new_state) {
     }
 
     if (m_node_role == NODE_ROLE_SINK) {
-        if (new_state == NetworkState::IDLE) {
+        if (new_state == NetworkState::IDLE || new_state == NetworkState::SCANNING) {
             if (m_i2s_dac) {
                 m_i2s_dac->stop();
             }
@@ -258,17 +257,9 @@ void EspNowBroadcastEngine::transitionTo(NetworkState new_state) {
             portEXIT_CRITICAL(&m_sink_fifo_lock);
             m_has_expected_seq = false;
             m_first_packet_received = false;
-        } else if (new_state == NetworkState::SCANNING && old_state != NetworkState::SCANNING) {
-            if (m_i2s_dac) {
-                m_i2s_dac->stop();
-            }
-            portENTER_CRITICAL(&m_sink_fifo_lock);
-            m_sink_fifo_count = 0;
-            m_sink_fifo_head = 0;
-            m_sink_fifo_tail = 0;
-            portEXIT_CRITICAL(&m_sink_fifo_lock);
-            m_has_expected_seq = false;
-            m_first_packet_received = false;
+
+            // Reset all counters when transitioning out from streaming
+            resetStreamingCounters();
         }
 
         if (m_sink_task_handle) {
@@ -526,8 +517,6 @@ void EspNowBroadcastEngine::onPacketReceived(const uint8_t* mac_addr, const uint
 // ---------------------------------------------------------------------------
 
 void EspNowBroadcastEngine::handleAudioPacket(const vsaf_audio_packet_t* pkt, int8_t rssi, int64_t t_rx1_us) {
-    m_rx_packets_total++;
-    m_rx_packets_sec++;
     m_last_rssi = rssi;
     m_last_master_time_us = pkt->t_tx1_us;
     m_last_local_time_us = static_cast<uint32_t>(t_rx1_us);
@@ -542,20 +531,29 @@ void EspNowBroadcastEngine::handleAudioPacket(const vsaf_audio_packet_t* pkt, in
         m_ema_time_offset_ms = (m_ema_time_offset_ms * 0.95f) + (offset_ms * 0.05f);
     }
 
-    // Sequence tracking & deduplication: reject only exact duplicates
+    // Sequence tracking & deduplication: reject duplicates or stale packets
     int16_t seq_diff = static_cast<int16_t>(pkt->seq - m_last_rx_seq);
-    bool is_duplicate = (m_first_packet_received && pkt->seq == m_last_rx_seq);
-    if (!m_first_packet_received || seq_diff < -100 || seq_diff > 500) {
+    bool is_duplicate = false;
+
+    if (!m_first_packet_received || seq_diff < -1000 || seq_diff > 5000) {
+        // Initial synchronization or master sequence discontinuity
         m_first_packet_received = true;
         m_last_rx_seq = pkt->seq;
         is_duplicate = false;
+    } else if (seq_diff <= 0) {
+        // Duplicate (e.g. ARQ retry for already received frame) or out-of-order stale packet
+        is_duplicate = true;
     } else {
-        if (seq_diff > 0) {
-            m_last_rx_seq = pkt->seq;
-        }
+        // Fresh audio frame needed for streaming
+        m_last_rx_seq = pkt->seq;
+        is_duplicate = false;
     }
 
     if (!is_duplicate) {
+        // Only count audio packets this node needs to stream
+        m_rx_packets_total++;
+        m_rx_packets_sec++;
+
         // Push LC3 payload to Jitter FIFO
         portENTER_CRITICAL(&m_sink_fifo_lock);
         if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
@@ -637,11 +635,16 @@ void EspNowBroadcastEngine::runSourceEncLoop() {
             memset(pcm_mono, 0, samples * sizeof(int16_t));
         }
 
-        // Single LC3 encode for 6-channel replication
+        // Dual LC3 encode
         int64_t enc_t0 = esp_timer_get_time();
-        size_t actual_bytes = 0;
+        size_t actual_bytes0 = 0;
+        size_t actual_bytes1 = 0;
         uint8_t write_idx = m_enc_write_idx.load(std::memory_order_relaxed);
-        m_lc3_codec.encodeFrame(pcm_mono, samples, m_enc_ping_pong[write_idx].data, m_octets_per_frame, &actual_bytes);
+
+        // Feed both encoders with the same audio from the sine synth
+        m_lc3_codec.encodeFrame(pcm_mono, samples, m_enc_ping_pong[write_idx].data[0], m_octets_per_frame, &actual_bytes0, 0);
+        m_lc3_codec.encodeFrame(pcm_mono, samples, m_enc_ping_pong[write_idx].data[1], m_octets_per_frame, &actual_bytes1, 1);
+
         m_enc_ping_pong[write_idx].octets = static_cast<uint16_t>(m_octets_per_frame);
         m_enc_ping_pong[write_idx].valid = true;
 
@@ -703,7 +706,10 @@ void EspNowBroadcastEngine::runSourceTxLoop() {
         uint8_t read_idx = m_enc_read_idx.load(std::memory_order_acquire);
         if (m_enc_ready.load(std::memory_order_acquire) && m_enc_ping_pong[read_idx].valid) {
             for (size_t ch = 0; ch < MAX_SINK_NODES; ++ch) {
-                memcpy(encoded_channels[ch], m_enc_ping_pong[read_idx].data, m_octets_per_frame);
+                // LC3-frame0 --> Packet 0, 2, 4 (Left, Center, Surround Left)
+                // LC3-frame1 --> Packet 1, 3, 5 (Right, Surround Right, Subwoofer)
+                uint8_t enc_idx = (ch % 2 == 0) ? 0 : 1;
+                memcpy(encoded_channels[ch], m_enc_ping_pong[read_idx].data[enc_idx], m_octets_per_frame);
             }
         } else {
             // Encoder not yet ready on first frame: silence
@@ -1010,6 +1016,7 @@ void EspNowBroadcastEngine::runSinkLoop() {
                 }
                 m_has_expected_seq = false;
                 transitionTo(NetworkState::SCANNING);
+                consecutive_underruns = 0;
                 vTaskDelay(pdMS_TO_TICKS(10));
                 continue;
             }

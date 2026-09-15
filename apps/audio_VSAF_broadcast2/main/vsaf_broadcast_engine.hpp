@@ -241,11 +241,23 @@ public:
     uint32_t getPlcCount() const { return m_plc_count.load(std::memory_order_relaxed); }
     uint32_t getAndResetPlcCount() { return m_plc_count.exchange(0, std::memory_order_relaxed); }
 
-    void resetStreamingCounters() {}
+    void resetStreamingCounters() {
+        m_plc_count.store(0, std::memory_order_relaxed);
+        m_fifo_underflows.store(0, std::memory_order_relaxed);
+        m_fifo_overflows.store(0, std::memory_order_relaxed);
+        m_rx_packets_sec.store(0, std::memory_order_relaxed);
+        m_rx_packets_total.store(0, std::memory_order_relaxed);
+        if (m_i2s_dac) {
+            m_i2s_dac->resetUnderrunCount();
+        }
+    }
     void resetErrorCounters() {
-        m_plc_count = 0;
-        m_fifo_underflows = 0;
-        m_fifo_overflows = 0;
+        m_plc_count.store(0, std::memory_order_relaxed);
+        m_fifo_underflows.store(0, std::memory_order_relaxed);
+        m_fifo_overflows.store(0, std::memory_order_relaxed);
+        if (m_i2s_dac) {
+            m_i2s_dac->resetUnderrunCount();
+        }
     }
 
     uint64_t getMasterTimeMs() const { return m_last_master_time_us / 1000ULL; }
@@ -321,9 +333,9 @@ private:
     TaskHandle_t               m_source_tx_task_handle;
     TaskHandle_t               m_sink_task_handle;
 
-    // Double-buffered encoded audio frame from Encode Task to TX Task
+    // Double-buffered encoded audio frame from Encode Task to TX Task (2 LC3 channels)
     struct EncodedAudioBuffer {
-        uint8_t  data[120];
+        uint8_t  data[2][120];
         uint16_t octets;
         bool     valid;
     };
