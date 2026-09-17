@@ -145,10 +145,12 @@ void handle_ascii_command(const char* raw_line) {
                       "  peer del <mac>             - Remove a SINK peer\n"
                       "  peer enable <mac>          - Enable unicast transmission to peer\n"
                       "  peer disable <mac>         - Disable unicast transmission to peer\n"
+                      "  scan [auto] / survey       - Passive 802.11 RF sniffer survey across channels 1..13\n"
+                      "  wifich <1..13>             - Set Wi-Fi channel manually\n"
                       "  start / play / cast        - Transition SOURCE to CAST / SINK to SCANNING\n"
                       "  stop / pause               - Stop transmission / receiver (transition to IDLE)\n"
                       "  tone [on|off]              - Toggle internal test tone generator (overrides auto-USB)\n"
-                      "  phy <rate>                 - Switch PHY rate (mc0..mc7, 6m, 9m, 12m, 18m, 24m)\n"
+                      "  phy <rate>                 - Switch PHY rate (primary/ht3, secondary/12m, tertiary/ht0)\n"
                       "  mode mono|stereo|surround  - Switch audio channel generation mode\n"
                       "  ch <0..5>                  - Set SINK target channel (0: Left, 1: Right, 5: Sub)\n"
                       "  sublp <20..500>            - Set Subwoofer 4th-order LR low-pass cutoff (Hz)\n"
@@ -265,20 +267,23 @@ void handle_ascii_command(const char* raw_line) {
         wifi_phy_mode_t mode = WIFI_PHY_MODE_HT20;
         wifi_phy_rate_t rate = WIFI_PHY_RATE_MCS1_LGI;
 
-        if (strcasecmp(rate_str, "mc0") == 0 || strcasecmp(rate_str, "mcs0") == 0) {
+        if (strcasecmp(rate_str, "primary") == 0 || strcasecmp(rate_str, "1") == 0 ||
+            strcasecmp(rate_str, "ht3") == 0 || strcasecmp(rate_str, "mcs3") == 0 || strcasecmp(rate_str, "mc3") == 0) {
+            mode = WIFI_PHY_MODE_HT20; rate = WIFI_PHY_RATE_MCS3_LGI;
+        } else if (strcasecmp(rate_str, "secondary") == 0 || strcasecmp(rate_str, "2") == 0 ||
+                   strcasecmp(rate_str, "ofd") == 0 || strcasecmp(rate_str, "12m") == 0 || strcasecmp(rate_str, "ofdm") == 0) {
+            mode = WIFI_PHY_MODE_11G; rate = WIFI_PHY_RATE_12M;
+        } else if (strcasecmp(rate_str, "tertiary") == 0 || strcasecmp(rate_str, "3") == 0 ||
+                   strcasecmp(rate_str, "ht0") == 0 || strcasecmp(rate_str, "mcs0") == 0 || strcasecmp(rate_str, "mc0") == 0) {
             mode = WIFI_PHY_MODE_HT20; rate = WIFI_PHY_RATE_MCS0_LGI;
         } else if (strcasecmp(rate_str, "mc1") == 0 || strcasecmp(rate_str, "mcs1") == 0) {
             mode = WIFI_PHY_MODE_HT20; rate = WIFI_PHY_RATE_MCS1_LGI;
         } else if (strcasecmp(rate_str, "mc2") == 0 || strcasecmp(rate_str, "mcs2") == 0) {
             mode = WIFI_PHY_MODE_HT20; rate = WIFI_PHY_RATE_MCS2_LGI;
-        } else if (strcasecmp(rate_str, "mc3") == 0 || strcasecmp(rate_str, "mcs3") == 0) {
-            mode = WIFI_PHY_MODE_HT20; rate = WIFI_PHY_RATE_MCS3_LGI;
         } else if (strcasecmp(rate_str, "6m") == 0) {
             mode = WIFI_PHY_MODE_11G; rate = WIFI_PHY_RATE_6M;
         } else if (strcasecmp(rate_str, "9m") == 0) {
             mode = WIFI_PHY_MODE_11G; rate = WIFI_PHY_RATE_9M;
-        } else if (strcasecmp(rate_str, "12m") == 0) {
-            mode = WIFI_PHY_MODE_11G; rate = WIFI_PHY_RATE_12M;
         } else if (strcasecmp(rate_str, "18m") == 0) {
             mode = WIFI_PHY_MODE_11G; rate = WIFI_PHY_RATE_18M;
         } else if (strcasecmp(rate_str, "24m") == 0) {
@@ -293,7 +298,27 @@ void handle_ascii_command(const char* raw_line) {
 
         if (s_unicast_engine) {
             s_unicast_engine->setWifiPhyRate(mode, rate);
-            print_console("[OK] Switched Wi-Fi PHY Rate to %s\n", s_unicast_engine->getWifiPhyRateString());
+            print_console("[OK] Switched Wi-Fi PHY Rate to %s (%s)\n",
+                          s_unicast_engine->getWifiPhyRateString(),
+                          (mode == WIFI_PHY_MODE_HT20) ? "802.11n HT20" : "802.11g OFDM");
+        }
+    } else if (strncasecmp(line, "scan", 4) == 0 || strncasecmp(line, "survey", 6) == 0) {
+        if (s_unicast_engine) {
+            bool auto_apply = (strcasestr(line, "auto") != nullptr || strcasestr(line, "apply") != nullptr || strcasestr(line, "set") != nullptr);
+            uint32_t dwell_ms = 300;
+            int val = 0;
+            if (sscanf(line, "%*s %d", &val) == 1 && val >= 50 && val <= 2000) {
+                dwell_ms = static_cast<uint32_t>(val);
+            }
+            s_unicast_engine->scanAndSelectBestChannel(dwell_ms, auto_apply, true);
+        }
+    } else if (strncasecmp(line, "wifich ", 7) == 0 || strncasecmp(line, "channel ", 8) == 0) {
+        int ch = 0;
+        if ((sscanf(line, "%*s %d", &ch) == 1) && ch >= 1 && ch <= 13 && s_unicast_engine) {
+            s_unicast_engine->setWifiChannel(static_cast<uint8_t>(ch));
+            print_console("[OK] Wi-Fi channel set to %d\n", ch);
+        } else {
+            print_console("[USAGE] wifich <1..13>\n");
         }
     } else if (strncasecmp(line, "ch ", 3) == 0) {
         int ch = atoi(line + 3);

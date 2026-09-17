@@ -5,69 +5,75 @@
 
 namespace AudioNet {
 
-// 16-Bit Tag Nibble Layout (0xTTRS)
-// Bits 0-3  : TX_ID (Sender Node ID: 0x0 = SOURCE, 0x1-0x6 = SINK 1-6)
-// Bits 4-7  : RX_ID (Target Receiver: 0x0-0x6 = Specific Node, 0xF = Broadcast/All)
-// Bits 8-11 : TYPE  (Packet Type: 0=Audio, 1=Soft-ACK, 2=ARQ Repair, 3=Beacon)
-// Bits 12-15: FLAGS (Bit 12: Retransmit, Bit 13: TimeSyncValid, Bits 14-15: Version 0)
-
-enum PacketType : uint8_t {
-    PKT_TYPE_AUDIO        = 0x0,
-    PKT_TYPE_SOFT_ACK     = 0x1,
-    PKT_TYPE_ARQ_REPAIR   = 0x2,
-    PKT_TYPE_SYNC_BEACON  = 0x3,
-};
-
-enum PacketFlags : uint8_t {
-    FLAG_NONE             = 0x00,
-    FLAG_RETRY            = 0x01, // Bit 12
-    FLAG_TIME_SYNC_VALID  = 0x02, // Bit 13
-};
+static constexpr uint16_t VSAF_TYPE_AUDIO          = 0x1337; // Audio broadcast (from SOURCE)
+static constexpr uint16_t VSAF_TYPE_CONTROL        = 0x1338; // Control packet (from SOURCE)
+static constexpr uint16_t VSAF_TYPE_SINK_TELEMETRY = 0x1339; // Telemetry reply (from SINK)
 
 static constexpr uint8_t NODE_ID_SOURCE    = 0x0;
-static constexpr uint8_t NODE_ID_BROADCAST = 0xF;
+static constexpr uint8_t NODE_ID_BROADCAST = 0x7;
 static constexpr size_t  MAX_SINK_NODES    = 6;
+static constexpr size_t  LC3_FRAME_OCTETS  = 120;
 
-// Helper to construct 16-bit tag
-inline constexpr uint16_t make_tag(uint8_t tx_id, uint8_t rx_id, uint8_t type, uint8_t flags = 0) {
-    return static_cast<uint16_t>(
-        (tx_id & 0x0F) |
-        ((rx_id & 0x0F) << 4) |
-        ((type & 0x0F) << 8) |
-        ((flags & 0x0F) << 12)
+// packet_flags Bitfield Layout:
+// Bit 0    : Frame Duration (0 = 7.5 ms, 1 = 10.0 ms)
+// Bits 1-3 : Sample Rate Code (0=8k, 1=16k, 2=24k, 3=32k, 4=48k)
+// Bits 4-6 : Receiver Channel ID (0..5 = Sinks 0..5, 7 = Broadcast)
+// Bit 7    : Request for ACK / Reply Flag (1 = SINK must reply with telemetry frame, 0 = no reply)
+
+inline constexpr uint8_t make_packet_flags(uint8_t rx_id, uint32_t sample_rate_hz, uint32_t frame_dur_us, bool request_ack) {
+    uint8_t dur_bit = (frame_dur_us >= 10000) ? 1 : 0;
+    uint8_t sr_code = 4; // Default 48k
+    switch (sample_rate_hz) {
+        case 8000:  sr_code = 0; break;
+        case 16000: sr_code = 1; break;
+        case 24000: sr_code = 2; break;
+        case 32000: sr_code = 3; break;
+        case 48000: default: sr_code = 4; break;
+    }
+    return static_cast<uint8_t>(
+        (dur_bit & 0x01) |
+        ((sr_code & 0x07) << 1) |
+        ((rx_id & 0x07) << 4) |
+        (request_ack ? 0x80 : 0x00)
     );
 }
 
-// Helpers to extract tag fields
-inline constexpr uint8_t get_tx_id(uint16_t tag) { return static_cast<uint8_t>(tag & 0x0F); }
-inline constexpr uint8_t get_rx_id(uint16_t tag) { return static_cast<uint8_t>((tag >> 4) & 0x0F); }
-inline constexpr uint8_t get_pkt_type(uint16_t tag) { return static_cast<uint8_t>((tag >> 8) & 0x0F); }
-inline constexpr uint8_t get_flags(uint16_t tag) { return static_cast<uint8_t>((tag >> 12) & 0x0F); }
+inline constexpr uint8_t get_flags_rx_id(uint8_t flags) { return static_cast<uint8_t>((flags >> 4) & 0x07); }
+inline constexpr uint32_t get_flags_sample_rate(uint8_t flags) {
+    constexpr uint32_t sr_lut[8] = {8000, 16000, 24000, 32000, 48000, 48000, 48000, 48000};
+    return sr_lut[(flags >> 1) & 0x07];
+}
+inline constexpr uint32_t get_flags_frame_dur_us(uint8_t flags) {
+    return (flags & 0x01) ? 10000 : 7500;
+}
+inline constexpr bool get_flags_req_ack(uint8_t flags) {
+    return (flags & 0x80) != 0;
+}
 
-// Primary & ARQ Audio Broadcast Frame Format
+// VSAF 3.0 Audio Broadcast Packet (Strictly 248 bytes, 32-bit word aligned)
 struct __attribute__((packed)) vsaf_audio_packet_t {
-    uint16_t tag;             // 0xTTRS
-    uint16_t seq;             // Sequence number (0-65535)
-    uint32_t t_tx1_us;        // SOURCE microsecond presentation timestamp (esp_timer_get_time())
-    uint8_t  sample_rate_khz; // 8, 16, 24, 32, 48
-    uint16_t frame_dur_us;    // 10000 (10.0 ms) or 7500 (7.5 ms)
-    uint8_t  octets;          // LC3 payload length (e.g. 120 bytes)
-    uint8_t  data[120];       // LC3 compressed audio frame
+    uint16_t type_id;                      // 0x1337
+    uint8_t  packet_flags;                 // Packed config, target receiver, and request-for-ack flag
+    uint8_t  seq;                          // Monotonic 8-bit sequence number (0-255)
+    uint32_t t_tx1_us;                     // Master microsecond timestamp
+    uint8_t  data_t0[LC3_FRAME_OCTETS];     // Current frame LC3 payload (120 bytes, offset 8)
+    uint8_t  data_t_prev[LC3_FRAME_OCTETS]; // Previous frame LC3 payload (120 bytes, offset 128)
 };
 
-// Soft-ACK Broadcast Feedback Frame Format (18 bytes)
-struct __attribute__((packed)) vsaf_soft_ack_t {
-    uint16_t tag;             // 0xTTRS (TYPE = 0x1)
-    uint16_t ack_seq;         // Sequence number being acknowledged
-    uint32_t t_tx1_echo;      // Echoed t_tx1_us from audio packet
-    uint16_t t_dwell_us;      // Processing & turnaround time inside SINK (t_tx2 - t_rx1) in microseconds
-    uint32_t t_sink_tx_us;    // Local SINK timestamp when soft-ACK was transmitted (t_tx2)
-    int8_t   downlink_rssi;   // RSSI of received audio packet measured by SINK (-dBm)
-    uint8_t  fifo_fill;       // SINK audio FIFO fill level (0-100%)
-    uint16_t crc16;           // Simple checksum
+// VSAF 3.0 Round-Robin SINK Telemetry Reply (Strictly 16 bytes)
+struct __attribute__((packed)) vsaf_sink_telemetry_t {
+    uint16_t type_id;                      // 0x1339
+    uint8_t  sink_id;                      // Channel / SINK ID (0..5)
+    uint8_t  ack_seq;                      // Acknowledged audio sequence number
+    uint32_t t_tx1_echo;                   // Echoed t_tx1_us from master
+    uint16_t t_dwell_us;                   // SINK turnaround time: t_tx2 - t_rx1 (us)
+    int8_t   downlink_rssi;                // Downlink RSSI measured by SINK (dBm)
+    uint8_t  fifo_fill;                    // SINK audio FIFO fill level (0-100%)
+    uint16_t crc16;                        // Checksum over preceding 12 bytes
+    uint16_t reserved;                     // 32-bit alignment padding
 };
 
-// Simple fast 16-bit CRC for telemetry integrity
+// Fast CCITT-16 CRC
 inline uint16_t calc_crc16(const uint8_t* data, size_t len) {
     uint16_t crc = 0xFFFF;
     for (size_t i = 0; i < len; ++i) {

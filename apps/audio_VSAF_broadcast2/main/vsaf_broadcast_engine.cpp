@@ -1,8 +1,10 @@
 #include "vsaf_broadcast_engine.hpp"
 #include "status_led.hpp"
+#include "console.hpp"
 #include "esp_log.h"
 #include "esp_rom_sys.h"
 #include "esp_mac.h"
+#include "esp_wifi_types.h"
 #include <cmath>
 
 static const char* TAG = "VSAF_BCAST";
@@ -11,9 +13,50 @@ namespace AudioNet {
 
 uint8_t EspNowBroadcastEngine::s_broadcast_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 SemaphoreHandle_t EspNowBroadcastEngine::s_tx_done_sem = nullptr;
+std::atomic<esp_now_send_status_t> EspNowBroadcastEngine::s_last_tx_status{ESP_NOW_SEND_SUCCESS};
 static EspNowBroadcastEngine* s_engine_instance = nullptr;
 
+// Promiscuous Sniffer Statistics Trackers
+static volatile uint32_t s_promis_pkt_count = 0;
+static volatile uint32_t s_promis_byte_count = 0;
+static volatile int8_t   s_promis_max_rssi = -128;
+static volatile int64_t  s_promis_sum_rssi = 0;
+static volatile uint32_t s_promis_40mhz_count = 0;
+
+static void IRAM_ATTR wifi_promiscuous_sniffer_cb(void* buf, wifi_promiscuous_pkt_type_t type) {
+    if (!buf) return;
+    const wifi_promiscuous_pkt_t* pkt = reinterpret_cast<const wifi_promiscuous_pkt_t*>(buf);
+    s_promis_pkt_count = s_promis_pkt_count + 1;
+    s_promis_byte_count = s_promis_byte_count + pkt->rx_ctrl.sig_len;
+    int8_t rssi = pkt->rx_ctrl.rssi;
+    if (rssi > s_promis_max_rssi) {
+        s_promis_max_rssi = rssi;
+    }
+    s_promis_sum_rssi = s_promis_sum_rssi + rssi;
+#if CONFIG_SOC_WIFI_HE_SUPPORT
+    if (pkt->rx_ctrl.second != 0) {
+        s_promis_40mhz_count = s_promis_40mhz_count + 1;
+    }
+#else
+    if (pkt->rx_ctrl.cwb == 1) {
+        s_promis_40mhz_count = s_promis_40mhz_count + 1;
+    }
+#endif
+}
+
+void IRAM_ATTR EspNowBroadcastEngine::frameTimerCb(void* arg) {
+    auto* engine = static_cast<EspNowBroadcastEngine*>(arg);
+    if (engine && engine->m_source_tx_task_handle) {
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+        vTaskNotifyGiveFromISR(engine->m_source_tx_task_handle, &xHigherPriorityTaskWoken);
+        if (xHigherPriorityTaskWoken == pdTRUE) {
+            portYIELD_FROM_ISR();
+        }
+    }
+}
+
 static void IRAM_ATTR onEspNowSendCb(const esp_now_send_info_t* tx_info, esp_now_send_status_t status) {
+    EspNowBroadcastEngine::s_last_tx_status.store(status, std::memory_order_relaxed);
     if (EspNowBroadcastEngine::s_tx_done_sem) {
         BaseType_t xHigherPriorityTaskWoken = pdFALSE;
         xSemaphoreGiveFromISR(EspNowBroadcastEngine::s_tx_done_sem, &xHigherPriorityTaskWoken);
@@ -43,7 +86,8 @@ EspNowBroadcastEngine::EspNowBroadcastEngine(Codec::Lc3CodecEngine& primary_code
       m_state(NetworkState::OFF),
       m_tone_test_mode(false),
       m_is_stereo(true),
-      m_tx_phy_rate(WIFI_PHY_RATE_24M),
+      m_tx_phy_mode(WIFI_PHY_MODE_HT20),
+      m_tx_phy_rate(WIFI_PHY_RATE_MCS3_LGI),
       m_peer_count(2),
       m_seq(0),
       m_octets_per_frame(CONFIG_ESPNOW_FRAME_LEN_OCTETS),
@@ -62,7 +106,8 @@ EspNowBroadcastEngine::EspNowBroadcastEngine(Codec::Lc3CodecEngine& primary_code
       m_plc_count(0),
       m_fifo_underflows(0),
       m_fifo_overflows(0),
-      m_last_rx_seq(0xFFFF),
+      m_redundancy_recovered_packets(0),
+      m_last_rx_seq(0xFF),
       m_first_packet_received(false),
       m_expected_seq(0),
       m_has_expected_seq(false),
@@ -78,6 +123,9 @@ EspNowBroadcastEngine::EspNowBroadcastEngine(Codec::Lc3CodecEngine& primary_code
     s_engine_instance = this;
     m_peer_lock = portMUX_INITIALIZER_UNLOCKED;
     m_sink_fifo_lock = portMUX_INITIALIZER_UNLOCKED;
+
+    memset(m_prev_encoded_channels, 0, sizeof(m_prev_encoded_channels));
+    memset(m_prev_encoded_valid, 0, sizeof(m_prev_encoded_valid));
 
     // Initialize 6 SINK peer configurations
     const char* default_names[MAX_SINK_NODES] = {
@@ -141,12 +189,17 @@ esp_err_t EspNowBroadcastEngine::init(uint8_t role, uint8_t node_id, uint8_t wif
 
     esp_wifi_set_max_tx_power(12); // +3.00 dBm (12 * 0.25 dBm)
 
-    // 2. Initialize ESP-NOW
+    // 2. Wi-Fi RF Sniffer Scan on SOURCE Node (Auto-select cleanest channel at bootup)
+    if (m_node_role == NODE_ROLE_SOURCE) {
+        m_wifi_channel = scanAndSelectBestChannel(120, true, true);
+    }
+
+    // 3. Initialize ESP-NOW
     ESP_ERROR_CHECK(esp_now_init());
     ESP_ERROR_CHECK(esp_now_register_send_cb(onEspNowSendCb));
     ESP_ERROR_CHECK(esp_now_register_recv_cb(onEspNowRecvCb));
 
-    // 3. Register Single Broadcast Peer (FF:FF:FF:FF:FF:FF) with Locked Rate 24 Mbps
+    // 4. Register Single Broadcast Peer (FF:FF:FF:FF:FF:FF) with Primary Default PHY (HT20 MCS3: 16QAM 1/2)
     esp_now_peer_info_t peer_info = {};
     memcpy(peer_info.peer_addr, s_broadcast_mac, 6);
     peer_info.channel = m_wifi_channel;
@@ -159,15 +212,9 @@ esp_err_t EspNowBroadcastEngine::init(uint8_t role, uint8_t node_id, uint8_t wif
         return ret;
     }
 
-    esp_now_rate_config_t rate_cfg = {
-        .phymode = WIFI_PHY_MODE_11G,
-        .rate = WIFI_PHY_RATE_24M,
-        .ersu = false,
-        .dcm = false
-    };
-    esp_now_set_peer_rate_config(s_broadcast_mac, &rate_cfg);
+    setWifiPhyProfile(WifiPhyProfile::PRIMARY_HT20_MCS3);
 
-    // 4. Initialize Codec
+    // 5. Initialize Codec
     if (m_node_role == NODE_ROLE_SOURCE) {
         m_lc3_codec.initEncoder(m_telemetry.sample_rate, 2, m_frame_duration_us, m_octets_per_frame);
     } else {
@@ -175,8 +222,8 @@ esp_err_t EspNowBroadcastEngine::init(uint8_t role, uint8_t node_id, uint8_t wif
     }
 
     transitionTo(NetworkState::IDLE);
-    ESP_LOGI(TAG, "EspNowBroadcastEngine initialized successfully (Role: %s, Node ID: %d, Ch: %d, Rate: 24M)",
-             (m_node_role == NODE_ROLE_SOURCE) ? "SOURCE" : "SINK", m_node_id, m_wifi_channel);
+    ESP_LOGI(TAG, "EspNowBroadcastEngine initialized successfully (Role: %s, Node ID: %d, Ch: %d, Rate: %s)",
+             (m_node_role == NODE_ROLE_SOURCE) ? "SOURCE" : "SINK", m_node_id, m_wifi_channel, getWifiPhyRateString());
     return ESP_OK;
 }
 
@@ -191,8 +238,28 @@ esp_err_t EspNowBroadcastEngine::start() {
         m_enc_ready.store(false);
         m_enc_ping_pong[0].valid = false;
         m_enc_ping_pong[1].valid = false;
+
+        // 1. Create primary encoder task on Core 1 (Priority 6, 8KB stack, Hardware FPU)
         xTaskCreatePinnedToCore(sourceEncTaskTrampoline, "bcast_enc_task", 8192, this, 6, &m_source_enc_task_handle, 1);
+
+        // 2. Create 802.11 Primary Sweep TX task on Core 0 (Priority 7, 8KB stack, ISR Paced)
         xTaskCreatePinnedToCore(sourceTxTaskTrampoline, "bcast_tx_task", 8192, this, 7, &m_source_tx_task_handle, 0);
+
+        // 3. Configure hardware periodic frame timer (10.0 ms / 7.5 ms)
+        esp_timer_create_args_t timer_args = {};
+        timer_args.callback = frameTimerCb;
+        timer_args.arg = this;
+        timer_args.dispatch_method = ESP_TIMER_TASK;
+        timer_args.name = "vsaf_tx_timer";
+        timer_args.skip_unhandled_events = true;
+
+        esp_err_t err = esp_timer_create(&timer_args, &m_frame_timer);
+        if (err == ESP_OK) {
+            esp_timer_start_periodic(m_frame_timer, m_frame_duration_us);
+            ESP_LOGI(TAG, "Hardware frame timer started (%lu us periodic)", (unsigned long)m_frame_duration_us);
+        } else {
+            ESP_LOGE(TAG, "Failed to create frame timer: %s", esp_err_to_name(err));
+        }
     } else {
         transitionTo(NetworkState::SCANNING);
         xTaskCreatePinnedToCore(sinkTaskTrampoline, "bcast_snk_task", 16384, this, 6, &m_sink_task_handle, 0);
@@ -203,6 +270,11 @@ esp_err_t EspNowBroadcastEngine::start() {
 esp_err_t EspNowBroadcastEngine::stop() {
     m_running.store(false, std::memory_order_release);
     transitionTo(NetworkState::IDLE);
+    if (m_frame_timer) {
+        esp_timer_stop(m_frame_timer);
+        esp_timer_delete(m_frame_timer);
+        m_frame_timer = nullptr;
+    }
     if (m_source_enc_task_handle) {
         vTaskDelete(m_source_enc_task_handle);
         m_source_enc_task_handle = nullptr;
@@ -402,10 +474,158 @@ esp_err_t EspNowBroadcastEngine::setFrameLen(uint16_t frame_len_octets) {
 esp_err_t EspNowBroadcastEngine::setFrameDuration(uint32_t frame_duration_us) {
     m_frame_duration_us = frame_duration_us;
     m_telemetry.frame_duration_us = frame_duration_us;
+    if (m_frame_timer && m_running.load(std::memory_order_acquire) && m_node_role == NODE_ROLE_SOURCE) {
+        esp_timer_stop(m_frame_timer);
+        esp_timer_start_periodic(m_frame_timer, m_frame_duration_us);
+    }
     return ESP_OK;
 }
 
+esp_err_t EspNowBroadcastEngine::setWifiChannel(uint8_t channel) {
+    if (channel < 1 || channel > 13) return ESP_ERR_INVALID_ARG;
+    m_wifi_channel = channel;
+    esp_err_t err = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_wifi_set_channel(%d) failed: %s", channel, esp_err_to_name(err));
+        return err;
+    }
+
+    // Refresh broadcast peer channel binding
+    esp_now_del_peer(s_broadcast_mac);
+    esp_now_peer_info_t peer_info = {};
+    memcpy(peer_info.peer_addr, s_broadcast_mac, 6);
+    peer_info.channel = channel;
+    peer_info.ifidx = WIFI_IF_STA;
+    peer_info.encrypt = false;
+    esp_now_add_peer(&peer_info);
+
+    // Re-apply rate configuration to refreshed peer
+    esp_now_rate_config_t rate_cfg = {
+        .phymode = m_tx_phy_mode,
+        .rate = m_tx_phy_rate,
+        .ersu = false,
+        .dcm = false
+    };
+    esp_now_set_peer_rate_config(s_broadcast_mac, &rate_cfg);
+
+    return ESP_OK;
+}
+
+uint8_t EspNowBroadcastEngine::scanAndSelectBestChannel(uint32_t dwell_ms_per_ch, bool auto_apply, bool print_results) {
+    WifiChannelScanResult results[14]; // Index 1..13
+    uint8_t best_ch = 1;
+    uint32_t lowest_score = 0xFFFFFFFF;
+
+    wifi_promiscuous_filter_t filter = { .filter_mask = WIFI_PROMIS_FILTER_MASK_ALL };
+    esp_wifi_set_promiscuous_filter(&filter);
+    esp_wifi_set_promiscuous_rx_cb(wifi_promiscuous_sniffer_cb);
+    esp_wifi_set_promiscuous(true);
+
+    if (print_results) {
+        print_console("\n[RF SNIFFER] Passive spectrum survey across channels 1..13 (%lu ms/ch)...\n",
+                      (unsigned long)dwell_ms_per_ch);
+    }
+
+    for (uint8_t ch = 1; ch <= 13; ++ch) {
+        s_promis_pkt_count = 0;
+        s_promis_byte_count = 0;
+        s_promis_max_rssi = -128;
+        s_promis_sum_rssi = 0;
+        s_promis_40mhz_count = 0;
+
+        esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+        vTaskDelay(pdMS_TO_TICKS(dwell_ms_per_ch));
+
+        results[ch].channel = ch;
+        results[ch].packet_count = s_promis_pkt_count;
+        results[ch].byte_count = s_promis_byte_count;
+        results[ch].max_rssi = (s_promis_pkt_count > 0) ? s_promis_max_rssi : -100;
+        results[ch].avg_rssi = (s_promis_pkt_count > 0) ? static_cast<int8_t>(s_promis_sum_rssi / s_promis_pkt_count) : -100;
+        results[ch].has_40mhz = (s_promis_40mhz_count > 0);
+
+        // Scoring Formula: lower is cleaner
+        uint32_t score = (results[ch].packet_count * 2) + (results[ch].byte_count / 512);
+        if (results[ch].packet_count > 0) {
+            if (results[ch].max_rssi > -60) {
+                score += (60 + results[ch].max_rssi) * 5;
+            } else if (results[ch].max_rssi > -75) {
+                score += (75 + results[ch].max_rssi) * 2;
+            }
+        }
+        if (results[ch].has_40mhz) {
+            score += 150;
+        }
+        // Non-overlapping channel bonus (1, 6, 11)
+        if ((ch == 1 || ch == 6 || ch == 11) && score > 5) {
+            score -= 5;
+        }
+        results[ch].score = score;
+
+        if (score < lowest_score) {
+            lowest_score = score;
+            best_ch = ch;
+        }
+    }
+
+    esp_wifi_set_promiscuous(false);
+    esp_wifi_set_promiscuous_rx_cb(nullptr);
+
+    if (print_results) {
+        print_console("\n================================= 802.11 RF SPECTRUM SURVEY =================================\n");
+        print_console(" Ch | Packets |   Bytes | Max RSSI | Avg RSSI | 40MHz | Score | Cleanliness Rating\n");
+        print_console("----+---------+---------+----------+----------+-------+-------+------------------------------\n");
+        for (uint8_t ch = 1; ch <= 13; ++ch) {
+            const char* rating = "CLEAN";
+            if (results[ch].score == 0) rating = "PERFECT (Silent)";
+            else if (results[ch].score < 50) rating = "EXCELLENT";
+            else if (results[ch].score < 150) rating = "GOOD";
+            else if (results[ch].score < 350) rating = "MODERATE NOISE";
+            else rating = "CONGESTED";
+
+            char sel_mark[20] = "";
+            if (ch == best_ch) {
+                snprintf(sel_mark, sizeof(sel_mark), " <-- SELECTED");
+            }
+            print_console(" %2u | %7lu | %6luB |  %4d dBm |  %4d dBm |  %3s  | %5lu | %-16s%s\n",
+                          ch,
+                          (unsigned long)results[ch].packet_count,
+                          (unsigned long)results[ch].byte_count,
+                          results[ch].max_rssi,
+                          results[ch].avg_rssi,
+                          results[ch].has_40mhz ? "YES" : "No",
+                          (unsigned long)results[ch].score,
+                          rating,
+                          sel_mark);
+        }
+        print_console("==============================================================================================\n");
+        print_console("[RF SNIFFER] Cleanest Wi-Fi channel: Channel %u (Score: %lu)\n\n",
+                      best_ch, (unsigned long)lowest_score);
+    }
+
+    if (auto_apply) {
+        setWifiChannel(best_ch);
+    } else {
+        esp_wifi_set_channel(m_wifi_channel, WIFI_SECOND_CHAN_NONE);
+    }
+
+    return best_ch;
+}
+
+esp_err_t EspNowBroadcastEngine::setWifiPhyProfile(WifiPhyProfile profile) {
+    switch (profile) {
+        case WifiPhyProfile::PRIMARY_HT20_MCS3:
+            return setWifiPhyRate(WIFI_PHY_MODE_HT20, WIFI_PHY_RATE_MCS3_LGI);
+        case WifiPhyProfile::SECONDARY_OFDM_12M:
+            return setWifiPhyRate(WIFI_PHY_MODE_11G, WIFI_PHY_RATE_12M);
+        case WifiPhyProfile::TERTIARY_HT20_MCS0:
+            return setWifiPhyRate(WIFI_PHY_MODE_HT20, WIFI_PHY_RATE_MCS0_LGI);
+        default:
+            return ESP_ERR_INVALID_ARG;
+    }
+}
+
 esp_err_t EspNowBroadcastEngine::setWifiPhyRate(wifi_phy_mode_t phymode, wifi_phy_rate_t rate) {
+    m_tx_phy_mode = phymode;
     m_tx_phy_rate = rate;
     esp_now_rate_config_t rate_cfg = {
         .phymode = phymode,
@@ -413,8 +633,38 @@ esp_err_t EspNowBroadcastEngine::setWifiPhyRate(wifi_phy_mode_t phymode, wifi_ph
         .ersu = false,
         .dcm = false
     };
-    esp_now_set_peer_rate_config(s_broadcast_mac, &rate_cfg);
-    return ESP_OK;
+    return esp_now_set_peer_rate_config(s_broadcast_mac, &rate_cfg);
+}
+
+const char* EspNowBroadcastEngine::getWifiPhyRateString() const {
+    switch (m_tx_phy_rate) {
+        case WIFI_PHY_RATE_MCS3_LGI:
+        case WIFI_PHY_RATE_MCS3_SGI: return "HT3";
+        case WIFI_PHY_RATE_12M:      return "OFD";
+        case WIFI_PHY_RATE_MCS0_LGI:
+        case WIFI_PHY_RATE_MCS0_SGI: return "HT0";
+        case WIFI_PHY_RATE_MCS1_LGI:
+        case WIFI_PHY_RATE_MCS1_SGI: return "HT1";
+        case WIFI_PHY_RATE_MCS2_LGI:
+        case WIFI_PHY_RATE_MCS2_SGI: return "HT2";
+        case WIFI_PHY_RATE_MCS4_LGI:
+        case WIFI_PHY_RATE_MCS4_SGI: return "HT4";
+        case WIFI_PHY_RATE_MCS5_LGI:
+        case WIFI_PHY_RATE_MCS5_SGI: return "HT5";
+        case WIFI_PHY_RATE_MCS6_LGI:
+        case WIFI_PHY_RATE_MCS6_SGI: return "HT6";
+        case WIFI_PHY_RATE_MCS7_LGI:
+        case WIFI_PHY_RATE_MCS7_SGI: return "HT7";
+        case WIFI_PHY_RATE_24M:      return "24M";
+        case WIFI_PHY_RATE_18M:      return "18M";
+        case WIFI_PHY_RATE_36M:      return "36M";
+        case WIFI_PHY_RATE_48M:      return "48M";
+        case WIFI_PHY_RATE_54M:      return "54M";
+        case WIFI_PHY_RATE_6M:       return "6M";
+        case WIFI_PHY_RATE_9M:       return "9M";
+        case WIFI_PHY_RATE_1M_L:     return "1M";
+        default:                     return "PHY";
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -429,53 +679,48 @@ void EspNowBroadcastEngine::onPacketReceived(const uint8_t* mac_addr, const uint
     if (!data || data_len < 2) return;
     int64_t t_now_us = esp_timer_get_time();
 
-    uint16_t tag = *reinterpret_cast<const uint16_t*>(data);
-    uint8_t rx_id = get_rx_id(tag);
-    uint8_t pkt_type = get_pkt_type(tag);
+    uint16_t type_id = *reinterpret_cast<const uint16_t*>(data);
 
     // =======================================================================
     // SINK NODE LOGIC: Receive Audio Broadcast
     // =======================================================================
     if (m_node_role == NODE_ROLE_SINK) {
-        // If SINK is in IDLE, drop audio packet and do not send Soft-ACK
         if (m_state.load(std::memory_order_acquire) == NetworkState::IDLE) {
             return;
         }
 
-        // Instant filter: Reject if not for our channel and not wildcard broadcast
-        if (rx_id != m_target_channel && rx_id != NODE_ID_BROADCAST) {
-            return;
-        }
-
-        if (pkt_type == PKT_TYPE_AUDIO || pkt_type == PKT_TYPE_ARQ_REPAIR) {
-            if (data_len >= static_cast<int>(sizeof(vsaf_audio_packet_t) - 120)) {
-                const auto* pkt = reinterpret_cast<const vsaf_audio_packet_t*>(data);
-                handleAudioPacket(pkt, rssi, t_now_us);
+        if (type_id == VSAF_TYPE_AUDIO && data_len >= static_cast<int>(sizeof(vsaf_audio_packet_t))) {
+            const auto* pkt = reinterpret_cast<const vsaf_audio_packet_t*>(data);
+            uint8_t rx_id = get_flags_rx_id(pkt->packet_flags);
+            // Instant filter: Reject if not for our channel and not wildcard broadcast (7)
+            if (rx_id != m_target_channel && rx_id != NODE_ID_BROADCAST) {
+                return;
             }
+            handleAudioPacket(pkt, rssi, t_now_us);
         }
         return;
     }
 
     // =======================================================================
-    // SOURCE NODE LOGIC: Receive Soft-ACK Broadcast Feedback
+    // SOURCE NODE LOGIC: Receive Round-Robin SINK Telemetry Feedback
     // =======================================================================
     if (m_node_role == NODE_ROLE_SOURCE) {
-        if (pkt_type == PKT_TYPE_SOFT_ACK && data_len >= static_cast<int>(sizeof(vsaf_soft_ack_t))) {
-            const auto* ack = reinterpret_cast<const vsaf_soft_ack_t*>(data);
-            
-            // Verify CRC-16
-            uint16_t computed_crc = calc_crc16(data, sizeof(vsaf_soft_ack_t) - sizeof(uint16_t));
+        if (type_id == VSAF_TYPE_SINK_TELEMETRY && data_len >= static_cast<int>(sizeof(vsaf_sink_telemetry_t))) {
+            const auto* ack = reinterpret_cast<const vsaf_sink_telemetry_t*>(data);
+
+            // Verify CRC-16 (over first 12 bytes of telemetry structure)
+            uint16_t computed_crc = calc_crc16(data, sizeof(vsaf_sink_telemetry_t) - 4);
             if (computed_crc != ack->crc16) {
                 return;
             }
 
-            uint8_t sink_id = get_tx_id(tag);
+            uint8_t sink_id = ack->sink_id;
             if (sink_id < MAX_SINK_NODES) {
                 // Compute RTT metrics
                 int64_t total_rtt = t_now_us - ack->t_tx1_echo;
                 int64_t dwell_us = ack->t_dwell_us;
                 int64_t net_rtt = total_rtt - dwell_us;
-                if (total_rtt >= 0 && total_rtt < 15000) {
+                if (total_rtt >= 0 && total_rtt < 30000) {
                     m_peers[sink_id].last_total_rtt_us = static_cast<uint32_t>(total_rtt);
                     m_peers[sink_id].last_dwell_us = static_cast<uint32_t>(dwell_us);
                     m_peers[sink_id].last_net_rtt_us = (net_rtt >= 0) ? static_cast<uint32_t>(net_rtt) : 0;
@@ -486,8 +731,7 @@ void EspNowBroadcastEngine::onPacketReceived(const uint8_t* mac_addr, const uint
                 }
 
                 // Dual-Way PTP Time Sync calculation
-                int64_t t_rx1 = ack->t_sink_tx_us - ack->t_dwell_us;
-                int64_t offset = ((t_rx1 - ack->t_tx1_echo) - (t_now_us - ack->t_sink_tx_us)) / 2;
+                int64_t offset = ((ack->t_dwell_us) - (total_rtt)) / 2;
                 m_peers[sink_id].clock_offset_us = static_cast<int32_t>(offset);
                 m_time_offset_buf.push(offset / 1000.0f);
                 m_ema_time_offset_ms = (m_ema_time_offset_ms * 0.9f) + (offset / 1000.0f * 0.1f);
@@ -500,10 +744,6 @@ void EspNowBroadcastEngine::onPacketReceived(const uint8_t* mac_addr, const uint
                 m_peers[sink_id].consecutive_ack_fails = 0;
                 m_peers[sink_id].status = PeerStatus::ONLINE;
 
-                // Only mark current frame acked if ack_seq matches current sequence
-                if (ack->ack_seq == m_seq) {
-                    m_sink_acked[sink_id] = true;
-                }
                 m_rx_acks_this_sec++;
                 m_tx_acks_total++;
                 m_tx_acks_sec++;
@@ -517,6 +757,7 @@ void EspNowBroadcastEngine::onPacketReceived(const uint8_t* mac_addr, const uint
 // ---------------------------------------------------------------------------
 
 void EspNowBroadcastEngine::handleAudioPacket(const vsaf_audio_packet_t* pkt, int8_t rssi, int64_t t_rx1_us) {
+    m_channel_locked.store(true, std::memory_order_release);
     m_last_rssi = rssi;
     m_last_master_time_us = pkt->t_tx1_us;
     m_last_local_time_us = static_cast<uint32_t>(t_rx1_us);
@@ -531,35 +772,35 @@ void EspNowBroadcastEngine::handleAudioPacket(const vsaf_audio_packet_t* pkt, in
         m_ema_time_offset_ms = (m_ema_time_offset_ms * 0.95f) + (offset_ms * 0.05f);
     }
 
-    // Sequence tracking & deduplication: reject duplicates or stale packets
-    int16_t seq_diff = static_cast<int16_t>(pkt->seq - m_last_rx_seq);
-    bool is_duplicate = false;
+    // Sequence tracking & redundancy recovery
+    int8_t seq_diff = static_cast<int8_t>(pkt->seq - m_last_rx_seq);
 
-    if (!m_first_packet_received || seq_diff < -1000 || seq_diff > 5000) {
-        // Initial synchronization or master sequence discontinuity
+    if (!m_first_packet_received || seq_diff < -64 || seq_diff > 64) {
+        // Initial synchronization or major sequence discontinuity
         m_first_packet_received = true;
         m_last_rx_seq = pkt->seq;
-        is_duplicate = false;
-    } else if (seq_diff <= 0) {
-        // Duplicate (e.g. ARQ retry for already received frame) or out-of-order stale packet
-        is_duplicate = true;
-    } else {
-        // Fresh audio frame needed for streaming
-        m_last_rx_seq = pkt->seq;
-        is_duplicate = false;
-    }
 
-    if (!is_duplicate) {
-        // Only count audio packets this node needs to stream
-        m_rx_packets_total++;
-        m_rx_packets_sec++;
-
-        // Push LC3 payload to Jitter FIFO
+        // Push current frame t0
         portENTER_CRITICAL(&m_sink_fifo_lock);
         if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
             m_sink_fifo[m_sink_fifo_head].seq = pkt->seq;
-            m_sink_fifo[m_sink_fifo_head].len = pkt->octets;
-            memcpy(m_sink_fifo[m_sink_fifo_head].data, pkt->data, pkt->octets);
+            m_sink_fifo[m_sink_fifo_head].len = LC3_FRAME_OCTETS;
+            memcpy(m_sink_fifo[m_sink_fifo_head].data, pkt->data_t0, LC3_FRAME_OCTETS);
+            m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
+            m_sink_fifo_count++;
+        }
+        portEXIT_CRITICAL(&m_sink_fifo_lock);
+
+        m_rx_packets_total++;
+        m_rx_packets_sec++;
+    } else if (seq_diff == 1) {
+        // Consecutive frame (normal flow): push t0
+        m_last_rx_seq = pkt->seq;
+        portENTER_CRITICAL(&m_sink_fifo_lock);
+        if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
+            m_sink_fifo[m_sink_fifo_head].seq = pkt->seq;
+            m_sink_fifo[m_sink_fifo_head].len = LC3_FRAME_OCTETS;
+            memcpy(m_sink_fifo[m_sink_fifo_head].data, pkt->data_t0, LC3_FRAME_OCTETS);
             m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
             m_sink_fifo_count++;
         } else {
@@ -567,43 +808,103 @@ void EspNowBroadcastEngine::handleAudioPacket(const vsaf_audio_packet_t* pkt, in
         }
         portEXIT_CRITICAL(&m_sink_fifo_lock);
 
-        // Wake up SINK audio task if waiting on packet
-        if (m_sink_task_handle) {
-            vTaskNotifyGiveFromISR(m_sink_task_handle, nullptr);
+        m_rx_packets_total++;
+        m_rx_packets_sec++;
+    } else if (seq_diff == 2) {
+        // EXACTLY 1 packet was dropped in RF! Recover t-1 from current packet!
+        m_last_rx_seq = pkt->seq;
+        portENTER_CRITICAL(&m_sink_fifo_lock);
+        if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
+            // Push recovered previous frame (t-1)
+            m_sink_fifo[m_sink_fifo_head].seq = static_cast<uint8_t>(pkt->seq - 1);
+            m_sink_fifo[m_sink_fifo_head].len = LC3_FRAME_OCTETS;
+            memcpy(m_sink_fifo[m_sink_fifo_head].data, pkt->data_t_prev, LC3_FRAME_OCTETS);
+            m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
+            m_sink_fifo_count++;
+            m_redundancy_recovered_packets++;
         }
+        // Push current frame (t0)
+        if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
+            m_sink_fifo[m_sink_fifo_head].seq = pkt->seq;
+            m_sink_fifo[m_sink_fifo_head].len = LC3_FRAME_OCTETS;
+            memcpy(m_sink_fifo[m_sink_fifo_head].data, pkt->data_t0, LC3_FRAME_OCTETS);
+            m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
+            m_sink_fifo_count++;
+        } else {
+            m_fifo_overflows++;
+        }
+        portEXIT_CRITICAL(&m_sink_fifo_lock);
+
+        m_rx_packets_total += 2;
+        m_rx_packets_sec += 2;
+    } else if (seq_diff > 2) {
+        // Multiple dropped packets: recover t-1, then push t0 (earlier gaps handled cleanly by playback task)
+        m_last_rx_seq = pkt->seq;
+        portENTER_CRITICAL(&m_sink_fifo_lock);
+        if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
+            m_sink_fifo[m_sink_fifo_head].seq = static_cast<uint8_t>(pkt->seq - 1);
+            m_sink_fifo[m_sink_fifo_head].len = LC3_FRAME_OCTETS;
+            memcpy(m_sink_fifo[m_sink_fifo_head].data, pkt->data_t_prev, LC3_FRAME_OCTETS);
+            m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
+            m_sink_fifo_count++;
+            m_redundancy_recovered_packets++;
+        }
+        if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
+            m_sink_fifo[m_sink_fifo_head].seq = pkt->seq;
+            m_sink_fifo[m_sink_fifo_head].len = LC3_FRAME_OCTETS;
+            memcpy(m_sink_fifo[m_sink_fifo_head].data, pkt->data_t0, LC3_FRAME_OCTETS);
+            m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
+            m_sink_fifo_count++;
+        } else {
+            m_fifo_overflows++;
+        }
+        portEXIT_CRITICAL(&m_sink_fifo_lock);
+
+        m_rx_packets_total += 2;
+        m_rx_packets_sec += 2;
+    }
+    // (If seq_diff <= 0, duplicate/stale frame: ignore)
+
+    // Wake up SINK audio task if waiting
+    if (m_sink_task_handle) {
+        vTaskNotifyGiveFromISR(m_sink_task_handle, nullptr);
     }
 
-    // Immediately assemble and broadcast Soft-ACK (< 50 us turnaround)
-    sendSoftAck(pkt->seq, pkt->t_tx1_us, t_rx1_us, rssi);
+    // SINK Reply on Command Only:
+    // Only transmit telemetry reply if SOURCE explicitly requested it in packet_flags (bit 7)
+    if (get_flags_req_ack(pkt->packet_flags)) {
+        sendSinkTelemetry(pkt->seq, pkt->t_tx1_us, t_rx1_us, rssi);
+    }
 }
 
-void EspNowBroadcastEngine::sendSoftAck(uint16_t ack_seq, uint32_t t_tx1_echo, int64_t t_rx1_us, int8_t rssi) {
-    // Stagger Soft-ACK transmission across SINK nodes to prevent uplink RF collisions
-    if (m_target_channel > 0 && m_target_channel < MAX_SINK_NODES) {
-        esp_rom_delay_us(m_target_channel * 300);
-    }
+void EspNowBroadcastEngine::sendSinkTelemetry(uint8_t ack_seq, uint32_t t_tx1_echo, int64_t t_rx1_us, int8_t rssi) {
     int64_t t_tx2 = esp_timer_get_time();
 
-    vsaf_soft_ack_t ack = {};
-    ack.tag = make_tag(m_target_channel, NODE_ID_SOURCE, PKT_TYPE_SOFT_ACK, FLAG_TIME_SYNC_VALID);
-    ack.ack_seq = ack_seq;
-    ack.t_tx1_echo = t_tx1_echo;
-    ack.t_dwell_us = static_cast<uint16_t>(t_tx2 - t_rx1_us);
-    ack.t_sink_tx_us = static_cast<uint32_t>(t_tx2);
-    ack.downlink_rssi = rssi;
+    vsaf_sink_telemetry_t telem = {};
+    telem.type_id = VSAF_TYPE_SINK_TELEMETRY;
+    telem.sink_id = m_target_channel;
+    telem.ack_seq = ack_seq;
+    telem.t_tx1_echo = t_tx1_echo;
+    telem.t_dwell_us = static_cast<uint16_t>(t_tx2 - t_rx1_us);
+    telem.downlink_rssi = rssi;
 
     portENTER_CRITICAL(&m_sink_fifo_lock);
-    ack.fifo_fill = static_cast<uint8_t>((m_sink_fifo_count * 100) / SINK_FIFO_PACKETS);
+    telem.fifo_fill = static_cast<uint8_t>((m_sink_fifo_count * 100) / SINK_FIFO_PACKETS);
     portEXIT_CRITICAL(&m_sink_fifo_lock);
 
-    ack.crc16 = calc_crc16(reinterpret_cast<const uint8_t*>(&ack), sizeof(vsaf_soft_ack_t) - sizeof(uint16_t));
+    telem.crc16 = calc_crc16(reinterpret_cast<const uint8_t*>(&telem), sizeof(vsaf_sink_telemetry_t) - 4);
+    telem.reserved = 0;
 
-    // Broadcast Soft-ACK frame (no hardware ACK expected)
-    esp_now_send(s_broadcast_mac, reinterpret_cast<const uint8_t*>(&ack), sizeof(vsaf_soft_ack_t));
+    esp_now_send(s_broadcast_mac, reinterpret_cast<const uint8_t*>(&telem), sizeof(vsaf_sink_telemetry_t));
 }
 
 // ---------------------------------------------------------------------------
 // SOURCE Audio Encoder Task (Core 0, Priority 3): Pre-encodes next frame
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// SOURCE Audio Encoder Task (Core 1, Priority 6, Hardware FPU)
+// Pre-encodes both channels in ~3.6 ms total on dedicated audio core
 // ---------------------------------------------------------------------------
 
 void EspNowBroadcastEngine::sourceEncTaskTrampoline(void* arg) {
@@ -611,7 +912,7 @@ void EspNowBroadcastEngine::sourceEncTaskTrampoline(void* arg) {
 }
 
 void EspNowBroadcastEngine::runSourceEncLoop() {
-    ESP_LOGI(TAG, "SOURCE Audio Encoder Task started on Core 1");
+    ESP_LOGI(TAG, "SOURCE Audio Encoder Task started on Core 1 (Priority 6, Hardware FPU)");
 
     static int16_t pcm_mono[480];
 
@@ -635,17 +936,23 @@ void EspNowBroadcastEngine::runSourceEncLoop() {
             memset(pcm_mono, 0, samples * sizeof(int16_t));
         }
 
-        // Dual LC3 encode
         int64_t enc_t0 = esp_timer_get_time();
         size_t actual_bytes0 = 0;
         size_t actual_bytes1 = 0;
         uint8_t write_idx = m_enc_write_idx.load(std::memory_order_relaxed);
 
-        // Feed both encoders with the same audio from the sine synth
-        m_lc3_codec.encodeFrame(pcm_mono, samples, m_enc_ping_pong[write_idx].data[0], m_octets_per_frame, &actual_bytes0, 0);
-        m_lc3_codec.encodeFrame(pcm_mono, samples, m_enc_ping_pong[write_idx].data[1], m_octets_per_frame, &actual_bytes1, 1);
+        // Encode Left channel (Ch 0) using hardware FPU
+        m_lc3_codec.encodeFrame(pcm_mono, samples, m_enc_ping_pong[write_idx].data[0], LC3_FRAME_OCTETS, &actual_bytes0, 0);
 
-        m_enc_ping_pong[write_idx].octets = static_cast<uint16_t>(m_octets_per_frame);
+        if (m_is_stereo && !m_tone_test_mode && !m_tone_gen) {
+            // True Stereo mode from USB Audio: encode distinct Right channel
+            m_lc3_codec.encodeFrame(pcm_mono, samples, m_enc_ping_pong[write_idx].data[1], LC3_FRAME_OCTETS, &actual_bytes1, 1);
+        } else {
+            // Mono / Tone Synth Mode: duplicate Left channel encode to Right channel (0 us cost)
+            memcpy(m_enc_ping_pong[write_idx].data[1], m_enc_ping_pong[write_idx].data[0], LC3_FRAME_OCTETS);
+        }
+
+        m_enc_ping_pong[write_idx].octets = static_cast<uint16_t>(LC3_FRAME_OCTETS);
         m_enc_ping_pong[write_idx].valid = true;
 
         float enc_ms = (esp_timer_get_time() - enc_t0) / 1000.0f;
@@ -654,14 +961,15 @@ void EspNowBroadcastEngine::runSourceEncLoop() {
 
         // Advance read pointer to this buffer and toggle write index
         m_enc_read_idx.store(write_idx, std::memory_order_release);
-        m_enc_write_idx.store(1 - write_idx, std::memory_order_relaxed);
         m_enc_ready.store(true, std::memory_order_release);
+        m_enc_write_idx.store((write_idx + 1) % 2, std::memory_order_release);
     }
     vTaskDelete(nullptr);
 }
 
 // ---------------------------------------------------------------------------
-// SOURCE 802.11 Primary Sweep & ARQ Task (Core 1, Priority 5): Exact 750us Slots
+// SOURCE 802.11 Primary Sweep Task (Core 0, Priority 7)
+// Hardware timer driven & Wi-Fi TX Done ISR semaphore paced
 // ---------------------------------------------------------------------------
 
 void EspNowBroadcastEngine::sourceTxTaskTrampoline(void* arg) {
@@ -669,35 +977,23 @@ void EspNowBroadcastEngine::sourceTxTaskTrampoline(void* arg) {
 }
 
 void EspNowBroadcastEngine::runSourceTxLoop() {
-    ESP_LOGI(TAG, "SOURCE 802.11 Primary Sweep & ARQ Task started on Core 0 (Priority 7)");
+    ESP_LOGI(TAG, "SOURCE 802.11 Primary Sweep Task started on Core 0 (Priority 7, ISR Paced)");
 
-    static uint8_t encoded_channels[MAX_SINK_NODES][120];
-    int64_t next_frame_deadline = esp_timer_get_time();
+    static uint8_t encoded_channels[MAX_SINK_NODES][LC3_FRAME_OCTETS];
 
     while (m_running.load(std::memory_order_acquire)) {
+        // Hardware timer event pacing: exact 10.0 ms / 7.5 ms wakeups without spin loops!
+        if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20)) == 0) {
+            if (m_state.load(std::memory_order_acquire) != NetworkState::CAST) {
+                continue;
+            }
+        }
+
         if (m_state.load(std::memory_order_acquire) != NetworkState::CAST) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-            next_frame_deadline = esp_timer_get_time() + m_frame_duration_us;
             continue;
         }
 
-        // Microsecond hardware timer pacing: wait until exact next_frame_deadline
-        int64_t now_us = esp_timer_get_time();
-        if (now_us > next_frame_deadline + 20000) {
-            next_frame_deadline = now_us; // Resync if paused
-        }
-        int64_t wait_us = next_frame_deadline - esp_timer_get_time();
-        if (wait_us > 1500) {
-            vTaskDelay(pdMS_TO_TICKS(1)); // Yield 1 ms to FreeRTOS on Core 1
-        }
-        while (esp_timer_get_time() < next_frame_deadline) {
-            esp_rom_delay_us(20);
-        }
-
-        int64_t frame_start_us = next_frame_deadline;
-        next_frame_deadline += m_frame_duration_us;
-
-        // Immediately trigger background encoder on Core 0 to prepare NEXT frame
+        // Immediately trigger background dual-core encoders to prepare NEXT frame
         if (m_source_enc_task_handle) {
             xTaskNotifyGive(m_source_enc_task_handle);
         }
@@ -709,39 +1005,71 @@ void EspNowBroadcastEngine::runSourceTxLoop() {
                 // LC3-frame0 --> Packet 0, 2, 4 (Left, Center, Surround Left)
                 // LC3-frame1 --> Packet 1, 3, 5 (Right, Surround Right, Subwoofer)
                 uint8_t enc_idx = (ch % 2 == 0) ? 0 : 1;
-                memcpy(encoded_channels[ch], m_enc_ping_pong[read_idx].data[enc_idx], m_octets_per_frame);
+                memcpy(encoded_channels[ch], m_enc_ping_pong[read_idx].data[enc_idx], LC3_FRAME_OCTETS);
             }
         } else {
             // Encoder not yet ready on first frame: silence
             for (size_t ch = 0; ch < MAX_SINK_NODES; ++ch) {
-                memset(encoded_channels[ch], 0, m_octets_per_frame);
+                memset(encoded_channels[ch], 0, LC3_FRAME_OCTETS);
             }
         }
 
-        // Reset soft-ACK tracking for this frame
-        for (size_t i = 0; i < MAX_SINK_NODES; ++i) {
-            m_sink_acked[i] = false;
-        }
-
-        // 1. Primary Burst Sweep: Rapidly broadcast all 6 channels spaced by 200 microseconds
-        // (All 6 channels complete in 1.2 ms; 2 channels in 0.4 ms, leaving 2.8 ms quiet listening window)
+        // Broadcast Audio Channels paced by Wi-Fi TX Done ISR
         for (size_t ch = 0; ch < MAX_SINK_NODES; ++ch) {
-            int64_t slot_target = frame_start_us + ch * 200;
-            while (esp_timer_get_time() < slot_target) {
-                esp_rom_delay_us(5);
-            }
-
-            // Assemble Audio Broadcast Frame
-            m_last_tx_pkt[ch].tag = make_tag(NODE_ID_SOURCE, ch, PKT_TYPE_AUDIO, FLAG_TIME_SYNC_VALID);
+            bool request_ack = ((m_seq % MAX_SINK_NODES) == ch);
+            bool red_valid = m_prev_encoded_valid[ch];
+            m_last_tx_pkt[ch].type_id = VSAF_TYPE_AUDIO;
+            m_last_tx_pkt[ch].packet_flags = make_packet_flags(ch, m_telemetry.sample_rate, m_frame_duration_us, request_ack);
             m_last_tx_pkt[ch].seq = m_seq;
             m_last_tx_pkt[ch].t_tx1_us = static_cast<uint32_t>(esp_timer_get_time());
-            m_last_tx_pkt[ch].sample_rate_khz = static_cast<uint8_t>(m_telemetry.sample_rate / 1000);
-            m_last_tx_pkt[ch].frame_dur_us = static_cast<uint16_t>(m_frame_duration_us);
-            m_last_tx_pkt[ch].octets = static_cast<uint8_t>(m_octets_per_frame);
-            memcpy(m_last_tx_pkt[ch].data, encoded_channels[ch], m_octets_per_frame);
+            memcpy(m_last_tx_pkt[ch].data_t0, encoded_channels[ch], LC3_FRAME_OCTETS);
 
-            size_t pkt_len = sizeof(vsaf_audio_packet_t) - 120 + m_octets_per_frame;
-            esp_now_send(s_broadcast_mac, reinterpret_cast<const uint8_t*>(&m_last_tx_pkt[ch]), pkt_len);
+            if (red_valid) {
+                memcpy(m_last_tx_pkt[ch].data_t_prev, m_prev_encoded_channels[ch], LC3_FRAME_OCTETS);
+            } else {
+                memset(m_last_tx_pkt[ch].data_t_prev, 0, LC3_FRAME_OCTETS);
+            }
+
+            // Flush any stale semaphore token before initiating transmission
+            if (s_tx_done_sem) {
+                xSemaphoreTake(s_tx_done_sem, 0);
+            }
+
+            esp_err_t send_err = esp_now_send(s_broadcast_mac, reinterpret_cast<const uint8_t*>(&m_last_tx_pkt[ch]), sizeof(vsaf_audio_packet_t));
+
+            if (send_err != ESP_OK) {
+                // Fault Mode 1: Immediate API / MAC Driver Rejection (e.g. queue full, uninitialized)
+                m_tx_mac_error_count++;
+                // Deterministic behavior: Do not wait on semaphore (ISR will not fire). Proceed to next channel.
+            } else if (s_tx_done_sem) {
+                // Wait for Wi-Fi baseband hardware "TX Done" ISR to signal completion
+                if (xSemaphoreTake(s_tx_done_sem, pdMS_TO_TICKS(2)) == pdTRUE) {
+                    // ISR fired! Baseband queue is now completely clear.
+                    m_consecutive_tx_timeouts = 0;
+                    if (s_last_tx_status.load(std::memory_order_relaxed) != ESP_NOW_SEND_SUCCESS) {
+                        // Fault Mode 2: Hardware MAC layer reported transmission failure
+                        m_tx_fail_count++;
+                        // Deterministic behavior: Note status, continue sweep as baseband queue is clear.
+                    }
+                } else {
+                    // Fault Mode 3: Semaphore Timeout (2.0 ms expired without TX Done ISR)
+                    // Root cause: Extreme RF collision, baseband lockup, or CSMA channel carrier hang
+                    m_tx_timeout_count++;
+                    m_consecutive_tx_timeouts++;
+
+                    // Deterministic behavior:
+                    // Abort remainder of the 6-channel sweep for THIS frame immediately!
+                    // Continuing to wait 2 ms x remaining channels would blow past the 10 ms frame deadline.
+                    if (m_consecutive_tx_timeouts >= 5) {
+                        handleTxSubsystemHang();
+                    }
+                    break; // Abort channel loop for this frame
+                }
+            }
+
+            // Store in history buffer for next frame t-1
+            memcpy(m_prev_encoded_channels[ch], encoded_channels[ch], LC3_FRAME_OCTETS);
+            m_prev_encoded_valid[ch] = true;
 
             m_peers[ch].packets_sent++;
             m_tx_packets_this_sec++;
@@ -749,58 +1077,19 @@ void EspNowBroadcastEngine::runSourceTxLoop() {
             m_tx_packets_sec++;
         }
 
-        // 2. Dedicated Quiet Listening Window (t = 1.2 ms to 4.0 ms) & ARQ Window (t = 4.0 ms)
-        int64_t arq_slot_start = frame_start_us + 4000;
-        while (esp_timer_get_time() < arq_slot_start) {
-            int64_t remaining = arq_slot_start - esp_timer_get_time();
-            if (remaining > 1500) {
-                vTaskDelay(pdMS_TO_TICKS(1));
-            } else if (remaining > 0) {
-                esp_rom_delay_us(10);
-            }
-        }
-
-        int64_t current_arq_slot = arq_slot_start;
-        for (size_t ch = 0; ch < MAX_SINK_NODES; ++ch) {
-            if (m_peers[ch].status == PeerStatus::ONLINE && !m_sink_acked[ch]) {
-                while (esp_timer_get_time() < current_arq_slot) {
-                    esp_rom_delay_us(5);
-                }
-
-                vsaf_audio_packet_t repair_pkt = m_last_tx_pkt[ch];
-                repair_pkt.tag = make_tag(NODE_ID_SOURCE, ch, PKT_TYPE_ARQ_REPAIR, FLAG_RETRY | FLAG_TIME_SYNC_VALID);
-
-                size_t pkt_len = sizeof(vsaf_audio_packet_t) - 120 + m_octets_per_frame;
-                esp_now_send(s_broadcast_mac, reinterpret_cast<const uint8_t*>(&repair_pkt), pkt_len);
-
-                m_peers[ch].arq_retries++;
-                current_arq_slot += 200;
-            }
-        }
-
-        // Evaluate circuit breaker after ARQ window: track consecutive misses
-        for (size_t ch = 0; ch < MAX_SINK_NODES; ++ch) {
-            if (m_peers[ch].status == PeerStatus::ONLINE) {
-                if (!m_sink_acked[ch]) {
-                    m_peers[ch].ack_failures++;
-                    m_peers[ch].consecutive_ack_fails++;
-                    m_tx_ack_fails_total++;
-                    m_tx_ack_fails_sec++;
-                    if (m_peers[ch].consecutive_ack_fails >= 10) {
-                        m_peers[ch].status = PeerStatus::OFFLINE;
-                    }
-                } else {
-                    if (m_peers[ch].consecutive_ack_fails > 0) {
-                        m_peers[ch].arq_successes++;
-                    }
-                    m_peers[ch].consecutive_ack_fails = 0;
-                }
-            }
-        }
-
         m_seq++;
     }
     vTaskDelete(nullptr);
+}
+
+void EspNowBroadcastEngine::handleTxSubsystemHang() {
+    ESP_LOGE(TAG, "Wi-Fi Baseband TX hang detected (%lu consecutive frame timeouts)! Resetting MAC state...",
+             (unsigned long)m_consecutive_tx_timeouts);
+    // Deterministic placeholder recovery: Purge semaphore and reset consecutive timeout counter
+    if (s_tx_done_sem) {
+        xSemaphoreTake(s_tx_done_sem, 0);
+    }
+    m_consecutive_tx_timeouts = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -819,6 +1108,7 @@ void EspNowBroadcastEngine::runSinkLoop() {
     size_t samples_per_frame = (m_telemetry.sample_rate * 10) / 1000;
     uint32_t consecutive_underruns = 0;
     static constexpr size_t PREFILL_THRESHOLD = 8; // 8 packets = 80 ms cushion
+    int64_t last_hop_time_us = esp_timer_get_time();
 
     while (m_running.load(std::memory_order_acquire)) {
         NetworkState current_state = m_state.load(std::memory_order_acquire);
@@ -844,15 +1134,27 @@ void EspNowBroadcastEngine::runSinkLoop() {
         }
 
         // -------------------------------------------------------------------
-        // 1. SCANNING: Wait for Jitter Buffer to accumulate PREFILL threshold
+        // 1. SCANNING: Dynamic channel hopping until audio stream is discovered
         // -------------------------------------------------------------------
         if (current_state == NetworkState::SCANNING) {
+            if (!m_channel_locked.load(std::memory_order_acquire)) {
+                int64_t now_us = esp_timer_get_time();
+                if (now_us - last_hop_time_us >= 150000) { // Hop channel every 150 ms
+                    last_hop_time_us = now_us;
+                    uint8_t next_ch = (m_wifi_channel % 13) + 1;
+                    setWifiChannel(next_ch);
+                }
+                ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
+                continue;
+            }
+
             portENTER_CRITICAL(&m_sink_fifo_lock);
             size_t buffered = m_sink_fifo_count;
             portEXIT_CRITICAL(&m_sink_fifo_lock);
 
             if (buffered >= PREFILL_THRESHOLD) {
-                ESP_LOGI(TAG, "SINK: Jitter buffer prefill threshold reached (%zu pkts) -> PREFILL", buffered);
+                ESP_LOGI(TAG, "SINK: Jitter buffer prefill threshold reached (%zu pkts on Ch %d) -> PREFILL",
+                         buffered, m_wifi_channel);
                 transitionTo(NetworkState::PREFILL);
             } else {
                 ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
@@ -1009,14 +1311,16 @@ void EspNowBroadcastEngine::runSinkLoop() {
             m_has_expected_seq = false; // Re-sync sequence counter when genuinely starved
             consecutive_underruns++;
             if (consecutive_underruns >= 10) {
-                // 100 ms of missing audio: transition back to SCANNING
-                ESP_LOGW(TAG, "SINK: 10 consecutive underruns -> returning to SCANNING");
+                // 100 ms of missing audio: transition back to SCANNING and unlock channel
+                ESP_LOGW(TAG, "SINK: 10 consecutive underruns -> unlocking channel and returning to SCANNING");
                 if (m_i2s_dac) {
                     m_i2s_dac->stop();
                 }
                 m_has_expected_seq = false;
+                m_channel_locked.store(false, std::memory_order_release);
                 transitionTo(NetworkState::SCANNING);
                 consecutive_underruns = 0;
+                last_hop_time_us = esp_timer_get_time();
                 vTaskDelay(pdMS_TO_TICKS(10));
                 continue;
             }

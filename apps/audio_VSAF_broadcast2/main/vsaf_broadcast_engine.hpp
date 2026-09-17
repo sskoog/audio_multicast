@@ -34,6 +34,12 @@ enum class PeerStatus : uint8_t {
     ONLINE   = 2
 };
 
+enum class WifiPhyProfile : uint8_t {
+    PRIMARY_HT20_MCS3 = 0,   // 802.11n HT20, MCS3 (16-QAM 1/2, 26.0 Mbps) - Primary Default
+    SECONDARY_OFDM_12M = 1,  // 802.11g OFDM, 12 Mbps (QPSK 1/2)           - Secondary Fallback
+    TERTIARY_HT20_MCS0 = 2   // 802.11n HT20, MCS0 (BPSK 1/2, 6.5 Mbps)    - Tertiary Long-Range
+};
+
 struct SinkPeerConfig {
     uint8_t    channel_id;             // 0: Left, 1: Right, 2: Center, 3: L-Surround, 4: R-Surround, 5: Sub
     char       name[24];
@@ -176,13 +182,31 @@ public:
     esp_err_t setBitDepth(uint8_t bit_depth);
     esp_err_t setFrameLen(uint16_t frame_len_octets);
     esp_err_t setFrameDuration(uint32_t frame_duration_us);
+    esp_err_t setWifiPhyProfile(WifiPhyProfile profile);
     esp_err_t setWifiPhyRate(wifi_phy_mode_t phymode, wifi_phy_rate_t rate);
 
+    wifi_phy_mode_t getWifiPhyMode() const { return m_tx_phy_mode; }
     wifi_phy_rate_t getWifiPhyRate() const { return m_tx_phy_rate; }
     uint32_t getSampleRate() const { return m_telemetry.sample_rate; }
     uint32_t getFrameDurationUs() const { return m_frame_duration_us; }
     uint16_t getFrameLen() const { return m_octets_per_frame; }
     uint8_t  getBitDepth() const { return m_telemetry.bit_depth; }
+
+    // Wi-Fi RF Sniffer & Channel Management
+    struct WifiChannelScanResult {
+        uint8_t  channel;
+        uint32_t packet_count;
+        uint32_t byte_count;
+        int8_t   max_rssi;
+        int8_t   avg_rssi;
+        bool     has_40mhz;
+        uint32_t score; // Lower is cleaner
+    };
+
+    uint8_t scanAndSelectBestChannel(uint32_t dwell_ms_per_ch = 120, bool auto_apply = true, bool print_results = true);
+    esp_err_t setWifiChannel(uint8_t channel);
+    uint8_t getWifiChannel() const { return m_wifi_channel; }
+    bool isChannelLocked() const { return m_channel_locked.load(std::memory_order_acquire); }
 
     // Multi-Channel Target Selection (SINK node: 0: Left, 1: Right, 5: Subwoofer)
     void setTargetChannel(uint8_t channel_id);
@@ -205,7 +229,7 @@ public:
     const StreamTelemetry& getStreamTelemetry() const { return m_telemetry; }
     const StreamTelemetry& getTelemetry() const { return m_telemetry; }
     const char* getActiveCodecName() const { return "LC3"; }
-    const char* getWifiPhyRateString() const { return "OFD"; }
+    const char* getWifiPhyRateString() const;
     bool hasLocalAudioOutput() const { return (m_i2s_dac != nullptr && m_node_role == NODE_ROLE_SINK); }
     void setToneTestMode(bool enable) { m_tone_test_mode = enable; }
     bool isToneTestMode() const { return m_tone_test_mode; }
@@ -283,9 +307,18 @@ public:
     size_t   getFifoCount() const;
     size_t   getFifoCapacity() const;
 
+    uint32_t getRedundancyRecoveredCount() const { return m_redundancy_recovered_packets.load(std::memory_order_relaxed); }
+    uint32_t getAndResetRedundancyRecoveredCount() { return m_redundancy_recovered_packets.exchange(0, std::memory_order_relaxed); }
+
+    uint32_t getTxTimeoutCount() const { return m_tx_timeout_count.load(std::memory_order_relaxed); }
+    uint32_t getTxFailCount() const { return m_tx_fail_count.load(std::memory_order_relaxed); }
+    uint32_t getTxMacErrorCount() const { return m_tx_mac_error_count.load(std::memory_order_relaxed); }
+
     static SemaphoreHandle_t s_tx_done_sem;
+    static std::atomic<esp_now_send_status_t> s_last_tx_status;
 
 private:
+    static void IRAM_ATTR frameTimerCb(void* arg);
     static void sourceEncTaskTrampoline(void* arg);
     static void sourceTxTaskTrampoline(void* arg);
     static void sinkTaskTrampoline(void* arg);
@@ -294,7 +327,7 @@ private:
     void runSinkLoop();
 
     void handleAudioPacket(const vsaf_audio_packet_t* pkt, int8_t rssi, int64_t t_rx1_us);
-    void sendSoftAck(uint16_t ack_seq, uint32_t t_tx1_echo, int64_t t_rx1_us, int8_t rssi);
+    void sendSinkTelemetry(uint8_t ack_seq, uint32_t t_tx1_echo, int64_t t_rx1_us, int8_t rssi);
 
     Codec::Lc3CodecEngine&          m_lc3_codec;
     Audio::ToneGenerator*           m_tone_gen;
@@ -305,12 +338,14 @@ private:
     uint8_t                    m_node_id;
     uint8_t                    m_wifi_channel;
     uint8_t                    m_target_channel;
+    std::atomic<bool>          m_channel_locked{false};
     std::atomic<NetworkState>  m_state;
     std::atomic<bool>          m_running{false};
     StreamTelemetry            m_telemetry;
     bool                       m_tone_test_mode;
     bool                       m_is_stereo;
 
+    wifi_phy_mode_t            m_tx_phy_mode;
     wifi_phy_rate_t            m_tx_phy_rate;
     static uint8_t             s_broadcast_mac[6];
 
@@ -319,23 +354,33 @@ private:
     portMUX_TYPE               m_peer_lock;
     bool                       m_sink_acked[MAX_SINK_NODES];
 
-    uint16_t                   m_seq;
+    uint8_t                    m_seq;
     uint16_t                   m_octets_per_frame;
     uint32_t                   m_frame_duration_us;
     vsaf_audio_packet_t        m_last_tx_pkt[MAX_SINK_NODES];
+    uint8_t                    m_prev_encoded_channels[MAX_SINK_NODES][LC3_FRAME_OCTETS];
+    bool                       m_prev_encoded_valid[MAX_SINK_NODES];
 
     std::atomic<uint8_t>       m_target_volume_u8;
     float                      m_target_gain_db;
     float                      m_current_gain_db;
     bool                       m_instant_vol_update;
 
+    esp_timer_handle_t         m_frame_timer{nullptr};
     TaskHandle_t               m_source_enc_task_handle;
     TaskHandle_t               m_source_tx_task_handle;
     TaskHandle_t               m_sink_task_handle;
 
+    std::atomic<uint32_t>      m_tx_timeout_count{0};
+    std::atomic<uint32_t>      m_tx_fail_count{0};
+    std::atomic<uint32_t>      m_tx_mac_error_count{0};
+    uint32_t                   m_consecutive_tx_timeouts{0};
+
+    void handleTxSubsystemHang();
+
     // Double-buffered encoded audio frame from Encode Task to TX Task (2 LC3 channels)
     struct EncodedAudioBuffer {
-        uint8_t  data[2][120];
+        uint8_t  data[2][LC3_FRAME_OCTETS];
         uint16_t octets;
         bool     valid;
     };
@@ -354,16 +399,17 @@ private:
     std::atomic<uint32_t>      m_plc_count;
     std::atomic<uint32_t>      m_fifo_underflows;
     std::atomic<uint32_t>      m_fifo_overflows;
-    uint16_t                   m_last_rx_seq;
+    std::atomic<uint32_t>      m_redundancy_recovered_packets{0};
+    uint8_t                    m_last_rx_seq;
     bool                       m_first_packet_received;
-    uint16_t                   m_expected_seq;
+    uint8_t                    m_expected_seq;
     bool                       m_has_expected_seq;
 
     static constexpr size_t    SINK_FIFO_PACKETS = 24;
     struct SinkFifoItem {
-        uint16_t seq;
+        uint8_t  seq;
         uint8_t  len;
-        uint8_t  data[120];
+        uint8_t  data[LC3_FRAME_OCTETS];
     };
     SinkFifoItem               m_sink_fifo[SINK_FIFO_PACKETS];
     size_t                     m_sink_fifo_head;

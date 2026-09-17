@@ -85,7 +85,8 @@ def compile_target(app_dir, target, threads=6):
     build_dir = f"build_{'s3' if target == 'esp32s3' else 'c6'}"
     sdkconfig_file = f"sdkconfig.{'s3' if target == 'esp32s3' else 'c6'}"
 
-    print(f"[\033[93mBUILD START\033[0m] Compiling {target.upper()} in {build_dir} using {threads} ninja threads...")
+    abs_build_dir = os.path.join(app_dir, build_dir)
+    abs_sdkconfig = os.path.join(app_dir, sdkconfig_file)
 
     cmd = (
         f"$env:IDF_TOOLS_PATH = 'C:\\Users\\stefa\\.espressif'; "
@@ -95,9 +96,10 @@ def compile_target(app_dir, target, threads=6):
         f"  $env:IDF_PYTHON_ENV_PATH = 'C:\\Users\\stefa\\.espressif\\python_env\\idf6.0_py3.11_env' "
         f"}}; "
         f"$env:PATH = '$env:IDF_PYTHON_ENV_PATH\\Scripts;' + $env:PATH; "
+        f"$env:CMAKE_BUILD_PARALLEL_LEVEL = {threads}; "
+        f"$env:NINJA_JOBS = {threads}; "
         f". 'C:\\Users\\stefa\\OneDrive\\Documents\\ESP\\v6.0.2\\esp-idf\\export.ps1'; "
-        f"Copy-Item '{sdkconfig_file}' 'sdkconfig' -Force; "
-        f"idf.py -B {build_dir} -D IDF_TARGET={target} build -- -j {threads}"
+        f"idf.py -C '{app_dir}' -B '{abs_build_dir}' -D IDF_TARGET={target} -D SDKCONFIG='{abs_sdkconfig}' build"
     )
 
     proc = subprocess.run(
@@ -108,12 +110,14 @@ def compile_target(app_dir, target, threads=6):
     )
 
     duration = time.time() - t0
-    if proc.returncode == 0:
+    app_bin = os.path.join(abs_build_dir, "audio_VSAF_broadcast2.bin")
+    bootloader_bin = os.path.join(abs_build_dir, "bootloader", "bootloader.bin")
+    if proc.returncode == 0 and os.path.isfile(app_bin) and os.path.isfile(bootloader_bin):
         print(f"[\033[92mBUILD SUCCESS\033[0m] {target.upper()} compiled successfully in {duration:.2f} s ({build_dir})")
         return True, target, duration, ""
     else:
         err_msg = proc.stderr if proc.stderr else proc.stdout
-        print(f"[\033[91mBUILD FAILED\033[0m] {target.upper()} failed with code {proc.returncode} in {duration:.2f} s")
+        print(f"[\033[91mBUILD FAILED\033[0m] {target.upper()} failed with code {proc.returncode} in {duration:.2f} s:\n{err_msg}")
         return False, target, duration, err_msg
 
 
@@ -128,10 +132,16 @@ def flash_single_node(app_dir, node_info, baud=921600):
 
     print(f"[\033[93mFLASH START\033[0m] Node {node_id} ({role}) on {port} [{chip}] at {baud} baud...")
 
+    idf_python = sys.executable
+    if os.path.isfile(r"C:\Users\stefa\.espressif\python_env\idf6.0_py3.13_env\Scripts\python.exe"):
+        idf_python = r"C:\Users\stefa\.espressif\python_env\idf6.0_py3.13_env\Scripts\python.exe"
+    elif os.path.isfile(r"C:\Users\stefa\.espressif\python_env\idf6.0_py3.11_env\Scripts\python.exe"):
+        idf_python = r"C:\Users\stefa\.espressif\python_env\idf6.0_py3.11_env\Scripts\python.exe"
+
     if chip == "esp32s3":
         # S3 hands-free RTC Watchdog system reset
         s3_script = os.path.join(app_dir, "tools", "s3_flash_and_reset.py")
-        cmd = [sys.executable, "-u", s3_script, "--port", port, "--baud", str(baud), "--bin-dir", os.path.join(app_dir, "build_s3")]
+        cmd = [idf_python, "-u", s3_script, "--port", port, "--baud", str(baud), "--bin-dir", os.path.join(app_dir, "build_s3")]
         proc = subprocess.run(cmd, cwd=app_dir, capture_output=True, text=True)
     else:
         # C6 standard high-speed flash with hardware reset
@@ -143,7 +153,7 @@ def flash_single_node(app_dir, node_info, baud=921600):
             app_bin = os.path.join(build_dir, "audio_ESP_NOW_unicast.bin")
 
         cmd = [
-            sys.executable, "-m", "esptool",
+            idf_python, "-m", "esptool",
             "--chip", "esp32c6",
             "-p", port,
             "-b", str(baud),
@@ -166,7 +176,7 @@ def flash_single_node(app_dir, node_info, baud=921600):
         return True, node_id, port, duration, ""
     else:
         err_msg = proc.stderr if proc.stderr else proc.stdout
-        print(f"[\033[91mFLASH FAILED\033[0m] Node {node_id} on {port} failed in {duration:.2f} s")
+        print(f"[\033[91mFLASH FAILED\033[0m] Node {node_id} on {port} failed in {duration:.2f} s:\n{err_msg}")
         return False, node_id, port, duration, err_msg
 
 
@@ -180,7 +190,7 @@ def main():
     parser.add_argument("--baud", type=int, default=921600, help="Flash baud rate (default 921600)")
     args = parser.parse_args()
 
-    app_dir = os.path.abspath(args.app_dir)
+    app_dir = os.path.realpath(args.app_dir)
     kill_lingering_processes()
 
     # 1. PARALLEL COMPILATION PHASE

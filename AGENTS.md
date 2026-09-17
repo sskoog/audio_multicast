@@ -39,16 +39,16 @@ Both Bluetooth 5.3+ Low Energy Audio and ESP-NOW (802.11) are used as layer-2 co
 ### Bluetooth 5.3+ Low Energy Audio (to be implemented)
 To be defined.
 
-### 802.11 (ESP-NOW) Packet Structure 
-ESP-NOW audio packets use the VSAF container format, condaining maximum 250 bytes. A minimal 8-byte header is used for meta-data.  
-- **8-Byte Header**:
-  - `magic` (2B): `0x1337`
-  - `seq` (2B): Monotonically incrementing 16-bit sequence number
-  - `cfg` (1B): Bitfield (Bit 0: Redundancy present, Bit 1: Stereo mode, Bits 2-3: Channel index, Bits 4-7: Reserved)
-  - `pts_us` (3B): Presentation timestamp in microseconds modulo 2^24
-- **Payload**:
-  - Primary Frame (Frame N, e.g., 120 bytes)
-  - Redundant Frame (Frame N-1, e.g., 120 bytes)
+### 802.11 (ESP-NOW) Packet Structure (VSAF 3.0)
+ESP-NOW audio packets use the VSAF 3.0 container format (strictly 248 bytes, 32-bit word aligned) with dual-frame (t0 + t-1) redundancy and round-robin SINK replies:
+- **8-Byte Word-Aligned Header**:
+  - `type_id` (2B): `0x1337` (Audio Broadcast), `0x1338` (Control), `0x1339` (SINK Telemetry Reply)
+  - `packet_flags` (1B): Bit 0: Frame duration (0=7.5ms, 1=10ms), Bits 1-3: Sample rate, Bits 4-6: Target channel/receiver ID, Bit 7: Request for ACK/reply flag
+  - `seq` (1B): Monotonically incrementing 8-bit sequence number (0-255)
+  - `t_tx1_us` (4B): SOURCE microsecond master presentation timestamp (`esp_timer_get_time()`)
+- **Payload (240 Bytes)**:
+  - Primary Frame (Frame t0, 120 bytes, 32-bit word-aligned at offset 8)
+  - Redundant Frame (Frame t-1, 120 bytes, 32-bit word-aligned at offset 128)
 
 ### Supported Audio Configurations
 - **Sample Rates**: [8, 16, 24, 32, 48] kHz
