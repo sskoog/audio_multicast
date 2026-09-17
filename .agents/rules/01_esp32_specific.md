@@ -58,3 +58,7 @@ trigger: always_on
 6.3. **Avoid Ninja Regeneration Traps**: Ninja will invoke CMake automatically when source or config files change. If the build folder was configured with target A, running a build for target B without a dedicated directory will cause silent target corruption or toolchain mismatch errors.
 
 6.4. **Explicit CMake & Toolchain Invocation**: When configuring CMake programmatically or via scripts, always explicitly pass the full isolation parameters.
+
+6.5. **CPU Thread Allocation Gating**: On 12-thread host machines (2 P-cores + 8 E-cores):
+    * **Single-Target Build**: Cap Ninja worker threads at max **8 threads** (`-j 8`).
+    * **Dual-Target Parallel Build**: Allocate exactly **6 threads per target** (`-j 6` for S3, `-j 6` for C6; total 12 threads) to prevent CPU starvation and thread thrashing.

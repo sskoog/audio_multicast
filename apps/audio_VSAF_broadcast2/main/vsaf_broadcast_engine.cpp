@@ -139,7 +139,7 @@ esp_err_t EspNowBroadcastEngine::init(uint8_t role, uint8_t node_id, uint8_t wif
     ESP_ERROR_CHECK(esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N));
 #endif
 
-    esp_wifi_set_max_tx_power(78); // +19.5 dBm (maximum RF output power)
+    esp_wifi_set_max_tx_power(12); // +3.00 dBm (12 * 0.25 dBm)
 
     // 2. Initialize ESP-NOW
     ESP_ERROR_CHECK(esp_now_init());

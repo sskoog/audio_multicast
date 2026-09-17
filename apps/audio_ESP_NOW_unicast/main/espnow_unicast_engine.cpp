@@ -323,7 +323,7 @@ esp_err_t EspNowUnicastEngine::init(uint8_t role, uint8_t node_id, uint8_t wifi_
 #endif
 
         // Set transmit power (+9.0 dBm = 36 * 0.25 dBm)
-        esp_wifi_set_max_tx_power(36);
+        esp_wifi_set_max_tx_power(12); // +3.00 dBm (12 * 0.25 dBm)
 
         // Initialize ESP-NOW
         ESP_ERROR_CHECK(esp_now_init());

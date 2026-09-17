@@ -351,7 +351,7 @@ esp_err_t EspNowAudioBroadcast::enableWifiEspNow() {
     esp_wifi_config_11b_rate(WIFI_IF_STA, false); // Disable 11b 1Mbps slow rates
     esp_wifi_config_80211_tx_rate(WIFI_IF_STA, m_tx_phy_rate);
     ESP_ERROR_CHECK(esp_wifi_start());
-    ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(36)); // +9.00 dBm (36 * 0.25 dBm) for power efficiency and thermal control
+    ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(12)); // +3.00 dBm (12 * 0.25 dBm)
     int8_t actual_tx_power = 0;
     if (esp_wifi_get_max_tx_power(&actual_tx_power) == ESP_OK) {
         ESP_LOGI(TAG, "Wi-Fi TX Power set to +%.2f dBm (raw: %d)", actual_tx_power * 0.25f, actual_tx_power);

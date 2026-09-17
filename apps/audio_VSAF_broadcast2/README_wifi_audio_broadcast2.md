@@ -83,6 +83,10 @@ Node 16 (Seeed Studio XIAO ESP32-S3) utilizes native USB connected directly to G
 
 All network communication uses the **VSAF 2.0 (Variable-rate Synchronized Audio Frame)** container. All fields are explicitly packed in little-endian byte order.
 
+### 3.0 802.11 basics
+
+The RF RX amplifier on ESP32 has a Low-Noise Amplifier (LNA) which can easily saturate at high signal strengths. This can cause the RF RX to drop perfectly valid packets due to distortion, leading to corrupt bits or fault CNCs. Optimal RSSI is -60 dBm to -30 dBm for ESP32s. If RSSI is over -20 dB, reduce the RF TX gain.
+
 ### 3.1 16-Bit Tag Word (`0xTTRS`)
 
 Every packet begins with a 16-bit Tag word encoding packet routing, type, and operational flags:

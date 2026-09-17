@@ -159,7 +159,7 @@ void SystemDiagnostics::tick() {
             if (esp_wifi_get_max_tx_power(&actual_tx_power) == ESP_OK) {
                 snprintf(rssi_str, sizeof(rssi_str), "%+4.1f", actual_tx_power * 0.25f);
             } else {
-                snprintf(rssi_str, sizeof(rssi_str), "+9.0");
+                snprintf(rssi_str, sizeof(rssi_str), "+3.0");
             }
         } else if (m_espnow_broadcast.getState() == AudioNet::NetworkState::OFF ||
                    m_espnow_broadcast.getState() == AudioNet::NetworkState::IDLE) {
