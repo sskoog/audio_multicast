@@ -74,8 +74,8 @@ Write-Host "[5/5] Checking Python Virtual Environment..." -ForegroundColor Yello
 Write-Host "  Note: If using Python virtual environments, paths in pyvenv.cfg may need update." -ForegroundColor DarkCyan
 Write-Host "  To create a clean environment in the new folder:" -ForegroundColor DarkCyan
 Write-Host "    cd $NewPath" -ForegroundColor White
-Write-Host "    python -m venv venv_audio_multicast" -ForegroundColor White
-Write-Host "    .\venv_audio_multicast\Scripts\pip install -r apps\audio_ESP_NOW_broadcast\requirements.txt" -ForegroundColor White
+Write-Host "    python -m venv .venv_audio_multicast" -ForegroundColor White
+Write-Host "    .\.venv_audio_multicast\Scripts\pip install -r apps\audio_ESP_NOW_broadcast\requirements.txt" -ForegroundColor White
 
 Write-Host "`nMigration Complete!" -ForegroundColor Green
 Write-Host "Open the workspace using:" -ForegroundColor Cyan

@@ -149,7 +149,7 @@ Audio broadcasting MUST use absolute microsecond hardware timer pacing (`esp_tim
    ```powershell
    winget install ffmpeg
    ```
-5. **Python Dependencies** (installed in project virtual environment `venv_ble_audio`):
+5. **Python Dependencies** (installed in project virtual environment `.venv_audio_multicast`):
    ```powershell
    pip install numpy scipy pyserial sounddevice
    ```

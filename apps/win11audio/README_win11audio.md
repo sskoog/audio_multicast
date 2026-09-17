@@ -115,13 +115,13 @@ Assuming stereo output:
 
 ## Requirements & Virtual Environment Setup
 
-### 1. Activate the `ble_audio` Virtual Environment:
+### 1. Activate the Virtual Environment:
 ```powershell
 # From the repository root
-.\venv_audio_multicast\Scripts\Activate.ps1
+.\.venv_audio_multicast\Scripts\Activate.ps1
 
 # Or from the win11audio app folder:
-..\..\ble_audio\Scripts\Activate.ps1
+..\..\.venv_audio_multicast\Scripts\Activate.ps1
 ```
 
 ### 2. Install / Verify Dependencies:

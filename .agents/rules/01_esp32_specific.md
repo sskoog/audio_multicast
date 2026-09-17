@@ -4,14 +4,16 @@ trigger: always_on
 
 # Rule: Build and Flash Operations (ESP-IDF)
 
-0. **Toolchain version**: Generally use the latest available/installed toolchains (ESP-IDF) unless explicitly agreed with user. Prompt user if newer toolchains are available either locally or to download/install.
-
-1. **Environment Activation**:
-   - The workspace standard is **ESP-IDF v6.0.2** installed at `C:\Users\stefa\OneDrive\Documents\ESP\v6.0.2\esp-idf` with tools in `C:\Users\stefa\.espressif`.
-   - Always activate the environment using:
+1. **Toolchain version**: Generally use the latest available/installed toolchains (ESP-IDF) unless explicitly agreed with user. Prompt user if newer toolchains are available locally
+   - Official source for ESP-IDF: https://github.com/espressif/esp-idf
+   - Additional ESP components: https://components.espressif.com/ .
+   - Prompt user if new version of ESP-IDF or ESP-ADF is available to download.
+   - Local repository for all ESP-IDF versions: C:\Users\stefa\OneDrive\Documents\ESP\ .
+   - ESP-IDF tools in C:\Users\stefa\.espressif .
+   - Activate the environment using:
      ```powershell
      $env:IDF_TOOLS_PATH = "C:\Users\stefa\.espressif"
-     . "C:\Users\stefa\OneDrive\Documents\ESP\v6.0.2\esp-idf\export.ps1"
+     . "[ESP-IDF-path]\esp-idf\export.ps1"
      ```
 
 2. **COM-ports**
