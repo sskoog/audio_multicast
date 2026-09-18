@@ -78,8 +78,17 @@ void print_console(const char* format, ...) {
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
         // 3. TinyUSB CDC ACM (COM116 on ESP32-S3 Node 16)
         if (tud_cdc_ready()) {
-            tud_cdc_write(s_out_buf, static_cast<uint32_t>(out_len));
-            tud_cdc_write_flush();
+            uint32_t written = 0;
+            uint32_t total = static_cast<uint32_t>(out_len);
+            int retry = 0;
+            while (written < total && retry++ < 20) {
+                uint32_t chunk = tud_cdc_write(s_out_buf + written, total - written);
+                written += chunk;
+                tud_cdc_write_flush();
+                if (written < total) {
+                    vTaskDelay(pdMS_TO_TICKS(1));
+                }
+            }
         }
 #endif
     }
@@ -139,32 +148,37 @@ void handle_ascii_command(const char* raw_line) {
     }
 
     if (strcasecmp(line, "help") == 0 || strcmp(line, "?") == 0) {
+        // Partition help printout into <= 400 char batches to fit in s_raw_buf[512] with blocking flush
         print_console("\n================ MULTI-UNICAST CONSOLE COMMANDS ================\n"
-                      "  peer list                  - Display registered SINK peers, uptime, and ACK statistics\n"
+                      "--- PEER & NETWORK MANAGEMENT ---\n"
+                      "  peer list                  - Display registered SINK peers and stats\n"
                       "  peer add <mac> <ch> [name] - Register a new SINK peer (ch 0..5)\n"
                       "  peer del <mac>             - Remove a SINK peer\n"
-                      "  peer enable <mac>          - Enable unicast transmission to peer\n"
-                      "  peer disable <mac>         - Disable unicast transmission to peer\n"
-                      "  scan [auto] / survey       - Passive 802.11 RF sniffer survey across channels 1..13\n"
+                      "  peer enable/disable <mac>  - Enable/disable unicast to peer\n");
+        vTaskDelay(pdMS_TO_TICKS(5));
+
+        print_console("--- WI-FI & RF MANAGEMENT ---\n"
+                      "  scan [auto] / survey       - Passive 802.11 sniffer survey ch 1..13\n"
                       "  wifich <1..13>             - Set Wi-Fi channel manually\n"
-                      "  start / play / cast        - Transition SOURCE to CAST / SINK to SCANNING\n"
-                      "  stop / pause               - Stop transmission / receiver (transition to IDLE)\n"
-                      "  tone [on|off]              - Toggle internal test tone generator (overrides auto-USB)\n"
-                      "  phy <rate>                 - Switch PHY rate (primary/ht3, secondary/12m, tertiary/ht0)\n"
+                      "  phy <rate>                 - Switch PHY rate (primary/ht3, etc.)\n"
+                      "  start / play / cast        - Transition SOURCE to CAST / SINK to SCAN\n"
+                      "  stop / pause               - Stop transmission / receiver (IDLE)\n");
+        vTaskDelay(pdMS_TO_TICKS(5));
+
+        print_console("--- AUDIO & CODEC CONFIGURATION ---\n"
+                      "  tone [on|off]              - Toggle internal test tone generator\n"
                       "  mode mono|stereo|surround  - Switch audio channel generation mode\n"
-                      "  ch <0..5>                  - Set SINK target channel (0: Left, 1: Right, 5: Sub)\n"
-                      "  sublp <20..500>            - Set Subwoofer 4th-order LR low-pass cutoff (Hz)\n"
-                      "  octets <60..120>           - Set LC3 frame length in octets (default: 120)\n"
-                      "  sr <16k|24k|32k|48k|96k>   - Set audio sample rate\n"
-                      "  vol <0..100>               - Set volume percentage (0=Mute, 100=0dB)\n"
-                      "  voldb <-96..0>             - Set volume in dB (-96.0 dB to 0.0 dB)\n"
-                      "  volu8 <0..255>             - Set raw uint8 volume\n"
-                      "  volch <ch> <0..255>        - Set volume for specific channel (SOURCE)\n"
+                      "  sublp <20..500>            - Set Subwoofer LR low-pass cutoff (Hz)\n"
+                      "  sr <16k|24k|32k|48k|96k>   - Set audio sample rate\n");
+        vTaskDelay(pdMS_TO_TICKS(5));
+
+        print_console("--- VOLUME & SYSTEM CONTROL ---\n"
+                      "  vol <0..100> / voldb <-96..0> - Set volume (%% or dB)\n"
+                      "  volu8 <0..255> / volch <c> <v> - Set raw uint8 volume\n"
                       "  mute / unmute              - Mute / Unmute audio (slew-limited)\n"
                       "  gain <0|3|6|9|12|15>       - Set I2S DAC hardware gain (dB)\n"
                       "  clear / cls                - Reset / clear error counters\n"
-                      "  diag                       - Print system telemetry report\n"
-                      "  reset / reboot             - Reboot microcontroller\n"
+                      "  diag / reset / reboot      - System telemetry / Reboot node\n"
                       "================================================================\n\n");
     } else if (strncasecmp(line, "peer add ", 9) == 0) {
         char mac_str[32] = {0};

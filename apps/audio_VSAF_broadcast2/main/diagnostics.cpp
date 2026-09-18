@@ -233,7 +233,7 @@ void SystemDiagnostics::tick() {
             // SOURCE specifics: Node status string (e.g. '1OOOO1' for 6 slots: Ch 0..5)
             m_unicast_engine.getNodeStatusString(role_col_str, sizeof(role_col_str));
 
-            const char* input_str = m_unicast_engine.isToneTestMode() ? "TONE  " : "UAC2  ";
+            const char* input_str = m_unicast_engine.isToneTestMode() ? "TONE  " : "USB   ";
 
             uint32_t raw_tx_pkts = m_unicast_engine.getAndResetTxPacketsSec();
             uint32_t tx_pkts_sec = static_cast<uint32_t>((static_cast<uint64_t>(raw_tx_pkts) * 1000000ULL) / elapsed_us);
@@ -244,21 +244,43 @@ void SystemDiagnostics::tick() {
                 snprintf(tx_pkts_str, sizeof(tx_pkts_str), "%4lu", (unsigned long)tx_pkts_sec);
             }
 
-            uint32_t acks_sec = m_unicast_engine.getAndResetTxAcksSec();
-            uint32_t ack_fails_sec = m_unicast_engine.getAndResetTxAckFailsSec();
-            uint32_t attempts_sec = acks_sec + ack_fails_sec;
-            char ack_pct_str[8];
-            if (attempts_sec > 0) {
-                float ack_pct = (static_cast<float>(acks_sec) * 100.0f) / static_cast<float>(attempts_sec);
-                snprintf(ack_pct_str, sizeof(ack_pct_str), "%3.0f%%", ack_pct);
-            } else if (!is_audio_active) {
-                snprintf(ack_pct_str, sizeof(ack_pct_str), "   -");
-            } else {
-                snprintf(ack_pct_str, sizeof(ack_pct_str), "100%%");
+            uint32_t raw_acks_sec = m_unicast_engine.getAndResetTxAcksSec();
+            uint32_t acks_sec = static_cast<uint32_t>((static_cast<uint64_t>(raw_acks_sec) * 1000000ULL) / elapsed_us);
+
+            // Count confirmed online nodes (peers currently in PeerStatus::ONLINE)
+            uint32_t online_nodes = 0;
+            for (size_t i = 0; i < AudioNet::MAX_SINK_NODES; ++i) {
+                const auto* p = m_unicast_engine.getPeer(i);
+                if (p && p->is_enabled && p->status == AudioNet::PeerStatus::ONLINE) {
+                    online_nodes++;
+                }
             }
 
+            // Calculate expected replies in 1-second window:
+            // Broadcast transmits tx_pkts_sec packets across 6 channels (tx_pkts_sec / 6.0 sweeps/sec).
+            // Exactly 1 ACK request is sent per sweep, rotating round-robin across the 6 channels.
+            // Expected replies from confirmed online nodes = (tx_pkts_sec / 6.0f) * (online_nodes / 6.0f).
+            float sweeps_sec = static_cast<float>(tx_pkts_sec) / 6.0f;
+            float expected_replies_sec = sweeps_sec * (static_cast<float>(online_nodes) / 6.0f);
+            uint32_t expected_replies_int = static_cast<uint32_t>(std::round(expected_replies_sec));
+
+            char ack_pct_str[8];
             char ack_fails_str[8];
-            snprintf(ack_fails_str, sizeof(ack_fails_str), "%4lu", (unsigned long)ack_fails_sec);
+            if (is_audio_active && online_nodes > 0 && expected_replies_sec > 0.0f) {
+                float ack_pct = (static_cast<float>(acks_sec) * 100.0f) / expected_replies_sec;
+                if (ack_pct > 100.0f) ack_pct = 100.0f;
+                snprintf(ack_pct_str, sizeof(ack_pct_str), "%3.0f%%", ack_pct);
+
+                uint32_t ack_fails_sec = (expected_replies_int > acks_sec) ? (expected_replies_int - acks_sec) : 0;
+                snprintf(ack_fails_str, sizeof(ack_fails_str), "%4lu", (unsigned long)ack_fails_sec);
+            } else if (!is_audio_active) {
+                snprintf(ack_pct_str, sizeof(ack_pct_str), "   -");
+                snprintf(ack_fails_str, sizeof(ack_fails_str), "   -");
+            } else {
+                // Audio active but 0 online nodes confirmed
+                snprintf(ack_pct_str, sizeof(ack_pct_str), "   -");
+                snprintf(ack_fails_str, sizeof(ack_fails_str), "   0");
+            }
 
             uint32_t tx_pkts_total = m_unicast_engine.getTxPacketsTotal();
             char tx_tot_str[8];
@@ -312,16 +334,16 @@ void SystemDiagnostics::tick() {
                 snprintf(dma_udr_str, sizeof(dma_udr_str), "%3lu", (unsigned long)dma_udr);
             }
 
+            uint32_t red_rec = m_unicast_engine.getRedundancyRecoveredCount();
+            char red_str[8];
+            snprintf(red_str, sizeof(red_str), "%3lu", (unsigned long)red_rec);
+
             char fifo_udr_str[8];
             snprintf(fifo_udr_str, sizeof(fifo_udr_str), "%3lu", (unsigned long)fifo_ud);
 
-            uint32_t fifo_ovr = m_unicast_engine.getFifoOverflowCount();
-            char fifo_ovr_str[8];
-            snprintf(fifo_ovr_str, sizeof(fifo_ovr_str), "%3lu", (unsigned long)fifo_ovr);
-
             snprintf(mid_block, sizeof(mid_block),
-                     " %3.3s %3.3s  %4.4s  %3.3s  %3.3s  %3.3s  %3.3s ",
-                     gain_sw_str, gain_hw_str, pkts_str, plc_str, dma_udr_str, fifo_udr_str, fifo_ovr_str);
+                     " %3.3s %3.3s  %4.4s  %3.3s  %3.3s  %3.3s   %3.3s    ",
+                     gain_sw_str, gain_hw_str, pkts_str, red_str, plc_str, dma_udr_str, fifo_udr_str);
         }
 
         uint32_t t_local = static_cast<uint32_t>((esp_timer_get_time() / 1000ULL) % 1000000ULL);
@@ -350,41 +372,49 @@ void SystemDiagnostics::tick() {
         }
 
         char audio_block[64];
-        snprintf(audio_block, sizeof(audio_block),
-                 "  %-3.3s  %5.5s %5.5s  %4.4s  %3.3s %5.5s %5.5s ",
-                 enc_str, rms_str, peak_str, sr_str, pd_str, codec_avg_str, codec_pk_str);
+        if (cfg->node_role == NODE_ROLE_SOURCE) {
+            float dsp_ms = 0.0f, enc1_ms = 0.0f, enc2_ms = 0.0f, enc3_ms = 0.0f, tx_ms = 0.0f;
+            m_unicast_engine.getStageDurationStats(dsp_ms, enc1_ms, enc2_ms, enc3_ms, tx_ms);
+
+            char dsp_str[8], e1_str[8], e2_str[8], e3_str[8], tx_str[8];
+            snprintf(dsp_str, sizeof(dsp_str), "%4.2f", dsp_ms);
+            snprintf(e1_str, sizeof(e1_str), "%4.2f", enc1_ms);
+            snprintf(e2_str, sizeof(e2_str), "%4.2f", enc2_ms);
+            snprintf(e3_str, sizeof(e3_str), "%4.2f", enc3_ms);
+            snprintf(tx_str, sizeof(tx_str), "%4.2f", tx_ms);
+
+            snprintf(audio_block, sizeof(audio_block),
+                     " %5.5s %5.5s | %4.4s  %4.4s  %4.4s  %4.4s  %4.4s",
+                     rms_str, peak_str, dsp_str, e1_str, e2_str, e3_str, tx_str);
+        } else {
+            snprintf(audio_block, sizeof(audio_block),
+                     "  %-3.3s  %5.5s %5.5s  %4.4s  %3.3s %5.5s %5.5s ",
+                     enc_str, rms_str, peak_str, sr_str, pd_str, codec_avg_str, codec_pk_str);
+        }
 
         char time_sync_block[64];
         if (cfg->node_role == NODE_ROLE_SOURCE) {
             const auto* p0 = m_unicast_engine.getPeer(0); // Left (Node 23)
             const auto* p1 = m_unicast_engine.getPeer(1); // Right (Node 24)
 
-            char l_tot_str[16], l_dwl_str[16], l_net_str[16];
-            char r_tot_str[16], r_dwl_str[16], r_net_str[16];
+            char l_net_str[16];
+            char r_net_str[16];
 
-            if (p0 && p0->status == AudioNet::PeerStatus::ONLINE && p0->last_total_rtt_us > 0) {
-                snprintf(l_tot_str, sizeof(l_tot_str), "%5lu", (unsigned long)p0->last_total_rtt_us);
-                snprintf(l_dwl_str, sizeof(l_dwl_str), "%5lu", (unsigned long)p0->last_dwell_us);
+            if (p0 && p0->status == AudioNet::PeerStatus::ONLINE && p0->last_net_rtt_us > 0) {
                 snprintf(l_net_str, sizeof(l_net_str), "%5lu", (unsigned long)p0->last_net_rtt_us);
             } else {
-                snprintf(l_tot_str, sizeof(l_tot_str), "    -");
-                snprintf(l_dwl_str, sizeof(l_dwl_str), "    -");
                 snprintf(l_net_str, sizeof(l_net_str), "    -");
             }
 
-            if (p1 && p1->status == AudioNet::PeerStatus::ONLINE && p1->last_total_rtt_us > 0) {
-                snprintf(r_tot_str, sizeof(r_tot_str), "%5lu", (unsigned long)p1->last_total_rtt_us);
-                snprintf(r_dwl_str, sizeof(r_dwl_str), "%5lu", (unsigned long)p1->last_dwell_us);
+            if (p1 && p1->status == AudioNet::PeerStatus::ONLINE && p1->last_net_rtt_us > 0) {
                 snprintf(r_net_str, sizeof(r_net_str), "%5lu", (unsigned long)p1->last_net_rtt_us);
             } else {
-                snprintf(r_tot_str, sizeof(r_tot_str), "    -");
-                snprintf(r_dwl_str, sizeof(r_dwl_str), "    -");
                 snprintf(r_net_str, sizeof(r_net_str), "    -");
             }
 
             snprintf(time_sync_block, sizeof(time_sync_block),
-                     "  %5.5s  %5.5s   %5.5s  %5.5s   %5.5s  %5.5s ",
-                     l_tot_str, l_dwl_str, r_tot_str, r_dwl_str, l_net_str, r_net_str);
+                     "              %5.5s       %5.5s         ",
+                     l_net_str, r_net_str);
         } else {
             snprintf(time_sync_block, sizeof(time_sync_block),
                      " %6lu  %6.6s   %5.5s   %5.5s  %5.5s  ",
@@ -423,11 +453,11 @@ void SystemDiagnostics::tick() {
         if ((m_header_counter % 10) == 0) {
             print_console("%s\n", border_line);
             if (cfg->node_role == NODE_ROLE_SOURCE) {
-                print_console("|    CPU      | STATE | NODES  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  |  SOURCE      PKTS  ACK%%  FAIL   TOT  |        ROUND-TRIP TIME & DWELL (us)    |\n");
-                print_console("|  %%   C  MHz |       | 012345 | GAIN Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  INPUT        1/s   1/s   1/s  pkts   |  L_Tot  L_Dwl   R_Tot  R_Dwl   L_Net  R_Net |\n");
+                print_console("|    CPU      | STATE | NODES  |    WIFI     |  AUDIO dBFS  |     STAGE TIMINGS (ms)       |  SOURCE      PKTS  ACK%%  FAIL   TOT  |             ROUND-TRIP NET (us)        |\n");
+                print_console("|  %%   C  MHz |       | 012345 | GAIN Ch PHY |   RMS    Pk  |  DSP   Enc1  Enc2  Enc3   TX  |  INPUT        1/s     %%   1/s  pkts   |              L_Net       R_Net         |\n");
             } else {
-                print_console("|    CPU      | STATE |  CHAN  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | AMP dB   PKTS  PLC  DMA   FIFO    |         TIME & SYNCHRONIZATION (ms)    |\n");
-                print_console("|  %%   C  MHz |       |        | RSSI Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  SW  HW   1/s  tot  UDR  UDR  OVR |  Local  Master  EMA_offs RB_med RB_rng |\n");
+                print_console("|    CPU      | STATE |  CHAN  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | AMP dB   PKTS  RED  PLC  DMA   FIFO    |         TIME & SYNCHRONIZATION (ms)    |\n");
+                print_console("|  %%   C  MHz |       |        | RSSI Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  SW  HW   1/s  rec  tot  UDR   UDR     |  Local  Master  EMA_offs RB_med RB_rng |\n");
             }
         }
         print_console("%s\n", row_buf);

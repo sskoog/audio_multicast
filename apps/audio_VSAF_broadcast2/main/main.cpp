@@ -108,26 +108,29 @@ static void on_user_button_pressed(void* user_data) {
     const system_config_t* cfg = get_system_config();
     AudioNet::NetworkState current_state = s_unicast_engine->getState();
 
-    ESP_LOGI(TAG, ">>> USER BUTTON TRIGGERED! Current State: %s (Role: %s) <<<",
-             s_unicast_engine->getStateString(),
-             (cfg->node_role == NODE_ROLE_SOURCE) ? "SOURCE" : "SINK");
-
     if (cfg->node_role == NODE_ROLE_SOURCE) {
+        bool is_synth = s_unicast_engine->isToneTestMode();
         if (current_state == AudioNet::NetworkState::IDLE) {
-            ESP_LOGI(TAG, "SOURCE: Transitioning from IDLE -> CAST (Resuming audio unicast)");
+            // Mode 1 (IDLE) -> Mode 2 (CAST from live USB audio stream)
+            s_unicast_engine->setToneTestMode(false);
             s_unicast_engine->transitionTo(AudioNet::NetworkState::CAST);
+            ESP_LOGI(TAG, ">>> BUTTON: SOURCE Mode 1/3 -> CAST (Live USB Audio Streaming) <<<");
+        } else if (!is_synth) {
+            // Mode 2 (CAST USB) -> Mode 3 (CAST using synth tone -> Dual LC3 Encoders)
+            s_unicast_engine->setToneTestMode(true);
+            ESP_LOGI(TAG, ">>> BUTTON: SOURCE Mode 2/3 -> CAST (Internal Synth Tone -> Dual LC3 Encoders) <<<");
         } else {
-            ESP_LOGI(TAG, "SOURCE: Transitioning from %s -> IDLE (Stopping unicast)",
-                     s_unicast_engine->getStateString());
+            // Mode 3 (CAST synth) -> Mode 1 (IDLE)
+            s_unicast_engine->setToneTestMode(false);
             s_unicast_engine->transitionTo(AudioNet::NetworkState::IDLE);
+            ESP_LOGI(TAG, ">>> BUTTON: SOURCE Mode 3/3 -> IDLE (Streaming Paused) <<<");
         }
     } else {
         if (current_state == AudioNet::NetworkState::IDLE) {
-            ESP_LOGI(TAG, "SINK: Transitioning from IDLE -> SCANNING (Resuming audio receiver)");
+            ESP_LOGI(TAG, ">>> BUTTON: SINK -> SCANNING (Resuming audio receiver) <<<");
             s_unicast_engine->transitionTo(AudioNet::NetworkState::SCANNING);
         } else {
-            ESP_LOGI(TAG, "SINK: Transitioning from %s -> IDLE (Muting receiver)",
-                     s_unicast_engine->getStateString());
+            ESP_LOGI(TAG, ">>> BUTTON: SINK -> IDLE (Muting receiver) <<<");
             s_unicast_engine->transitionTo(AudioNet::NetworkState::IDLE);
         }
     }
@@ -136,7 +139,7 @@ static void on_user_button_pressed(void* user_data) {
 // ASCII CLI command handling and MAC address parsing have been broken out to console.cpp
 
 
-// Background High-Speed USB / UART CLI Reader Task on Core 0
+// Background High-Speed USB / UART CLI Reader Task on Core 1
 static void usb_serial_cli_task(void* pvParameters) {
     char line_buf[128];
     size_t line_idx = 0;
@@ -215,6 +218,18 @@ static void usb_serial_cli_task(void* pvParameters) {
                 }
             }
         }
+    }
+}
+
+/**
+ * @brief Background 10 Hz system diagnostics & telemetry loop pinned to Core 1
+ */
+static void sys_diag_task(void* pvParameters) {
+    while (true) {
+        if (s_diagnostics) {
+            s_diagnostics->tick();
+        }
+        vTaskDelay(pdMS_TO_TICKS(100)); // 100 ms = 10 Hz
     }
 }
 
@@ -388,22 +403,23 @@ extern "C" void app_main(void) {
     // Run stats component self-test suite
     run_stats_self_test();
 
-    // 7. Start Background CLI Task
-    xTaskCreatePinnedToCore(usb_serial_cli_task, "cli_task", 4096, nullptr, 2, nullptr, 0);
+    // 7. Start Background CLI Task on Core 1 (Core 0 on single-core targets)
+    const BaseType_t app_core = (SOC_CPU_CORES_NUM > 1) ? 1 : 0;
+    xTaskCreatePinnedToCore(usb_serial_cli_task, "cli_task", 4096, nullptr, 2, nullptr, app_core);
+
+    // 8. Start Background Diagnostics Task on Core 1 (Core 0 on single-core targets)
+    xTaskCreatePinnedToCore(sys_diag_task, "sys_diag", 4096, nullptr, 1, nullptr, app_core);
 
     ESP_LOGI(TAG, "Device Node ID: %d | Role: %s | Name: %s",
              cfg->node_id,
              (cfg->node_role == NODE_ROLE_SOURCE) ? "SOURCE (Transmitter)" : "SINK (Receiver)",
              cfg->device_name);
     if (cfg->node_role == NODE_ROLE_SOURCE) {
-        ESP_LOGI(TAG, "System initialization complete! SOURCE ready in IDLE state (send 'synth on' or 'start' via CLI).");
+        ESP_LOGI(TAG, "System initialization complete! SOURCE active in CAST state (USB Audio streaming default).");
     } else {
         ESP_LOGI(TAG, "System initialization complete! SINK listening/scanning.");
     }
 
-    // Main 10 Hz telemetry loop
-    while (true) {
-        s_diagnostics->tick();
-        vTaskDelay(pdMS_TO_TICKS(100)); // 100 ms = 10 Hz
-    }
+    // Delete startup main_task to free memory (sys_diag and cli_task now manage runtime on Core 1)
+    vTaskDelete(nullptr);
 }

@@ -6,6 +6,7 @@
 #include "tone_generator.hpp"
 #include "i2s_audio.hpp"
 #include "audio_metering.hpp"
+#include "biquad_filter.hpp"
 #include "esp_now.h"
 #include "esp_wifi.h"
 #include "esp_timer.h"
@@ -46,6 +47,7 @@ struct SinkPeerConfig {
     bool       is_enabled;
     PeerStatus status;                 // ONLINE, OFFLINE, DISABLED
     int64_t    session_start_time_us;
+    int64_t    last_rx_telemetry_time_us; // Last received telemetry timestamp (us)
     uint32_t   packets_sent;
     uint32_t   acks_received;
     uint32_t   ack_failures;
@@ -289,7 +291,7 @@ public:
     int8_t   getLastRssi() const { return m_last_rssi; }
 
     void updatePerSecondStats();
-    void update10HzTimeOffsetStats() {}
+    void update10HzTimeOffsetStats();
     void getTimeSyncStats(float& out_median_ms, float& out_range_ms, bool& out_has_data) const;
 
     void getTimeOffsetStats(float& out_ema_ms, float& out_rb_med_ms, float& out_rb_rng_ms, bool& out_has_stats) const {
@@ -299,6 +301,16 @@ public:
 
     void getCodecDurationStats(float& out_avg_ms, float& out_peak_ms, bool& out_has_data) const {
         m_codec_duration_buf.getStats(out_avg_ms, out_peak_ms, out_has_data);
+    }
+
+    void getStageDurationStats(float& out_dsp, float& out_enc1, float& out_enc2, float& out_enc3, float& out_tx) const {
+        float peak = 0.0f;
+        bool has_data = false;
+        m_dsp_duration_buf.getStats(out_dsp, peak, has_data);
+        m_enc1_duration_buf.getStats(out_enc1, peak, has_data);
+        m_enc2_duration_buf.getStats(out_enc2, peak, has_data);
+        m_enc3_duration_buf.getStats(out_enc3, peak, has_data);
+        m_tx_duration_buf.getStats(out_tx, peak, has_data);
     }
 
     void setStereo(bool stereo) { m_is_stereo = stereo; }
@@ -313,16 +325,18 @@ public:
     uint32_t getTxTimeoutCount() const { return m_tx_timeout_count.load(std::memory_order_relaxed); }
     uint32_t getTxFailCount() const { return m_tx_fail_count.load(std::memory_order_relaxed); }
     uint32_t getTxMacErrorCount() const { return m_tx_mac_error_count.load(std::memory_order_relaxed); }
+    uint32_t getTxDeadlineDropsCount() const { return m_tx_deadline_drops.load(std::memory_order_relaxed); }
+    uint32_t getAndResetTxDeadlineDropsCount() { return m_tx_deadline_drops.exchange(0, std::memory_order_relaxed); }
 
     static SemaphoreHandle_t s_tx_done_sem;
     static std::atomic<esp_now_send_status_t> s_last_tx_status;
 
 private:
     static void IRAM_ATTR frameTimerCb(void* arg);
-    static void sourceEncTaskTrampoline(void* arg);
+    static void audioDspTaskTrampoline(void* arg);
     static void sourceTxTaskTrampoline(void* arg);
     static void sinkTaskTrampoline(void* arg);
-    void runSourceEncLoop();
+    void runAudioDspLoop();
     void runSourceTxLoop();
     void runSinkLoop();
 
@@ -367,29 +381,52 @@ private:
     bool                       m_instant_vol_update;
 
     esp_timer_handle_t         m_frame_timer{nullptr};
-    TaskHandle_t               m_source_enc_task_handle;
-    TaskHandle_t               m_source_tx_task_handle;
-    TaskHandle_t               m_sink_task_handle;
+    TaskHandle_t               m_audio_dsp_task_handle{nullptr};
+    TaskHandle_t               m_source_tx_task_handle{nullptr};
+    TaskHandle_t               m_sink_task_handle{nullptr};
+
+    SemaphoreHandle_t          m_tx_start_sem{nullptr};
 
     std::atomic<uint32_t>      m_tx_timeout_count{0};
     std::atomic<uint32_t>      m_tx_fail_count{0};
     std::atomic<uint32_t>      m_tx_mac_error_count{0};
+    std::atomic<uint32_t>      m_tx_deadline_drops{0};
     uint32_t                   m_consecutive_tx_timeouts{0};
 
     void handleTxSubsystemHang();
 
-    // Double-buffered encoded audio frame from Encode Task to TX Task (2 LC3 channels)
+    // Single interleaved stereo PCM input capture buffer (480 stereo samples = 960 int16_t = 10 ms @ 48 kHz stereo)
+    int16_t                    m_pcm_stereo_in[480 * 2];
+    size_t                     m_pcm_in_samples{480};
+
+    // Filtered PCM Channel Buffers
+    int16_t                    m_pcm_left_hp[480];
+    int16_t                    m_pcm_right_hp[480];
+
+    // Subwoofer 8 kHz decimation buffer (80 samples = 10 ms @ 8 kHz)
+    int16_t                    m_pcm_sub_8k[80];
+
+    // Crossover DSP Filters (esp-dsp SIMD block accelerated)
+    DSP::LinkwitzRiley4Stereo          m_hpf_stereo;
+    DSP::SubwooferPolyphaseDecimator   m_sub_decimator;
+
+    // Double-buffered encoded audio frame from Parallel Encode Tasks to TX Task (3 LC3 channels)
     struct EncodedAudioBuffer {
-        uint8_t  data[2][LC3_FRAME_OCTETS];
+        uint8_t  data[3][LC3_FRAME_OCTETS]; // 0: Left 48k, 1: Right 48k, 2: Sub 8k
         uint16_t octets;
-        bool     valid;
+        bool     ch_valid[3];
     };
     EncodedAudioBuffer         m_enc_ping_pong[2];
+    std::atomic<uint8_t>       m_enc_active_idx{0};
     std::atomic<uint8_t>       m_enc_write_idx{0};
     std::atomic<uint8_t>       m_enc_read_idx{0};
-    std::atomic<bool>          m_enc_ready{false};
 
     mutable SpscDurationRingBuffer<float, 64> m_codec_duration_buf;
+    mutable SpscDurationRingBuffer<float, 64> m_dsp_duration_buf;
+    mutable SpscDurationRingBuffer<float, 64> m_enc1_duration_buf;
+    mutable SpscDurationRingBuffer<float, 64> m_enc2_duration_buf;
+    mutable SpscDurationRingBuffer<float, 64> m_enc3_duration_buf;
+    mutable SpscDurationRingBuffer<float, 64> m_tx_duration_buf;
     mutable TimeOffsetRingBuffer              m_time_offset_buf;
     float                                     m_ema_time_offset_ms;
     uint32_t                                  m_last_master_time_us;
@@ -409,6 +446,7 @@ private:
     struct SinkFifoItem {
         uint8_t  seq;
         uint8_t  len;
+        uint8_t  flags;
         uint8_t  data[LC3_FRAME_OCTETS];
     };
     SinkFifoItem               m_sink_fifo[SINK_FIFO_PACKETS];

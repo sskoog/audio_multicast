@@ -97,7 +97,7 @@ public:
      * @param pcm Array of signed 16-bit PCM samples.
      * @param num_samples Number of samples in the frame (e.g. 480 for 10ms @ 48kHz).
      */
-    inline void pushFramePcm(const int16_t* pcm, size_t num_samples) {
+    inline void pushFramePcm(const int16_t* pcm, size_t num_samples, int stride = 1) {
         if (__builtin_expect(pcm == nullptr || num_samples == 0, 0)) {
             pushSilence();
             return;
@@ -108,7 +108,7 @@ public:
         int64_t sum_sq = 0;
 
         for (size_t i = 0; i < num_samples; ++i) {
-            int16_t s = pcm[i];
+            int16_t s = pcm[i * stride];
             if (s < min_s) min_s = s;
             if (s > max_s) max_s = s;
             sum_sq += static_cast<int32_t>(s) * static_cast<int32_t>(s);

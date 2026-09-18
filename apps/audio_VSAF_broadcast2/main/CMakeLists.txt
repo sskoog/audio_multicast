@@ -42,10 +42,16 @@ if(CONFIG_IDF_TARGET_ESP32S3)
     list(APPEND requires espressif__esp_tinyusb)
 endif()
 
+set(ldfragments)
+if(CONFIG_IDF_TARGET_ESP32C6)
+    set(ldfragments "linker.lf")
+endif()
+
 idf_component_register(
     SRCS ${srcs}
     INCLUDE_DIRS "."
     REQUIRES ${requires}
+    LDFRAGMENTS ${ldfragments}
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-missing-field-initializers)

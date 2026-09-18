@@ -15,6 +15,8 @@ idf_component_register(
     INCLUDE_DIRS
         "include"
         "src"
+    LDFRAGMENTS
+        "linker.lf"
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE -O3 -ffast-math)

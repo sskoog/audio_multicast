@@ -12,7 +12,7 @@ Lc3CodecEngine::Lc3CodecEngine() {}
 
 Lc3CodecEngine::~Lc3CodecEngine() {
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
-    for (int i = 0; i < 2; ++i) {
+    for (int i = 0; i < 3; ++i) {
         if (m_google_enc_mem[i]) {
             free(m_google_enc_mem[i]);
             m_google_enc_mem[i] = nullptr;
@@ -32,7 +32,7 @@ Lc3CodecEngine::~Lc3CodecEngine() {
 
 esp_err_t Lc3CodecEngine::initEncoder(uint32_t sample_rate_hz, uint8_t channels, uint32_t frame_duration_us, uint16_t octets_per_frame) {
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
-    for (int i = 0; i < 2; ++i) {
+    for (int i = 0; i < 3; ++i) {
         if (m_google_enc_mem[i]) {
             free(m_google_enc_mem[i]);
             m_google_enc_mem[i] = nullptr;
@@ -42,30 +42,34 @@ esp_err_t Lc3CodecEngine::initEncoder(uint32_t sample_rate_hz, uint8_t channels,
     m_encoder_ready = false;
 
     m_sample_rate = sample_rate_hz;
-    m_channels = (channels >= 2) ? 2 : 1;
+    m_channels = (channels >= 3) ? 3 : (channels >= 2 ? 2 : 1);
     m_frame_duration_us = (frame_duration_us == 7500) ? 7500 : 10000;
     m_octets_per_frame = octets_per_frame;
 
-    unsigned mem_size = lc3_encoder_size(m_frame_duration_us, m_sample_rate);
     for (uint8_t i = 0; i < m_channels; ++i) {
+        uint32_t ch_sr = (i == 2) ? 8000 : m_sample_rate;
+        unsigned mem_size = lc3_encoder_size(m_frame_duration_us, ch_sr);
         m_google_enc_mem[i] = malloc(mem_size);
         if (!m_google_enc_mem[i]) {
             ESP_LOGE(TAG, "Failed to allocate %u bytes for Google liblc3 encoder ch %u", mem_size, i);
             return ESP_ERR_NO_MEM;
         }
 
-        m_google_encoder[i] = lc3_setup_encoder(m_frame_duration_us, m_sample_rate, m_sample_rate, m_google_enc_mem[i]);
+        m_google_encoder[i] = lc3_setup_encoder(m_frame_duration_us, ch_sr, ch_sr, m_google_enc_mem[i]);
         if (!m_google_encoder[i]) {
-            ESP_LOGE(TAG, "Failed to setup Google liblc3 encoder ch %u (%lu Hz, %.1f ms)", i, (unsigned long)m_sample_rate, m_frame_duration_us / 1000.0f);
+            ESP_LOGE(TAG, "Failed to setup Google liblc3 encoder ch %u (%lu Hz, %.1f ms)", i, (unsigned long)ch_sr, m_frame_duration_us / 1000.0f);
             free(m_google_enc_mem[i]);
             m_google_enc_mem[i] = nullptr;
             return ESP_FAIL;
         }
+
+        // Disable LTPF (Long Term Pitch Filter) analysis for significant encoding speedup
+        lc3_encoder_disable_ltpf(static_cast<lc3_encoder_t>(m_google_encoder[i]));
     }
 
     m_encoder_ready = true;
-    ESP_LOGI(TAG, "Google liblc3 (Hardware FPU) Encoder Initialized: %lu Hz, %u-ch, %.1f ms duration, %u octets/frame (%lu kbps)",
-             (unsigned long)m_sample_rate, m_channels, m_frame_duration_us / 1000.0f, m_octets_per_frame, (unsigned long)getBitrateKbps());
+    ESP_LOGI(TAG, "Google liblc3 (Hardware FPU, No-LTPF) Encoder Initialized: %u-ch (Ch0/1: %lu Hz, Ch2 Sub: 8000 Hz, %u octets/frame)",
+             m_channels, (unsigned long)m_sample_rate, m_octets_per_frame);
     return ESP_OK;
 #else
     if (m_enc_handle) {
@@ -172,7 +176,7 @@ size_t Lc3CodecEngine::getEncoderRequiredPcmSamples() const {
 #endif
 }
 
-esp_err_t Lc3CodecEngine::encodeFrame(const int16_t* pcm_in, size_t pcm_samples, uint8_t* out_lc3_buf, size_t max_out_bytes, size_t* actual_out_bytes, uint8_t channel_idx) {
+esp_err_t Lc3CodecEngine::encodeFrame(const int16_t* pcm_in, size_t pcm_samples, uint8_t* out_lc3_buf, size_t max_out_bytes, size_t* actual_out_bytes, uint8_t channel_idx, int stride) {
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
     if (!m_encoder_ready || channel_idx >= m_channels || !m_google_encoder[channel_idx] || !pcm_in || !out_lc3_buf || !actual_out_bytes) {
         return ESP_ERR_INVALID_ARG;
@@ -182,7 +186,7 @@ esp_err_t Lc3CodecEngine::encodeFrame(const int16_t* pcm_in, size_t pcm_samples,
     }
 
     int ret = lc3_encode(static_cast<lc3_encoder_t>(m_google_encoder[channel_idx]), LC3_PCM_FORMAT_S16,
-                         pcm_in, 1 /* stride */, m_octets_per_frame, out_lc3_buf);
+                         pcm_in, stride, m_octets_per_frame, out_lc3_buf);
     if (ret != 0) {
         ESP_LOGE(TAG, "liblc3 encode error: %d on ch %u", ret, channel_idx);
         return ESP_FAIL;

@@ -1,0 +1,4 @@
+[mapping:liblc3]
+archive: libliblc3.a
+entries:
+    * (noflash)

@@ -5,7 +5,6 @@
 #include "tusb.h"
 #include "soc/rtc_cntl_reg.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/stream_buffer.h"
 #include <atomic>
 
 static const char *TAG = "USBaudio";
@@ -40,6 +39,7 @@ enum {
 #define EPNUM_CDC_OUT     0x02
 #define EPNUM_CDC_IN      0x82
 #define EPNUM_AUDIO_OUT   0x03
+#define EPNUM_AUDIO_FB    0x83
 
 // String descriptor indices
 enum {
@@ -55,14 +55,12 @@ enum {
 // -----------------------------------------------------------------------------
 // USB Descriptors
 // -----------------------------------------------------------------------------
-// USB Descriptors
-// -----------------------------------------------------------------------------
 
 #define TUD_AUDIO10_DESC_IAD_LEN 8
 #define TUD_AUDIO10_DESC_IAD(_firstitf, _nitfs, _stridx) \
   TUD_AUDIO10_DESC_IAD_LEN, TUSB_DESC_INTERFACE_ASSOCIATION, _firstitf, _nitfs, TUSB_CLASS_AUDIO, AUDIO_FUNCTION_SUBCLASS_UNDEFINED, AUDIO_INT_PROTOCOL_CODE_V1, _stridx
 
-#define TUD_AUDIO_SPEAKER_DESC_LEN ( \
+#define TUD_AUDIO_SPEAKER_DESC_LEN(_nfreqs) ( \
   TUD_AUDIO10_DESC_IAD_LEN + \
   TUD_AUDIO10_DESC_STD_AC_LEN + \
   TUD_AUDIO10_DESC_CS_AC_LEN(1) + \
@@ -72,18 +70,19 @@ enum {
   TUD_AUDIO10_DESC_STD_AS_LEN + \
   TUD_AUDIO10_DESC_STD_AS_LEN + \
   TUD_AUDIO10_DESC_CS_AS_INT_LEN + \
-  TUD_AUDIO10_DESC_TYPE_I_FORMAT_LEN(1) + \
+  TUD_AUDIO10_DESC_TYPE_I_FORMAT_LEN(_nfreqs) + \
   TUD_AUDIO10_DESC_STD_AS_ISO_EP_LEN + \
-  TUD_AUDIO10_DESC_CS_AS_ISO_EP_LEN)
+  TUD_AUDIO10_DESC_CS_AS_ISO_EP_LEN + \
+  TUD_AUDIO10_DESC_STD_AS_ISO_SYNC_EP_LEN)
 
-#define TUD_AUDIO_SPEAKER_DESCRIPTOR(_itfnum, _stridx, _nBytesPerSample, _nBitsUsedPerSample, _epout, _epsize) \
+#define TUD_AUDIO_SPEAKER_DESCRIPTOR(_itfnum, _stridx, _nBytesPerSample, _nBitsUsedPerSample, _epout, _epsize, _epfb, ...) \
   /* Interface Association Descriptor (IAD) */ \
   TUD_AUDIO10_DESC_IAD(_itfnum, 2, _stridx),\
   /* Standard AC Interface Descriptor (4.3.1) */ \
   TUD_AUDIO10_DESC_STD_AC(_itfnum, 0x00, _stridx),\
   /* Class-Specific AC Interface Header Descriptor (4.3.2) */ \
   TUD_AUDIO10_DESC_CS_AC(0x0100, (TUD_AUDIO10_DESC_INPUT_TERM_LEN + TUD_AUDIO10_DESC_OUTPUT_TERM_LEN + TUD_AUDIO10_DESC_FEATURE_UNIT_LEN(2)), ((_itfnum)+1)),\
-  /* Input Terminal Descriptor (4.3.2.1) */ \
+  /* Input Terminal Descriptor (4.3.2.1) - Spatial Channel Allocation (Left Front + Right Front) */ \
   TUD_AUDIO10_DESC_INPUT_TERM(0x01, AUDIO_TERM_TYPE_USB_STREAMING, 0x00, 0x02, (AUDIO10_CHANNEL_CONFIG_LEFT_FRONT | AUDIO10_CHANNEL_CONFIG_RIGHT_FRONT), 0x00, 0x00),\
   /* Output Terminal Descriptor (4.3.2.2) */ \
   TUD_AUDIO10_DESC_OUTPUT_TERM(0x03, AUDIO_TERM_TYPE_OUT_DESKTOP_SPEAKER, 0x00, 0x02, STRID_AUDIO_INTERFACE),\
@@ -91,18 +90,20 @@ enum {
   TUD_AUDIO10_DESC_FEATURE_UNIT(0x02, 0x01, 0x00, (AUDIO10_FU_CONTROL_BM_MUTE | AUDIO10_FU_CONTROL_BM_VOLUME), (AUDIO10_FU_CONTROL_BM_MUTE | AUDIO10_FU_CONTROL_BM_VOLUME), (AUDIO10_FU_CONTROL_BM_MUTE | AUDIO10_FU_CONTROL_BM_VOLUME)),\
   /* Standard AS Interface Descriptor (4.5.1) - Alt 0 (0 bandwidth) */ \
   TUD_AUDIO10_DESC_STD_AS_INT((uint8_t)((_itfnum)+1), 0x00, 0x00, 0x00),\
-  /* Standard AS Interface Descriptor (4.5.1) - Alt 1 (Data streaming) */ \
-  TUD_AUDIO10_DESC_STD_AS_INT((uint8_t)((_itfnum)+1), 0x01, 0x01, 0x00),\
+  /* Standard AS Interface Descriptor (4.5.1) - Alt 1 (Data streaming - 2 EPs: OUT Data + IN Feedback Sync) */ \
+  TUD_AUDIO10_DESC_STD_AS_INT((uint8_t)((_itfnum)+1), 0x01, 0x02, 0x00),\
   /* Class-Specific AS Interface Descriptor (4.5.2) */ \
   TUD_AUDIO10_DESC_CS_AS_INT(0x01, 0x01, AUDIO10_DATA_FORMAT_TYPE_I_PCM),\
-  /* Type I Format Type Descriptor (2.2.5) */ \
-  TUD_AUDIO10_DESC_TYPE_I_FORMAT(0x02, _nBytesPerSample, _nBitsUsedPerSample, 48000),\
-  /* Standard AS Isochronous Audio Data Endpoint Descriptor (4.6.1.1) */ \
-  TUD_AUDIO10_DESC_STD_AS_ISO_EP(_epout, (uint8_t) ((uint8_t)TUSB_XFER_ISOCHRONOUS | (uint8_t)TUSB_ISO_EP_ATT_ADAPTIVE), _epsize, 0x01, 0x00),\
+  /* Type I Format Type Descriptor (2.2.5) - 16-bit PCM Little-Endian */ \
+  TUD_AUDIO10_DESC_TYPE_I_FORMAT(0x02, _nBytesPerSample, _nBitsUsedPerSample, __VA_ARGS__),\
+  /* Standard AS Isochronous Audio Data Endpoint Descriptor (4.6.1.1) - Asynchronous ISO OUT */ \
+  TUD_AUDIO10_DESC_STD_AS_ISO_EP(_epout, (uint8_t) ((uint8_t)TUSB_XFER_ISOCHRONOUS | (uint8_t)TUSB_ISO_EP_ATT_ASYNCHRONOUS), _epsize, 0x01, _epfb),\
   /* Class-Specific AS Isochronous Audio Data Endpoint Descriptor (4.6.1.2) */ \
-  TUD_AUDIO10_DESC_CS_AS_ISO_EP(AUDIO10_CS_AS_ISO_DATA_EP_ATT_SAMPLING_FRQ, AUDIO10_CS_AS_ISO_DATA_EP_LOCK_DELAY_UNIT_MILLISEC, 0x0001)
+  TUD_AUDIO10_DESC_CS_AS_ISO_EP(AUDIO10_CS_AS_ISO_DATA_EP_ATT_SAMPLING_FRQ, AUDIO10_CS_AS_ISO_DATA_EP_LOCK_DELAY_UNIT_UNDEFINED, 0x0000),\
+  /* Standard AS Isochronous Synch Endpoint Descriptor (4.6.2.1) - Feedback IN */ \
+  TUD_AUDIO10_DESC_STD_AS_ISO_SYNC_EP(_epfb, 0)
 
-#define TUSB_DESC_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + TUD_AUDIO_SPEAKER_DESC_LEN)
+#define TUSB_DESC_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + TUD_AUDIO_SPEAKER_DESC_LEN(3))
 
 const uint8_t uac_cdc_configuration_descriptor[] = {
     // Config number, interface count, string index, total length, attribute, power in mA
@@ -111,17 +112,17 @@ const uint8_t uac_cdc_configuration_descriptor[] = {
     // CDC
     TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, STRID_CDC_INTERFACE, EPNUM_CDC_NOTIF, 8, EPNUM_CDC_OUT, EPNUM_CDC_IN, 64),
 
-    // Audio Speaker (UAC1)
-    TUD_AUDIO_SPEAKER_DESCRIPTOR(ITF_NUM_AUDIO_CONTROL, STRID_AUDIO_INTERFACE, AUDIO_BYTES_PER_SAMP, AUDIO_BPS, EPNUM_AUDIO_OUT, AUDIO_EP_SIZE)
+    // Audio Speaker (UAC1) supporting 16, 32, and 48 kHz with Asynchronous Feedback EP
+    TUD_AUDIO_SPEAKER_DESCRIPTOR(ITF_NUM_AUDIO_CONTROL, STRID_AUDIO_INTERFACE, AUDIO_BYTES_PER_SAMP, AUDIO_BPS, EPNUM_AUDIO_OUT, AUDIO_EP_SIZE, EPNUM_AUDIO_FB, 16000, 32000, 48000)
 };
 
 static const char *s_string_descriptors[] = {
     (char[]){0x09, 0x04}, // 0: is supported language is English (0x0409)
-    "Espressif",          // 1: Manufacturer
-    "Node16 audio",       // 2: Product
-    "123456",             // 3: Serials
-    "CDC Console",        // 4: CDC Interface
-    "Node16 audio",       // 5: Audio Interface
+    "Skoog",            // 1: Manufacturer
+    "Node16 audio",     // 2: Product
+    "123456",           // 3: Serials
+    "CDC Console",      // 4: CDC Interface
+    "Node16 audio",     // 5: Audio Interface
     NULL
 };
 
@@ -136,25 +137,20 @@ static const tusb_desc_device_t s_device_descriptor = {
     .bDeviceProtocol = MISC_PROTOCOL_IAD,
 
     .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,
-    .idVendor = 0x303A, // Espressif VID
+    .idVendor  = 0x303A, // Espressif VID
     .idProduct = 0x4002, // Custom PID
     .bcdDevice = 0x0100,
 
     .iManufacturer = STRID_MANUFACTURER,
-    .iProduct = STRID_PRODUCT,
+    .iProduct      = STRID_PRODUCT,
     .iSerialNumber = STRID_SERIAL,
 
     .bNumConfigurations = 0x01
 };
 
 // -----------------------------------------------------------------------------
-// Audio Stream Buffer
+// Audio Control Callbacks
 // -----------------------------------------------------------------------------
-
-static StreamBufferHandle_t s_audio_stream_buf = NULL;
-// 10ms worth of audio at 48kHz stereo 16-bit = 1920 bytes
-// We keep a buffer of 40ms to handle jitter
-#define AUDIO_STREAM_BUF_SIZE (192 * 40)
 
 static int8_t s_mute[3] = {0, 0, 0}; // master, ch1, ch2
 static int16_t s_volume[3] = {0, 0, 0}; // master, ch1, ch2 (in 1/256 dB)
@@ -163,8 +159,8 @@ static uint32_t s_current_sample_rate = 48000;
 extern "C" bool tud_audio_set_req_entity_cb(uint8_t rhport, tusb_control_request_t const *p_request, uint8_t *pBuff) {
     (void)rhport;
     uint8_t channelNum = TU_U16_LOW(p_request->wValue);
-    uint8_t ctrlSel = TU_U16_HIGH(p_request->wValue);
-    uint8_t entityID = TU_U16_HIGH(p_request->wIndex);
+    uint8_t ctrlSel    = TU_U16_HIGH(p_request->wValue);
+    uint8_t entityID   = TU_U16_HIGH(p_request->wIndex);
 
     if (entityID == 0x02) { // Feature Unit ID
         if (channelNum > 2) channelNum = 0;
@@ -185,8 +181,8 @@ extern "C" bool tud_audio_set_req_entity_cb(uint8_t rhport, tusb_control_request
 
 extern "C" bool tud_audio_get_req_entity_cb(uint8_t rhport, tusb_control_request_t const *p_request) {
     uint8_t channelNum = TU_U16_LOW(p_request->wValue);
-    uint8_t ctrlSel = TU_U16_HIGH(p_request->wValue);
-    uint8_t entityID = TU_U16_HIGH(p_request->wIndex);
+    uint8_t ctrlSel    = TU_U16_HIGH(p_request->wValue);
+    uint8_t entityID   = TU_U16_HIGH(p_request->wIndex);
 
     if (entityID == 0x02) { // Feature Unit ID
         if (channelNum > 2) channelNum = 0;
@@ -225,6 +221,7 @@ extern "C" bool tud_audio_set_req_ep_cb(uint8_t rhport, tusb_control_request_t c
         if (p_request->bRequest == AUDIO10_CS_REQ_SET_CUR) {
             if (p_request->wLength == 3) {
                 s_current_sample_rate = tu_unaligned_read32(pBuff) & 0x00FFFFFF;
+                tud_audio_fb_set((s_current_sample_rate / 1000) << 16);
                 ESP_LOGI(TAG, "Audio EP 0x%02x set sample rate: %lu Hz", ep, (unsigned long)s_current_sample_rate);
                 return true;
             }
@@ -258,6 +255,23 @@ extern "C" bool tud_audio_get_req_ep_cb(uint8_t rhport, tusb_control_request_t c
     return false;
 }
 
+extern "C" void tud_audio_feedback_params_cb(uint8_t func_id, uint8_t alt_itf, audio_feedback_params_t* feedback_param) {
+    (void)func_id;
+    (void)alt_itf;
+    if (feedback_param) {
+        feedback_param->method = AUDIO_FEEDBACK_METHOD_DISABLED;
+        feedback_param->sample_freq = s_current_sample_rate;
+    }
+    tud_audio_fb_set((s_current_sample_rate / 1000) << 16);
+}
+
+extern "C" TU_ATTR_FAST_FUNC void tud_audio_feedback_interval_isr(uint8_t func_id, uint32_t frame_number, uint8_t interval_shift) {
+    (void)func_id;
+    (void)frame_number;
+    (void)interval_shift;
+    tud_audio_fb_set((s_current_sample_rate / 1000) << 16);
+}
+
 extern "C" bool tud_audio_set_itf_cb(uint8_t rhport, tusb_control_request_t const *p_request) {
     (void)rhport;
     uint8_t const itf = tu_u16_low(p_request->wIndex);
@@ -265,7 +279,8 @@ extern "C" bool tud_audio_set_itf_cb(uint8_t rhport, tusb_control_request_t cons
     if (itf == ITF_NUM_AUDIO_STREAMING) {
         if (alt != 0) {
             s_audio_alt_active.store(true, std::memory_order_relaxed);
-            ESP_LOGI(TAG, "Audio stream OPENED (Alt %u)", alt);
+            tud_audio_fb_set((s_current_sample_rate / 1000) << 16);
+            ESP_LOGI(TAG, "Audio stream OPENED (Alt %u, Feedback %lu Hz)", alt, (unsigned long)s_current_sample_rate);
         } else {
             s_audio_alt_active.store(false, std::memory_order_relaxed);
             ESP_LOGI(TAG, "Audio stream CLOSED (Alt 0)");
@@ -287,23 +302,13 @@ extern "C" bool tud_audio_set_itf_close_ep_cb(uint8_t rhport, tusb_control_reque
 
 extern "C" bool tud_audio_rx_done_isr(uint8_t rhport, uint16_t n_bytes_received, uint8_t func_id, uint8_t ep_out, uint8_t cur_alt_setting) {
     (void)rhport;
+    (void)n_bytes_received;
     (void)func_id;
     (void)ep_out;
     (void)cur_alt_setting;
 
-    uint8_t rx_buf[AUDIO_EP_SIZE];
-    uint16_t read_bytes = tud_audio_read(rx_buf, n_bytes_received);
-
-    if (s_audio_stream_buf && read_bytes > 0) {
-        s_last_audio_rx_us.store(esp_timer_get_time(), std::memory_order_relaxed);
-        s_audio_alt_active.store(true, std::memory_order_relaxed);
-
-        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-        xStreamBufferSendFromISR(s_audio_stream_buf, rx_buf, read_bytes, &xHigherPriorityTaskWoken);
-        if (xHigherPriorityTaskWoken) {
-            portYIELD_FROM_ISR();
-        }
-    }
+    s_last_audio_rx_us.store(esp_timer_get_time(), std::memory_order_relaxed);
+    s_audio_alt_active.store(true, std::memory_order_relaxed);
     return true;
 }
 
@@ -313,12 +318,6 @@ extern "C" bool tud_audio_rx_done_isr(uint8_t rhport, uint16_t n_bytes_received,
 
 void usb_audio_init(void) {
     ESP_LOGI(TAG, "Initializing USB Audio (Composite CDC + UAC)...");
-
-    s_audio_stream_buf = xStreamBufferCreate(AUDIO_STREAM_BUF_SIZE, 192);
-    if (!s_audio_stream_buf) {
-        ESP_LOGE(TAG, "Failed to create audio stream buffer");
-        return;
-    }
 
     tinyusb_config_t tusb_cfg = {};
     tusb_cfg.descriptor.device = &s_device_descriptor;
@@ -330,8 +329,8 @@ void usb_audio_init(void) {
     tusb_cfg.phy.self_powered = false;
     tusb_cfg.phy.vbus_monitor_io = -1; // -1 if not using
     tusb_cfg.task.size = 4096;
-    tusb_cfg.task.priority = 5;
-    tusb_cfg.task.xCoreID = 0; // Fix panic: No affinity can sometimes cause issues
+    tusb_cfg.task.priority = 7; // Priority 7 ensures USB DCD is never starved
+    tusb_cfg.task.xCoreID = 0; // Pinned to Core 0 (I/O & Wi-Fi Core)
 
     esp_err_t ret = tinyusb_driver_install(&tusb_cfg);
     ESP_ERROR_CHECK(ret);
@@ -343,8 +342,7 @@ void usb_audio_init(void) {
 }
 
 size_t usb_audio_read_pcm(void* dest, size_t max_bytes) {
-    if (!s_audio_stream_buf) return 0;
-    return xStreamBufferReceive(s_audio_stream_buf, dest, max_bytes, 0);
+    return tud_audio_read(dest, max_bytes);
 }
 
 bool usb_audio_is_streaming(void) {
@@ -364,9 +362,7 @@ bool usb_audio_is_streaming(void) {
 }
 
 void usb_audio_clear_buffer(void) {
-    if (s_audio_stream_buf) {
-        xStreamBufferReset(s_audio_stream_buf);
-    }
+    tud_audio_clear_ep_out_ff();
 }
 
 

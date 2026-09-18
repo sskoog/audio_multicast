@@ -69,8 +69,18 @@ def trigger_app_to_bootloader(app_port):
         from ctypes import wintypes
         k32 = ctypes.windll.kernel32
         k32.CreateFileW.restype = wintypes.HANDLE
-        h = k32.CreateFileW(target_port, 0xC0000000, 0, None, 3, 0, None)
+        class COMMTIMEOUTS(ctypes.Structure):
+            _fields_ = [
+                ("ReadIntervalTimeout", wintypes.DWORD),
+                ("ReadTotalTimeoutMultiplier", wintypes.DWORD),
+                ("ReadTotalTimeoutConstant", wintypes.DWORD),
+                ("WriteTotalTimeoutMultiplier", wintypes.DWORD),
+                ("WriteTotalTimeoutConstant", wintypes.DWORD),
+            ]
+        h = k32.CreateFileW(target_port, 0xC0000000, 3, None, 3, 0x80, None)
         if h != -1 and h != 0xFFFFFFFF and h != 0:
+            timeouts = COMMTIMEOUTS(50, 10, 100, 10, 200)
+            k32.SetCommTimeouts(h, ctypes.byref(timeouts))
             k32.EscapeCommFunction(h, 5) # SETDTR
             k32.EscapeCommFunction(h, 3) # SETRTS
             written = wintypes.DWORD()

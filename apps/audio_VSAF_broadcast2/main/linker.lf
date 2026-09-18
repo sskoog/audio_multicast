@@ -1,0 +1,14 @@
+[mapping:esp_audio_codec]
+archive: libesp_audio_codec.a
+entries:
+    * (noflash)
+
+[mapping:esp_audio_simple_dec]
+archive: libesp_audio_simple_dec.a
+entries:
+    * (noflash)
+
+[mapping:main_lc3]
+archive: libmain.a
+entries:
+    lc3_codec (noflash)
