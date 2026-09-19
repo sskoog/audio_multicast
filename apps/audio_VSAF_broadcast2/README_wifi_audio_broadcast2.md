@@ -209,17 +209,24 @@ The 6-channel broadcast sweep is paced directly by the Wi-Fi baseband hardware i
 
 ## 5. LC3 Codec Pipeline & Inter-Core Architecture
 
+> [!IMPORTANT]
+> ### Critical Codec Optimization & Execution Requirements
+> - **IRAM Placement Mandatory (`linker.lf`)**: Google `liblc3` (on ESP32-S3) and Espressif fixed-point LC3 (on ESP32-C6) **must** be hosted in internal fast SRAM / IRAM instead of external SPI flash. Empirical hardware benchmarks demonstrate that executing from IRAM runs **3x to 5x faster**: from ~4.5 ms down to **0.8 - 1.5 ms** per 48 kHz encode pass, eliminating SPI flash cache misses and bus contention during 10 ms audio frames!
+> - **LTPF (Long-Term Pitch Filter) Disablement**: Disabling LTPF analysis (`lc3_encoder_disable_ltpf()`) for the LC3 encoder boosts encoding throughput by another **~50%**, cutting execution time from ~1.5 ms down to **0.93 - 0.95 ms** per 48 kHz pass (and ~0.35 ms for 8 kHz subwoofer frames)!
+
 ### 5.1 ESP32-S3 SOURCE Audio Engine
-- **Core 1 (Priority 6, 8KB Stack)**: Runs `bcast_enc_task`. Encodes audio using Google `liblc3` with Xtensa single-precision hardware FPU.
-  - In tone test / mono duplicate mode: Encodes Channel 0 in ~4.7 ms and duplicates to Channel 1 in memory (0 us), leaving ~5.3 ms of CPU margin per 10.0 ms frame.
-  - Overall SOURCE CPU load: **59% - 60%** (reduced from 94%).
-- **Core 0 (Priority 7, 8KB Stack)**: Runs `bcast_tx_task`. Executes the ~460 us ISR-paced RF sweep, then sleeps for > 9.5 ms.
+- **Core 1 (Priority 6, 8KB Stack)**: Runs `audioDspTask`. Vectorized DSP filters + LC3 encoding:
+  - High-Pass Filter (HPF @ 100 Hz LR4) for Left and Right channels.
+  - Subwoofer Multirate Decimator (D=6 Polyphase FIR Decimator + 100 Hz LR4 IIR).
+  - Encodes Right Channel (Ch 1 @ 48 kHz) in ~0.94 ms and Subwoofer (Ch 5/3 @ 8 kHz) in ~0.35 ms.
+  - Overall SOURCE CPU load: **38% - 40%** at 240 MHz.
+- **Core 0 (Priority 7, 8KB Stack)**: Runs `sourceTxTask`. Encodes Left Channel (Ch 0 @ 48 kHz) in ~0.93 ms, executes the ~4.2 ms 6-channel 802.11 VSAF broadcast sweep, then sleeps until next frame.
 
 ### 5.2 ESP32-C6 SINK Audio Engine
 - **Core 0 (Priority 6, 16KB Stack)**: Runs `bcast_snk_task`.
   - Jitter FIFO pre-roll cushion: 8 packets (80 ms) during `SCANNING` -> `PREFILL`.
   - Dual-descriptor I2S DMA with preloaded descriptors.
-  - Fixed-point LC3 decoder executes in ~2.2 ms per 10 ms frame (38% CPU load on 160 MHz RISC-V).
+  - Fixed-point LC3 decoder in IRAM executes in ~1.2 ms per 10 ms frame (24% CPU load on 160 MHz RISC-V).
   - Redundancy recovery: when 1 packet is lost (`seq_diff == 2`), recovers t-1 from current packet before t0, maintaining **0 PLC and 0 audio underruns**.
 
 ---
@@ -290,22 +297,23 @@ Nodes emit formatted 1.0-second telemetry heartbeats over USB serial:
 ### SOURCE Telemetry (Node 16 - COM116)
 ```text
 +=================================================================== ESP32-S3-SOURCE [SOURCE] ===================================================================+
-|    CPU      | STATE | NODES  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  |  SOURCE      PKTS  ACK%  FAIL   TOT  |        ROUND-TRIP TIME & DWELL (us)    |
-|  %   C  MHz |       | 012345 | GAIN Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  INPUT        1/s   1/s   1/s  pkts   |  L_Tot  L_Dwl   R_Tot  R_Dwl   L_Net  R_Net |
-| 59  58  240 | CAST  | 11OOOO | +3.0 10 HT3 |  LC3  -33.3 -30.3    48   10  5.18  5.75 |  TONE       518  100%     0     4K |   3556     39    1251     68    3517   1183 |
+|    CPU      | STATE | NODES  |    WIFI     |  AUDIO dBFS  |     STAGE TIMINGS (ms)       |  SOURCE      PKTS  ACK%  FAIL   TOT  |             ROUND-TRIP NET (us)        |
+|  %   C  MHz |       | 012345 | GAIN Ch PHY |   RMS    Pk  |  DSP   Enc1  Enc2  Enc3   TX  |  INPUT        1/s     %   1/s  pkts   |              L_Net       R_Net         |
+| 38  44  240 | CAST  | 11OOOO | +3.0 02 HT3 | -33.5 -30.3 | 0.71  0.93  0.94  0.38  4.24|  TONE       601   93%     2    12K |                727        1790         |
+| 38  45  240 | CAST  | 11OOOO | +3.0 02 HT3 | -33.5 -30.3 | 0.72  0.93  0.94  0.30  4.30|  TONE       598   93%     2    13K |               1008         920         |
 ```
 
 ### SINK Telemetry (Node 23 / 24 - COM23 / COM24)
 ```text
 +=================================================================== ESP32-C6-23-LEFT [SINK] ====================================================================+
-|    CPU      | STATE |  CHAN  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | AMP dB   PKTS  PLC  DMA   FIFO    |         TIME & SYNCHRONIZATION (ms)    |
-|  %   C  MHz |       |        | RSSI Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  SW  HW   1/s  tot  UDR  UDR  OVR |  Local  Master  EMA_offs RB_med RB_rng |
-| 38  48  160 | STRM  | LEFT   |  -43 10 HT3 |  LC3  -33.3 -30.3    48   10  2.22  2.62 |   0  +3    99    0    0    0    0 |   9088   18502   +9416   +9416   4.01  |
+|    CPU      | STATE |  CHAN  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | AMP dB   PKTS  RED  PLC  DMA   FIFO    |         TIME & SYNCHRONIZATION (ms)    |
+|  %   C  MHz |       |        | RSSI Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  SW  HW   1/s  rec  tot  UDR   UDR     |  Local  Master  EMA_offs RB_med RB_rng |
+| 24  47  160 | STRM  | LEFT   |  -48 02 HT3 |  LC3  -33.7 -27.5    48   10  1.22  1.46 |   0  +3    99   11    5    0     0    |  10089   25693   +1560   +1560   2.33  |
 
 +=================================================================== ESP32-C6-24-RIGHT [SINK] ===================================================================+
-|    CPU      | STATE |  CHAN  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | AMP dB   PKTS  PLC  DMA   FIFO    |         TIME & SYNCHRONIZATION (ms)    |
-|  %   C  MHz |       |        | RSSI Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  SW  HW   1/s  tot  UDR  UDR  OVR |  Local  Master  EMA_offs RB_med RB_rng |
-| 38  47  160 | STRM  | RGHT   |  -44 10 HT3 |  LC3  -33.3 -27.2    48   10  2.57  3.12 |   0  +3   100    1    0    0    0 |   9079   18493   +9418   +9418   1.10  |
+|    CPU      | STATE |  CHAN  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | AMP dB   PKTS  RED  PLC  DMA   FIFO    |         TIME & SYNCHRONIZATION (ms)    |
+|  %   C  MHz |       |        | RSSI Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  SW  HW   1/s  rec  tot  UDR   UDR     |  Local  Master  EMA_offs RB_med RB_rng |
+| 24  46  160 | STRM  | RGHT   |  -59 02 HT3 |  LC3  -33.6 -28.2    48   10  1.22  1.47 |   0  +3   100   10    4    0     0    |  10076   25685   +1561   +1561   0.65  |
 ```
 
 ---
