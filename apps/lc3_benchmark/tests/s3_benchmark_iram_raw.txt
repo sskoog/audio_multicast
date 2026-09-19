@@ -1,0 +1,187 @@
+I (709) LC3_BENCH: Storage mapped at 0x3c030000 (4 clips). Code ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0x15 (USB_UART_CHIP_RESET),boot:0x8 (SPI_FAST_FLASH_BOOT)
+Saved PC:0x40387372
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce2820,len:0x1548
+load:0x403c8700,len:0xd68
+load:0x403cb700,len:0x2f5c
+entry 0x403c8904
+I (24) boot: ESP-IDF v6.0.2-dirty 2nd stage bootloader
+I (24) boot: compile time Sep 19 2026 10:43:59
+I (25) boot: Multicore bootloader
+I (25) boot: chip revision: v0.2
+I (25) boot: efuse block revision: v1.4
+I (25) boot.esp32s3: Boot SPI Speed : 80MHz
+I (25) boot.esp32s3: SPI Mode       : DIO
+I (26) boot.esp32s3: SPI Flash Size : 4MB
+I (26) boot: Enabling RNG early entropy source...
+I (26) boot: Partition Table:
+I (26) boot: ## Label            Usage          Type ST Offset   Length
+I (27) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+I (27) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+I (27) boot:  2 factory          factory app      00 00 00010000 00180000
+I (28) boot:  3 storage          Unknown data     01 06 00190000 00260000
+I (28) boot: End of partition table
+I (29) esp_image: segment 0: paddr=00010020 vaddr=3c020020 size=09d88h ( 40328) map
+I (36) esp_image: segment 1: paddr=00019db0 vaddr=3fcab600 size=06268h ( 25192) load
+I (42) esp_image: segment 2: paddr=00020020 vaddr=42000020 size=13148h ( 78152) map
+I (57) esp_image: segment 3: paddr=00033170 vaddr=3fcb1868 size=1ed10h (126224) load
+I (84) esp_image: segment 4: paddr=00051e88 vaddr=40374000 size=27538h (161080) load
+I (121) esp_image: segment 5: paddr=000793c8 vaddr=50000000 size=00024h (    36) load
+I (143) boot: Loaded app from partition at offset 0x10000
+I (144) boot: Disabling RNG early entropy source...
+I (144) cpu_start: Multicore app
+I (154) cpu_start: Pro cpu start user code
+I (154) cpu_start: cpu freq: 240000000 Hz
+I (154) app_init: Application information:
+I (154) app_init: Project name:     esp32_lc3_benchmark
+I (154) app_init: App version:      935c804-dirty
+I (154) app_init: Compile time:     Sep 19 2026 23:24:45
+I (154) app_init: ELF file SHA256:  1526350d9...
+I (155) app_init: ESP-IDF:          v6.0.2-dirty
+I (155) efuse_init: Min chip rev:     v0.0
+I (155) efuse_init: Max chip rev:     v0.99
+I (155) efuse_init: Chip rev:         v0.2
+I (155) heap_init: Initializing. RAM available for dynamic allocation:
+I (156) heap_init: At 3FCD1130 len 000185E0 (97 KiB): RAM
+I (156) heap_init: At 3FCE9710 len 00005724 (21 KiB): RAM
+I (156) heap_init: At 3FCF0000 len 00008000 (32 KiB): DRAM
+I (156) heap_init: At 600FE000 len 00001FE8 (7 KiB): RTCRAM
+I (157) spi_flash: detected chip: gd
+I (157) spi_flash: flash io: dio
+W (157) spi_flash: Detected size(8192k) larger than the size in the binary image header(4096k). Using the size in the binary image header.
+I (158) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+I (158) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+I (159) main_task: Started on CPU0
+I (159) main_task: Calling app_main()
+I (159) APP_MAIN: === ESP32-S3 LC3 CODEC BENCHMARK FIRMWARE REV 2 ===
+I (169) main_task: Returned from app_main()
+I (169) APP_MAIN: Benchmark task started on Core 1 (Priority 5)
+I (669) LC3_BENCH: Storage mapped at 0x3c030000 (4 clips). Code Placement: IRAM (Internal RAM) (&lc3_encode=0x4038c464)
+I (669) APP_MAIN: Running automated LC3 Benchmark Suite Rev 2...
+I (669) LC3_BENCH: ===============================================================================
+I (669) LC3_BENCH: STARTING ESP32-S3 LC3 ENCODE & DECODE BENCHMARK SUITE REV 2 (240 MHz, Core 1)
+I (669) LC3_BENCH: Code Placement: IRAM (Internal RAM) (&lc3_encode=0x4038c464)
+I (669) LC3_BENCH: ===============================================================================
+I (669) LC3_BENCH: >>> SERIES: Google liblc3 (Float+FPU, LTPF ON)
+I (869) LC3_BENCH:   [ VHQ] 48000 Hz | 10.0 ms | 160 B (128 kbps) -> Enc:  1.41 ms (RT factor: 0.141) | Dec:  0.56 ms (RT factor: 0.056)
+I (1079) LC3_BENCH:   [  HQ] 48000 Hz | 10.0 ms | 120 B ( 96 kbps) -> Enc:  1.37 ms (RT factor: 0.137) | Dec:  0.54 ms (RT factor: 0.054)
+I (1259) LC3_BENCH:   [  MQ] 32000 Hz | 10.0 ms |  80 B ( 64 kbps) -> Enc:  1.18 ms (RT factor: 0.118) | Dec:  0.38 ms (RT factor: 0.038)
+I (1399) LC3_BENCH:   [  LW] 24000 Hz | 10.0 ms |  60 B ( 48 kbps) -> Enc:  1.01 ms (RT factor: 0.101) | Dec:  0.29 ms (RT factor: 0.029)
+I (1509) LC3_BENCH:   [SUB1]  8000 Hz | 10.0 ms |  80 B ( 64 kbps) -> Enc:  0.76 ms (RT factor: 0.076) | Dec:  0.17 ms (RT factor: 0.017)
+I (1619) LC3_BENCH:   [SUB2]  8000 Hz | 10.0 ms | 120 B ( 96 kbps) -> Enc:  0.80 ms (RT factor: 0.080) | Dec:  0.21 ms (RT factor: 0.021)
+I (1799) LC3_BENCH:   [ VHQ] 48000 Hz |  7.5 ms | 160 B (170 kbps) -> Enc:  1.16 ms (RT factor: 0.154) | Dec:  0.45 ms (RT factor: 0.061)
+I (1969) LC3_BENCH:   [  HQ] 48000 Hz |  7.5 ms | 120 B (127 kbps) -> Enc:  1.12 ms (RT factor: 0.149) | Dec:  0.42 ms (RT factor: 0.056)
+I (2109) LC3_BENCH:   [  MQ] 32000 Hz |  7.5 ms |  80 B ( 85 kbps) -> Enc:  0.97 ms (RT factor: 0.129) | Dec:  0.30 ms (RT factor: 0.041)
+I (2229) LC3_BENCH:   [  LW] 24000 Hz |  7.5 ms |  60 B ( 63 kbps) -> Enc:  0.83 ms (RT factor: 0.110) | Dec:  0.23 ms (RT factor: 0.031)
+I (2319) LC3_BENCH:   [SUB1]  8000 Hz |  7.5 ms |  80 B ( 85 kbps) -> Enc:  0.65 ms (RT factor: 0.086) | Dec:  0.16 ms (RT factor: 0.021)
+I (2419) LC3_BENCH:   [SUB2]  8000 Hz |  7.5 ms | 120 B (127 kbps) -> Enc:  0.69 ms (RT factor: 0.092) | Dec:  0.19 ms (RT factor: 0.025)
+I (2429) LC3_BENCH: >>> SERIES: Google liblc3 (Float+FPU, LTPF OFF)
+I (2579) LC3_BENCH:   [ VHQ] 48000 Hz | 10.0 ms | 160 B (128 kbps) -> Enc:  0.90 ms (RT factor: 0.090) | Dec:  0.56 ms (RT factor: 0.056)
+I (2729) LC3_BENCH:   [  HQ] 48000 Hz | 10.0 ms | 120 B ( 96 kbps) -> Enc:  0.86 ms (RT factor: 0.086) | Dec:  0.54 ms (RT factor: 0.054)
+I (2849) LC3_BENCH:   [  MQ] 32000 Hz | 10.0 ms |  80 B ( 64 kbps) -> Enc:  0.65 ms (RT factor: 0.065) | Dec:  0.38 ms (RT factor: 0.038)
+I (2939) LC3_BENCH:   [  LW] 24000 Hz | 10.0 ms |  60 B ( 48 kbps) -> Enc:  0.51 ms (RT factor: 0.051) | Dec:  0.29 ms (RT factor: 0.029)
+I (2999) LC3_BENCH:   [SUB1]  8000 Hz | 10.0 ms |  80 B ( 64 kbps) -> Enc:  0.33 ms (RT factor: 0.033) | Dec:  0.17 ms (RT factor: 0.017)
+I (3069) LC3_BENCH:   [SUB2]  8000 Hz | 10.0 ms | 120 B ( 96 kbps) -> Enc:  0.38 ms (RT factor: 0.038) | Dec:  0.21 ms (RT factor: 0.021)
+I (3199) LC3_BENCH:   [ VHQ] 48000 Hz |  7.5 ms | 160 B (170 kbps) -> Enc:  0.75 ms (RT factor: 0.100) | Dec:  0.46 ms (RT factor: 0.061)
+I (3329) LC3_BENCH:   [  HQ] 48000 Hz |  7.5 ms | 120 B (127 kbps) -> Enc:  0.70 ms (RT factor: 0.094) | Dec:  0.42 ms (RT factor: 0.057)
+I (3429) LC3_BENCH:   [  MQ] 32000 Hz |  7.5 ms |  80 B ( 85 kbps) -> Enc:  0.55 ms (RT factor: 0.073) | Dec:  0.30 ms (RT factor: 0.041)
+I (3509) LC3_BENCH:   [  LW] 24000 Hz |  7.5 ms |  60 B ( 63 kbps) -> Enc:  0.43 ms (RT factor: 0.057) | Dec:  0.23 ms (RT factor: 0.031)
+I (3569) LC3_BENCH:   [SUB1]  8000 Hz |  7.5 ms |  80 B ( 85 kbps) -> Enc:  0.30 ms (RT factor: 0.040) | Dec:  0.16 ms (RT factor: 0.021)
+I (3629) LC3_BENCH:   [SUB2]  8000 Hz |  7.5 ms | 120 B (127 kbps) -> Enc:  0.34 ms (RT factor: 0.046) | Dec:  0.19 ms (RT factor: 0.026)
+I (3639) LC3_BENCH: >>> SERIES: Espressif Fixed-Point (esp_audio_codec)
+I (4059) LC3_BENCH:   [ VHQ] 48000 Hz | 10.0 ms | 160 B (128 kbps) -> Enc:  3.22 ms (RT factor: 0.322) | Dec:  0.90 ms (RT factor: 0.090)
+I (4489) LC3_BENCH:   [  HQ] 48000 Hz | 10.0 ms | 120 B ( 96 kbps) -> Enc:  3.19 ms (RT factor: 0.319) | Dec:  0.88 ms (RT factor: 0.088)
+I (4819) LC3_BENCH:   [  MQ] 32000 Hz | 10.0 ms |  80 B ( 64 kbps) -> Enc:  2.51 ms (RT factor: 0.251) | Dec:  0.57 ms (RT factor: 0.057)
+I (5099) LC3_BENCH:   [  LW] 24000 Hz | 10.0 ms |  60 B ( 48 kbps) -> Enc:  2.15 ms (RT factor: 0.215) | Dec:  0.48 ms (RT factor: 0.048)
+I (5279) LC3_BENCH:   [SUB1]  8000 Hz | 10.0 ms |  80 B ( 64 kbps) -> Enc:  1.41 ms (RT factor: 0.141) | Dec:  0.21 ms (RT factor: 0.021)
+I (5469) LC3_BENCH:   [SUB2]  8000 Hz | 10.0 ms | 120 B ( 96 kbps) -> Enc:  1.45 ms (RT factor: 0.145) | Dec:  0.26 ms (RT factor: 0.026)
+I (5829) LC3_BENCH:   [ VHQ] 48000 Hz |  7.5 ms | 160 B (170 kbps) -> Enc:  2.64 ms (RT factor: 0.353) | Dec:  0.79 ms (RT factor: 0.105)
+I (6179) LC3_BENCH:   [  HQ] 48000 Hz |  7.5 ms | 120 B (127 kbps) -> Enc:  2.59 ms (RT factor: 0.346) | Dec:  0.76 ms (RT factor: 0.101)
+I (6449) LC3_BENCH:   [  MQ] 32000 Hz |  7.5 ms |  80 B ( 85 kbps) -> Enc:  2.06 ms (RT factor: 0.275) | Dec:  0.47 ms (RT factor: 0.063)
+I (6679) LC3_BENCH:   [  LW] 24000 Hz |  7.5 ms |  60 B ( 63 kbps) -> Enc:  1.73 ms (RT factor: 0.231) | Dec:  0.41 ms (RT factor: 0.055)
+I (6829) LC3_BENCH:   [SUB1]  8000 Hz |  7.5 ms |  80 B ( 85 kbps) -> Enc:  1.18 ms (RT factor: 0.158) | Dec:  0.21 ms (RT factor: 0.027)
+I (6989) LC3_BENCH:   [SUB2]  8000 Hz |  7.5 ms | 120 B (127 kbps) -> Enc:  1.23 ms (RT factor: 0.164) | Dec:  0.25 ms (RT factor: 0.033)
++====================================================================================================================================================+
+|                         ESP32-S3 LC3 CODEC BENCHMARK RESULTS REV 2 (240 MHz, Core 1, IRAM PLACEMENT)                                  |
++====================================================================================================================================================+
+| Profile | Engine / Mode            | Rate (kHz)| Dur (ms)| Octets | Bitrate | Enc Time/Frame | Enc RT Factor | Dec Time/Frame | Dec RT Factor |
++---------+--------------------------+-----------+---------+--------+---------+----------------+---------------+----------------+---------------+
+| VHQ     | liblc3 (LTPF ON)         |     48.0  |   10.0  |    160 |  128 k |   1.411 ms/fr   |    0.141      |   0.558 ms/fr   |    0.056     |
+| HQ      | liblc3 (LTPF ON)         |     48.0  |   10.0  |    120 |   96 k |   1.375 ms/fr   |    0.137      |   0.536 ms/fr   |    0.054     |
+| MQ      | liblc3 (LTPF ON)         |     32.0  |   10.0  |     80 |   64 k |   1.176 ms/fr   |    0.118      |   0.381 ms/fr   |    0.038     |
+| LW      | liblc3 (LTPF ON)         |     24.0  |   10.0  |     60 |   48 k |   1.007 ms/fr   |    0.101      |   0.290 ms/fr   |    0.029     |
+| SUB1    | liblc3 (LTPF ON)         |      8.0  |   10.0  |     80 |   64 k |   0.758 ms/fr   |    0.076      |   0.173 ms/fr   |    0.017     |
+| SUB2    | liblc3 (LTPF ON)         |      8.0  |   10.0  |    120 |   96 k |   0.802 ms/fr   |    0.080      |   0.212 ms/fr   |    0.021     |
+| VHQ     | liblc3 (LTPF ON)         |     48.0  |    7.5  |    160 |  170 k |   1.156 ms/fr   |    0.154      |   0.454 ms/fr   |    0.061     |
+| HQ      | liblc3 (LTPF ON)         |     48.0  |    7.5  |    120 |  127 k |   1.115 ms/fr   |    0.149      |   0.424 ms/fr   |    0.056     |
+| MQ      | liblc3 (LTPF ON)         |     32.0  |    7.5  |     80 |   85 k |   0.970 ms/fr   |    0.129      |   0.304 ms/fr   |    0.041     |
+| LW      | liblc3 (LTPF ON)         |     24.0  |    7.5  |     60 |   63 k |   0.827 ms/fr   |    0.110      |   0.234 ms/fr   |    0.031     |
+| SUB1    | liblc3 (LTPF ON)         |      8.0  |    7.5  |     80 |   85 k |   0.649 ms/fr   |    0.086      |   0.157 ms/fr   |    0.021     |
+| SUB2    | liblc3 (LTPF ON)         |      8.0  |    7.5  |    120 |  127 k |   0.687 ms/fr   |    0.092      |   0.191 ms/fr   |    0.025     |
+| VHQ     | liblc3 (LTPF OFF)        |     48.0  |   10.0  |    160 |  128 k |   0.899 ms/fr   |    0.090      |   0.559 ms/fr   |    0.056     |
+| HQ      | liblc3 (LTPF OFF)        |     48.0  |   10.0  |    120 |   96 k |   0.862 ms/fr   |    0.086      |   0.536 ms/fr   |    0.054     |
+| MQ      | liblc3 (LTPF OFF)        |     32.0  |   10.0  |     80 |   64 k |   0.651 ms/fr   |    0.065      |   0.382 ms/fr   |    0.038     |
+| LW      | liblc3 (LTPF OFF)        |     24.0  |   10.0  |     60 |   48 k |   0.509 ms/fr   |    0.051      |   0.290 ms/fr   |    0.029     |
+| SUB1    | liblc3 (LTPF OFF)        |      8.0  |   10.0  |     80 |   64 k |   0.334 ms/fr   |    0.033      |   0.175 ms/fr   |    0.017     |
+| SUB2    | liblc3 (LTPF OFF)        |      8.0  |   10.0  |    120 |   96 k |   0.378 ms/fr   |    0.038      |   0.213 ms/fr   |    0.021     |
+| VHQ     | liblc3 (LTPF OFF)        |     48.0  |    7.5  |    160 |  170 k |   0.746 ms/fr   |    0.100      |   0.455 ms/fr   |    0.061     |
+| HQ      | liblc3 (LTPF OFF)        |     48.0  |    7.5  |    120 |  127 k |   0.704 ms/fr   |    0.094      |   0.424 ms/fr   |    0.057     |
+| MQ      | liblc3 (LTPF OFF)        |     32.0  |    7.5  |     80 |   85 k |   0.547 ms/fr   |    0.073      |   0.304 ms/fr   |    0.041     |
+| LW      | liblc3 (LTPF OFF)        |     24.0  |    7.5  |     60 |   63 k |   0.430 ms/fr   |    0.057      |   0.235 ms/fr   |    0.031     |
+| SUB1    | liblc3 (LTPF OFF)        |      8.0  |    7.5  |     80 |   85 k |   0.303 ms/fr   |    0.040      |   0.158 ms/fr   |    0.021     |
+| SUB2    | liblc3 (LTPF OFF)        |      8.0  |    7.5  |    120 |  127 k |   0.341 ms/fr   |    0.046      |   0.192 ms/fr   |    0.026     |
+| VHQ     | esp_codec (FixP)         |     48.0  |   10.0  |    160 |  128 k |   3.218 ms/fr   |    0.322      |   0.900 ms/fr   |    0.090     |
+| HQ      | esp_codec (FixP)         |     48.0  |   10.0  |    120 |   96 k |   3.187 ms/fr   |    0.319      |   0.880 ms/fr   |    0.088     |
+| MQ      | esp_codec (FixP)         |     32.0  |   10.0  |     80 |   64 k |   2.512 ms/fr   |    0.251      |   0.567 ms/fr   |    0.057     |
+| LW      | esp_codec (FixP)         |     24.0  |   10.0  |     60 |   48 k |   2.153 ms/fr   |    0.215      |   0.478 ms/fr   |    0.048     |
+| SUB1    | esp_codec (FixP)         |      8.0  |   10.0  |     80 |   64 k |   1.406 ms/fr   |    0.141      |   0.213 ms/fr   |    0.021     |
+| SUB2    | esp_codec (FixP)         |      8.0  |   10.0  |    120 |   96 k |   1.454 ms/fr   |    0.145      |   0.264 ms/fr   |    0.026     |
+| VHQ     | esp_codec (FixP)         |     48.0  |    7.5  |    160 |  170 k |   2.645 ms/fr   |    0.353      |   0.789 ms/fr   |    0.105     |
+| HQ      | esp_codec (FixP)         |     48.0  |    7.5  |    120 |  127 k |   2.592 ms/fr   |    0.346      |   0.755 ms/fr   |    0.101     |
+| MQ      | esp_codec (FixP)         |     32.0  |    7.5  |     80 |   85 k |   2.063 ms/fr   |    0.275      |   0.471 ms/fr   |    0.063     |
+| LW      | esp_codec (FixP)         |     24.0  |    7.5  |     60 |   63 k |   1.730 ms/fr   |    0.231      |   0.414 ms/fr   |    0.055     |
+| SUB1    | esp_codec (FixP)         |      8.0  |    7.5  |     80 |   85 k |   1.182 ms/fr   |    0.158      |   0.206 ms/fr   |    0.027     |
+| SUB2    | esp_codec (FixP)         |      8.0  |    7.5  |    120 |  127 k |   1.228 ms/fr   |    0.164      |   0.250 ms/fr   |    0.033     |
++====================================================================================================================================================+
+=== CSV START ===
+profile,engine,ltpf,placement,sample_rate,frame_duration_ms,octets,bitrate_bps,frames,enc_avg_us,enc_avg_ms,enc_rt_factor,dec_avg_us,dec_avg_ms,dec_rt_factor
+VHQ,liblc3,ON,IRAM,48000,10.0,160,128000,100,1411.34,1.4113,0.1411,558.11,0.5581,0.0558
+HQ,liblc3,ON,IRAM,48000,10.0,120,96000,100,1374.78,1.3748,0.1375,535.84,0.5358,0.0536
+MQ,liblc3,ON,IRAM,32000,10.0,80,64000,100,1175.71,1.1757,0.1176,381.40,0.3814,0.0381
+LW,liblc3,ON,IRAM,24000,10.0,60,48000,100,1006.84,1.0068,0.1007,289.94,0.2899,0.0290
+SUB1,liblc3,ON,IRAM,8000,10.0,80,64000,100,758.21,0.7582,0.0758,173.36,0.1734,0.0173
+SUB2,liblc3,ON,IRAM,8000,10.0,120,96000,100,802.02,0.8020,0.0802,212.10,0.2121,0.0212
+VHQ,liblc3,ON,IRAM,48000,7.5,160,170666,100,1156.09,1.1561,0.1541,454.25,0.4543,0.0606
+HQ,liblc3,ON,IRAM,48000,7.5,120,127999,100,1115.39,1.1154,0.1487,423.66,0.4237,0.0565
+MQ,liblc3,ON,IRAM,32000,7.5,80,85333,100,970.34,0.9703,0.1294,303.93,0.3039,0.0405
+LW,liblc3,ON,IRAM,24000,7.5,60,63999,100,826.70,0.8267,0.1102,234.14,0.2341,0.0312
+SUB1,liblc3,ON,IRAM,8000,7.5,80,85333,100,648.72,0.6487,0.0865,156.99,0.1570,0.0209
+SUB2,liblc3,ON,IRAM,8000,7.5,120,127999,100,687.12,0.6871,0.0916,191.17,0.1912,0.0255
+VHQ,liblc3,OFF,IRAM,48000,10.0,160,128000,100,898.85,0.8988,0.0899,559.01,0.5590,0.0559
+HQ,liblc3,OFF,IRAM,48000,10.0,120,96000,100,861.66,0.8617,0.0862,535.93,0.5359,0.0536
+MQ,liblc3,OFF,IRAM,32000,10.0,80,64000,100,651.25,0.6513,0.0651,381.59,0.3816,0.0382
+LW,liblc3,OFF,IRAM,24000,10.0,60,48000,100,509.03,0.5090,0.0509,290.22,0.2902,0.0290
+SUB1,liblc3,OFF,IRAM,8000,10.0,80,64000,100,334.16,0.3342,0.0334,174.59,0.1746,0.0175
+SUB2,liblc3,OFF,IRAM,8000,10.0,120,96000,100,378.37,0.3784,0.0378,212.78,0.2128,0.0213
+VHQ,liblc3,OFF,IRAM,48000,7.5,160,170666,100,746.40,0.7464,0.0995,455.31,0.4553,0.0607
+HQ,liblc3,OFF,IRAM,48000,7.5,120,127999,100,704.37,0.7044,0.0939,424.21,0.4242,0.0566
+MQ,liblc3,OFF,IRAM,32000,7.5,80,85333,100,547.26,0.5473,0.0730,303.96,0.3040,0.0405
+LW,liblc3,OFF,IRAM,24000,7.5,60,63999,100,429.82,0.4298,0.0573,234.60,0.2346,0.0313
+SUB1,liblc3,OFF,IRAM,8000,7.5,80,85333,100,303.18,0.3032,0.0404,157.77,0.1578,0.0210
+SUB2,liblc3,OFF,IRAM,8000,7.5,120,127999,100,341.46,0.3415,0.0455,191.70,0.1917,0.0256
+VHQ,esp_audio_codec,N/A,IRAM,48000,10.0,160,128000,100,3218.40,3.2184,0.3218,900.18,0.9002,0.0900
+HQ,esp_audio_codec,N/A,IRAM,48000,10.0,120,96000,100,3186.68,3.1867,0.3187,880.46,0.8805,0.0880
+MQ,esp_audio_codec,N/A,IRAM,32000,10.0,80,64000,100,2511.97,2.5120,0.2512,567.31,0.5673,0.0567
+LW,esp_audio_codec,N/A,IRAM,24000,10.0,60,48000,100,2153.01,2.1530,0.2153,477.64,0.4776,0.0478
+SUB1,esp_audio_codec,N/A,IRAM,8000,10.0,80,64000,100,1406.16,1.4062,0.1406,213.24,0.2132,0.0213
+SUB2,esp_audio_codec,N/A,IRAM,8000,10.0,120,96000,100,1454.23,1.4542,0.1454,263.67,0.2637,0.0264
+VHQ,esp_audio_codec,N/A,IRAM,48000,7.5,160,170666,100,2644.65,2.6446,0.3526,788.73,0.7887,0.1052
+HQ,esp_audio_codec,N/A,IRAM,48000,7.5,120,127999,100,2592.35,2.5924,0.3456,755.05,0.7551,0.1007
+MQ,esp_audio_codec,N/A,IRAM,32000,7.5,80,85333,100,2063.17,2.0632,0.2751,471.36,0.4714,0.0628
+LW,esp_audio_codec,N/A,IRAM,24000,7.5,60,63999,100,1730.38,1.7304,0.2307,414.19,0.4142,0.0552
+SUB1,esp_audio_codec,N/A,IRAM,8000,7.5,80,85333,100,1181.75,1.1818,0.1576,205.98,0.2060,0.0275
+SUB2,esp_audio_codec,N/A,IRAM,8000,7.5,120,127999,100,1227.98,1.2280,0.1637,250.02,0.2500,0.0333
+=== CSV END ===

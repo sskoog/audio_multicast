@@ -3,12 +3,9 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "nvs_flash.h"
-#include "esp_wifi.h"
-#include "esp_event.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "driver/uart.h"
 
 #include "lc3_benchmark_runner.hpp"
 
@@ -20,7 +17,7 @@ static void benchmark_task(void *pvParameters) {
     ESP_LOGI(TAG, "Benchmark task started on Core %d (Priority %d)", xPortGetCoreID(), uxTaskPriorityGet(NULL));
     
     // Allow system and NVS initialization to settle
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    vTaskDelay(pdMS_TO_TICKS(500));
 
     if (!s_runner.init()) {
         ESP_LOGE(TAG, "Benchmark runner initialization failed!");
@@ -28,7 +25,7 @@ static void benchmark_task(void *pvParameters) {
         return;
     }
 
-    ESP_LOGI(TAG, "Running automated LC3 Benchmark Suite...");
+    ESP_LOGI(TAG, "Running automated LC3 Benchmark Suite Rev 2...");
     s_runner.runFullSuite();
 
     ESP_LOGI(TAG, "Benchmark completed. Type 'bench' in console to re-run.");
@@ -55,7 +52,7 @@ static void benchmark_task(void *pvParameters) {
 }
 
 extern "C" void app_main(void) {
-    ESP_LOGI(TAG, "=== ESP32-WROOM-32 LC3 CODEC BENCHMARK FIRMWARE ===");
+    ESP_LOGI(TAG, "=== ESP32-S3 LC3 CODEC BENCHMARK FIRMWARE REV 2 ===");
 
     // Initialize NVS
     esp_err_t ret = nvs_flash_init();
@@ -65,15 +62,7 @@ extern "C" void app_main(void) {
     }
     ESP_ERROR_CHECK(ret);
 
-    // Initialize TCP/IP and Wi-Fi stack
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_start());
-
-    // Pin benchmark task strictly to CORE 0
+    // Pin benchmark task strictly to CORE 1 (Xtensa LX7 Core 1 dedicated to codec)
     xTaskCreatePinnedToCore(
         benchmark_task,
         "lc3_bench_task",
@@ -81,6 +70,6 @@ extern "C" void app_main(void) {
         NULL,
         5,
         NULL,
-        0 // Core 0
+        1 // Core 1
     );
 }

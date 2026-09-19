@@ -1,4 +1,7 @@
 [mapping:liblc3]
 archive: libliblc3.a
 entries:
-    * (noflash)
+    if LC3_CODE_IN_IRAM = y:
+        * (noflash)
+    else:
+        * (default)

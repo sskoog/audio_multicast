@@ -1,0 +1,10 @@
+menu "liblc3 Codec Configuration"
+
+    config LC3_CODE_IN_IRAM
+        bool "Place liblc3 codec routines and tables in IRAM"
+        default y
+        help
+            When enabled, liblc3 encoder and decoder code and lookup tables are mapped
+            into internal SRAM (IRAM/DRAM) to eliminate SPI flash cache miss latency.
+
+endmenu

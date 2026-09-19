@@ -8,10 +8,11 @@ idf_component_register(
         esp_partition
         spi_flash
         esp_timer
-        esp_wifi
         nvs_flash
-        esp_netif
-        driver
+        esp_driver_uart
+        esp_driver_gpio
         espressif__esp_audio_codec
         liblc3
+    LDFRAGMENTS
+        "linker.lf"
 )
