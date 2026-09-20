@@ -161,7 +161,7 @@ void SystemDiagnostics::tick() {
         }
 
         // 1. Read WiFi Channel dynamically from WiFi hardware
-        uint8_t wifi_ch = cfg->default_channel;
+        uint8_t wifi_ch = m_unicast_engine.getWifiChannel();
         wifi_second_chan_t second_ch = WIFI_SECOND_CHAN_NONE;
         uint8_t current_hw_ch = 0;
         if (esp_wifi_get_channel(&current_hw_ch, &second_ch) == ESP_OK && current_hw_ch > 0) {

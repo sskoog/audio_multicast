@@ -173,7 +173,7 @@ EspNowBroadcastEngine::~EspNowBroadcastEngine() {
 esp_err_t EspNowBroadcastEngine::init(uint8_t role, uint8_t node_id, uint8_t wifi_channel) {
     m_node_role = role;
     m_node_id = node_id;
-    m_wifi_channel = wifi_channel;
+    m_wifi_channel = (wifi_channel >= 1 && wifi_channel <= 13) ? wifi_channel : 1;
 
     if (!s_tx_done_sem) {
         s_tx_done_sem = xSemaphoreCreateBinary();

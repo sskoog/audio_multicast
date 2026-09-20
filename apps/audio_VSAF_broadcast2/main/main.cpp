@@ -364,16 +364,16 @@ extern "C" void app_main(void) {
                      matched_node->target_channel, matched_node->channel_name,
                      base_mac[0], base_mac[1], base_mac[2], base_mac[3], base_mac[4], base_mac[5]);
         } else {
-            s_unicast_engine->setTargetChannel(0); // Fallback to Left speaker
-            ESP_LOGW(TAG, "Unrecognized SINK MAC %02X:%02X:%02X:%02X:%02X:%02X! Defaulting to Channel 0 (Left)",
-                     base_mac[0], base_mac[1], base_mac[2], base_mac[3], base_mac[4], base_mac[5]);
+            s_unicast_engine->setTargetChannel(cfg->default_channel); // Fallback to config's default audio channel
+            ESP_LOGW(TAG, "Unrecognized SINK MAC %02X:%02X:%02X:%02X:%02X:%02X! Defaulting to Channel %d",
+                     base_mac[0], base_mac[1], base_mac[2], base_mac[3], base_mac[4], base_mac[5], cfg->default_channel);
         }
     } else if (cfg->node_role == NODE_ROLE_SOURCE) {
         // Initialize USB Audio + CDC for SOURCE
         usb_audio_init();
     }
 
-    s_unicast_engine->init(cfg->node_role, cfg->node_id, cfg->default_channel);
+    s_unicast_engine->init(cfg->node_role, cfg->node_id, 1);
     s_unicast_engine->start();
 
     // 5. Diagnostics

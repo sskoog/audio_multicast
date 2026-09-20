@@ -312,7 +312,8 @@ esp_err_t EspNowUnicastEngine::init(uint8_t role, uint8_t node_id, uint8_t wifi_
         ESP_ERROR_CHECK(esp_wifi_start());
 
         // Lock to specified Wi-Fi channel
-        ESP_ERROR_CHECK(esp_wifi_set_channel(wifi_channel, WIFI_SECOND_CHAN_NONE));
+        uint8_t sanitized_wifi_ch = (wifi_channel >= 1 && wifi_channel <= 13) ? wifi_channel : 1;
+        ESP_ERROR_CHECK(esp_wifi_set_channel(sanitized_wifi_ch, WIFI_SECOND_CHAN_NONE));
 
         // Standard 2.4 GHz protocols (11b/g/n on S3, 11b/g/n/ax on C6).
         // Rate locking to 24 Mbps OFDM is enforced via esp_wifi_config_espnow_rate and peer_info.rate
