@@ -25,6 +25,7 @@ import serial.tools.list_ports
 
 # Known node registry
 KNOWN_NODES = {
+    4:  {"chip": "esp32s3", "role": "SINK",   "name": "Node 4 (XIAO S3 SINK Ch 4)",       "default_port": "COM4"},
     16: {"chip": "esp32s3", "role": "SOURCE", "name": "Node 16 (XIAO ESP32-S3 SOURCE)", "default_port": "COM16", "app_port": "COM116"},
     20: {"chip": "esp32c6", "role": "SINK",   "name": "Node 20 (C6 LCD Console)",        "default_port": "COM20"},
     21: {"chip": "esp32c6", "role": "SINK",   "name": "Node 21 (C6 DevKit / Host)",       "default_port": "COM21", "app_port": "COM121"},
@@ -139,10 +140,34 @@ def flash_single_node(app_dir, node_info, baud=921600):
         idf_python = r"C:\Users\stefa\.espressif\python_env\idf6.0_py3.11_env\Scripts\python.exe"
 
     if chip == "esp32s3":
-        # S3 hands-free RTC Watchdog system reset
-        s3_script = os.path.join(app_dir, "tools", "s3_flash_and_reset.py")
-        cmd = [idf_python, "-u", s3_script, "--port", port, "--baud", str(baud), "--bin-dir", os.path.join(app_dir, "build_s3")]
-        proc = subprocess.run(cmd, cwd=app_dir, capture_output=True, text=True)
+        if node_id == 16 or port in ["COM16", "COM116"]:
+            # S3 hands-free RTC Watchdog system reset for Node 16
+            s3_script = os.path.join(app_dir, "tools", "s3_flash_and_reset.py")
+            cmd = [idf_python, "-u", s3_script, "--port", port, "--baud", str(baud), "--bin-dir", os.path.join(app_dir, "build_s3")]
+            proc = subprocess.run(cmd, cwd=app_dir, capture_output=True, text=True)
+        else:
+            # S3 standard flash with hardware reset (e.g. Node 4 on USB-Serial/JTAG)
+            build_dir = os.path.join(app_dir, "build_s3")
+            bootloader = os.path.join(build_dir, "bootloader", "bootloader.bin")
+            partition = os.path.join(build_dir, "partition_table", "partition-table.bin")
+            app_bin = os.path.join(build_dir, "audio_VSAF_broadcast2.bin")
+            cmd = [
+                idf_python, "-m", "esptool",
+                "--chip", "esp32s3",
+                "-p", port,
+                "-b", str(baud),
+                "--connect-attempts", "10",
+                "--before", "default-reset",
+                "--after", "hard-reset",
+                "write_flash",
+                "--flash_mode", "dio",
+                "--flash_size", "8MB",
+                "--flash_freq", "80m",
+                "0x0", bootloader,
+                "0x8000", partition,
+                "0x10000", app_bin
+            ]
+            proc = subprocess.run(cmd, cwd=app_dir, capture_output=True, text=True)
     else:
         # C6 standard high-speed flash with hardware reset
         build_dir = os.path.join(app_dir, "build_c6")

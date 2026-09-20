@@ -17,8 +17,10 @@ trigger: always_on
      ```
 
 2. **COM-ports**
-   - Embedded devices are normally connected to this local PC via COM-port, where the COM-port number is assigned according to the node ID, i.e. node12 = COM12.
+   - Embedded devices are normally connected to this PC via COM-port, where the COM-port number is assigned according to the node ID. Some nodes have two COM-ports, in which case 100 is added to the node number, e.g. node 16 has COM16 & COM116.
    - COM-ports are used for both flashing and for debugging via virtual serial port. Be aware of resource conflicts when flashing, e.g. locked COM-port from a serial interface.
+   - If a COM-port resource is locked at the time for experiments or flashing, it is probably due to other serial monitors accidentally being active. If so, run a windows script to force close the com-port to free it up in order to proceed with your task.
+   - Always add time-outs in scripts monitoring COM traffic.
 
 3. **Port Locking Mitigation**:
    - Before invoking `esptool.py` or flash scripts, terminate all lingering Python scripts and serial monitors holding COM port handles:

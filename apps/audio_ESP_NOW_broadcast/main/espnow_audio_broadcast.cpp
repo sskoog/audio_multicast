@@ -356,7 +356,7 @@ esp_err_t EspNowAudioBroadcast::enableWifiEspNow() {
     if (esp_wifi_get_max_tx_power(&actual_tx_power) == ESP_OK) {
         ESP_LOGI(TAG, "Wi-Fi TX Power set to +%.2f dBm (raw: %d)", actual_tx_power * 0.25f, actual_tx_power);
     }
-    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_MIN_MODEM));
     ESP_ERROR_CHECK(esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE));
 
     uint8_t mac[6];
@@ -915,6 +915,15 @@ void EspNowAudioBroadcast::resetStreamingCounters() {
     m_last_sync_time_us.store(0, std::memory_order_relaxed);
 }
 
+/**
+ * @brief Transitions the broadcast/unicast engine state machine to a new network state.
+ *
+ * Automatically manages dynamic Wi-Fi power save modes:
+ * - IDLE, SCANNING, OFF: Sets WIFI_PS_MIN_MODEM (default power save during inactive/search phases)
+ * - PREFILL, STREAMING, BROADCASTING: Sets WIFI_PS_NONE (zero sleep latency and 100% active baseband for streaming)
+ *
+ * @param new_state Target network state (NetworkState enum)
+ */
 void EspNowAudioBroadcast::transitionTo(NetworkState new_state) {
     if (m_state == new_state) return;
 
@@ -926,6 +935,17 @@ void EspNowAudioBroadcast::transitionTo(NetworkState new_state) {
     printf("\n[STATE CHANGE] %s ---> %s (Node %u)\n", old_str, new_str, m_node_id);
     fflush(stdout);
     ESP_LOGI(TAG, "State Machine Transition: [%s] ---> [%s]", old_str, new_str);
+
+    // Dynamic Wi-Fi Power Save Management:
+    // - IDLE, SCANNING, OFF: WIFI_PS_MIN_MODEM (default modem sleep when inactive or searching)
+    // - PREFILL, STREAMING, BROADCASTING: WIFI_PS_NONE (continuous full-power radio during active prefill/streaming/broadcasting)
+    if (m_wifi_initialized) {
+        if (new_state == NetworkState::IDLE || new_state == NetworkState::SCANNING || new_state == NetworkState::OFF) {
+            esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+        } else if (new_state == NetworkState::PREFILL || new_state == NetworkState::STREAMING || new_state == NetworkState::BROADCASTING) {
+            esp_wifi_set_ps(WIFI_PS_NONE);
+        }
+    }
 
     // If transitioning OUT of STREAMING (e.g. broadcast ended or loss of signal), reset error counters
     if (old_state == NetworkState::STREAMING || old_state == NetworkState::BROADCASTING) {

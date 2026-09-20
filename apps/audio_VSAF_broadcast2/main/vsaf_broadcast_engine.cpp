@@ -203,7 +203,7 @@ esp_err_t EspNowBroadcastEngine::init(uint8_t role, uint8_t node_id, uint8_t wif
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
-    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_MIN_MODEM));
     ESP_ERROR_CHECK(esp_wifi_set_channel(m_wifi_channel, WIFI_SECOND_CHAN_NONE));
 
     // Standard 2.4 GHz protocols (11b/g/n on S3, 11b/g/n/ax on C6)
@@ -324,8 +324,26 @@ esp_err_t EspNowBroadcastEngine::stop() {
     return ESP_OK;
 }
 
+/**
+ * @brief Transitions the broadcast/unicast engine state machine to a new network state.
+ *
+ * Automatically manages dynamic Wi-Fi power save modes:
+ * - IDLE, SCANNING, OFF: Sets WIFI_PS_MIN_MODEM (default power save during inactive/search phases)
+ * - PREFILL, STREAM, CAST: Sets WIFI_PS_NONE (zero sleep latency and 100% active baseband for streaming)
+ *
+ * @param new_state Target network state (NetworkState enum: IDLE, SCANNING, PREFILL, STREAM, CAST, OFF)
+ */
 void EspNowBroadcastEngine::transitionTo(NetworkState new_state) {
     m_state.store(new_state, std::memory_order_release);
+
+    // Dynamic Wi-Fi Power Save Management:
+    // - IDLE, SCANNING, OFF: WIFI_PS_MIN_MODEM (default modem sleep when inactive or searching)
+    // - PREFILL, STREAM, CAST: WIFI_PS_NONE (continuous full-power radio during active prefill/streaming/broadcasting)
+    if (new_state == NetworkState::IDLE || new_state == NetworkState::SCANNING || new_state == NetworkState::OFF) {
+        esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+    } else if (new_state == NetworkState::PREFILL || new_state == NetworkState::STREAM || new_state == NetworkState::CAST) {
+        esp_wifi_set_ps(WIFI_PS_NONE);
+    }
 
     // Synchronize Status LED with network state
     switch (new_state) {
