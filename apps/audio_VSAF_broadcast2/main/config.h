@@ -28,11 +28,11 @@ extern "C" {
 #endif
 
 #ifndef CONFIG_ESPNOW_PREFILL_THRESHOLD_FRAMES
-#define CONFIG_ESPNOW_PREFILL_THRESHOLD_FRAMES 4 // Number of 10ms LC3 frames needed before leaving SCANNING to PREFILL (4 = 40ms cushion)
+#define CONFIG_ESPNOW_PREFILL_THRESHOLD_FRAMES 5 // Number of 10ms LC3 frames needed before leaving SCANNING to PREFILL (5 = 50ms cushion: 2 in DMA, 3 in FIFO)
 #endif
 
 #ifndef CONFIG_ESPNOW_WATCHDOG_TIMEOUT_FRAMES
-#define CONFIG_ESPNOW_WATCHDOG_TIMEOUT_FRAMES 10 // Consecutive missing frames / PLC before falling back from STREAM to SCANNING (10 = 100ms)
+#define CONFIG_ESPNOW_WATCHDOG_TIMEOUT_FRAMES 6 // Consecutive missing frames / PLC before falling back from STREAM to SCANNING (6 = 60ms)
 #endif
 
 #ifndef CONFIG_ESPNOW_SAMPLE_RATE_HZ

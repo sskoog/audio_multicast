@@ -444,6 +444,7 @@ private:
         uint8_t  seq;
         uint8_t  len;
         uint8_t  flags;
+        bool     is_redundant;
         uint8_t  data[LC3_FRAME_OCTETS];
     };
     SinkFifoItem               m_sink_fifo[SINK_FIFO_PACKETS];

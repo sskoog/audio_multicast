@@ -832,6 +832,7 @@ void EspNowBroadcastEngine::handleAudioPacket(const vsaf_audio_packet_t* pkt, in
             m_sink_fifo[m_sink_fifo_head].seq = pkt->seq;
             m_sink_fifo[m_sink_fifo_head].len = LC3_FRAME_OCTETS;
             m_sink_fifo[m_sink_fifo_head].flags = pkt->packet_flags;
+            m_sink_fifo[m_sink_fifo_head].is_redundant = false;
             memcpy(m_sink_fifo[m_sink_fifo_head].data, pkt->data_t0, LC3_FRAME_OCTETS);
             m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
             m_sink_fifo_count++;
@@ -848,6 +849,7 @@ void EspNowBroadcastEngine::handleAudioPacket(const vsaf_audio_packet_t* pkt, in
             m_sink_fifo[m_sink_fifo_head].seq = pkt->seq;
             m_sink_fifo[m_sink_fifo_head].len = LC3_FRAME_OCTETS;
             m_sink_fifo[m_sink_fifo_head].flags = pkt->packet_flags;
+            m_sink_fifo[m_sink_fifo_head].is_redundant = false;
             memcpy(m_sink_fifo[m_sink_fifo_head].data, pkt->data_t0, LC3_FRAME_OCTETS);
             m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
             m_sink_fifo_count++;
@@ -867,16 +869,17 @@ void EspNowBroadcastEngine::handleAudioPacket(const vsaf_audio_packet_t* pkt, in
             m_sink_fifo[m_sink_fifo_head].seq = static_cast<uint8_t>(pkt->seq - 1);
             m_sink_fifo[m_sink_fifo_head].len = LC3_FRAME_OCTETS;
             m_sink_fifo[m_sink_fifo_head].flags = pkt->packet_flags;
+            m_sink_fifo[m_sink_fifo_head].is_redundant = true;
             memcpy(m_sink_fifo[m_sink_fifo_head].data, pkt->data_t_prev, LC3_FRAME_OCTETS);
             m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
             m_sink_fifo_count++;
-            m_redundancy_recovered_packets++;
         }
         // Push current frame (t0)
         if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
             m_sink_fifo[m_sink_fifo_head].seq = pkt->seq;
             m_sink_fifo[m_sink_fifo_head].len = LC3_FRAME_OCTETS;
             m_sink_fifo[m_sink_fifo_head].flags = pkt->packet_flags;
+            m_sink_fifo[m_sink_fifo_head].is_redundant = false;
             memcpy(m_sink_fifo[m_sink_fifo_head].data, pkt->data_t0, LC3_FRAME_OCTETS);
             m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
             m_sink_fifo_count++;
@@ -895,15 +898,16 @@ void EspNowBroadcastEngine::handleAudioPacket(const vsaf_audio_packet_t* pkt, in
             m_sink_fifo[m_sink_fifo_head].seq = static_cast<uint8_t>(pkt->seq - 1);
             m_sink_fifo[m_sink_fifo_head].len = LC3_FRAME_OCTETS;
             m_sink_fifo[m_sink_fifo_head].flags = pkt->packet_flags;
+            m_sink_fifo[m_sink_fifo_head].is_redundant = true;
             memcpy(m_sink_fifo[m_sink_fifo_head].data, pkt->data_t_prev, LC3_FRAME_OCTETS);
             m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
             m_sink_fifo_count++;
-            m_redundancy_recovered_packets++;
         }
         if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
             m_sink_fifo[m_sink_fifo_head].seq = pkt->seq;
             m_sink_fifo[m_sink_fifo_head].len = LC3_FRAME_OCTETS;
             m_sink_fifo[m_sink_fifo_head].flags = pkt->packet_flags;
+            m_sink_fifo[m_sink_fifo_head].is_redundant = false;
             memcpy(m_sink_fifo[m_sink_fifo_head].data, pkt->data_t0, LC3_FRAME_OCTETS);
             m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
             m_sink_fifo_count++;
@@ -1078,7 +1082,31 @@ void EspNowBroadcastEngine::runAudioDspLoop() {
         memcpy(encoded_channels[3], encoded_channels[5], LC3_FRAME_OCTETS); // Ch 3 Surround Left / Sub -> Sub 8k
         memcpy(encoded_channels[4], encoded_channels[1], LC3_FRAME_OCTETS); // Ch 4 Surround Right -> Right 48k
 
-        // 4. Broadcast 6 Audio Channels over 802.11 ESP-NOW (Rotating sweep)
+        // 4. Prepare Broadcast Packets for all 6 Audio Channels
+        for (size_t ch = 0; ch < MAX_SINK_NODES; ++ch) {
+            bool red_valid = m_prev_encoded_valid[ch];
+            uint32_t ch_sample_rate = (ch == 5 || ch == 3) ? 8000 : m_telemetry.sample_rate;
+            m_last_tx_pkt[ch].type_id = VSAF_TYPE_AUDIO;
+            m_last_tx_pkt[ch].packet_flags = make_packet_flags(ch, ch_sample_rate, m_frame_duration_us, false);
+            m_last_tx_pkt[ch].seq = m_seq;
+            m_last_tx_pkt[ch].t_tx1_us = static_cast<uint32_t>(esp_timer_get_time());
+            memcpy(m_last_tx_pkt[ch].data_t0, encoded_channels[ch], LC3_FRAME_OCTETS);
+
+            if (red_valid) {
+                memcpy(m_last_tx_pkt[ch].data_t_prev, m_prev_encoded_channels[ch], LC3_FRAME_OCTETS);
+            } else {
+                // If previous frame not yet available (first tick), provide current frame as valid fallback
+                memcpy(m_last_tx_pkt[ch].data_t_prev, encoded_channels[ch], LC3_FRAME_OCTETS);
+            }
+        }
+
+        // 4.1 Unconditionally update history buffer for next cycle (t-1) for all channels
+        for (size_t ch = 0; ch < MAX_SINK_NODES; ++ch) {
+            memcpy(m_prev_encoded_channels[ch], encoded_channels[ch], LC3_FRAME_OCTETS);
+            m_prev_encoded_valid[ch] = true;
+        }
+
+        // 4.2 Broadcast 6 Audio Channels over 802.11 ESP-NOW (Rotating sweep)
         int64_t tx_t0 = esp_timer_get_time();
         size_t start_offset = m_seq % MAX_SINK_NODES;
         for (size_t i = 0; i < MAX_SINK_NODES; ++i) {
@@ -1092,19 +1120,8 @@ void EspNowBroadcastEngine::runAudioDspLoop() {
             }
 
             bool request_ack = (i == (MAX_SINK_NODES - 1));
-            bool red_valid = m_prev_encoded_valid[ch];
-            uint32_t ch_sample_rate = (ch == 5 || ch == 3) ? 8000 : m_telemetry.sample_rate;
-            m_last_tx_pkt[ch].type_id = VSAF_TYPE_AUDIO;
-            m_last_tx_pkt[ch].packet_flags = make_packet_flags(ch, ch_sample_rate, m_frame_duration_us, request_ack);
-            m_last_tx_pkt[ch].seq = m_seq;
-            m_last_tx_pkt[ch].t_tx1_us = static_cast<uint32_t>(esp_timer_get_time());
-            memcpy(m_last_tx_pkt[ch].data_t0, encoded_channels[ch], LC3_FRAME_OCTETS);
-
-            if (red_valid) {
-                memcpy(m_last_tx_pkt[ch].data_t_prev, m_prev_encoded_channels[ch], LC3_FRAME_OCTETS);
-            } else {
-                // If previous frame not yet available (first tick), provide current frame as valid fallback
-                memcpy(m_last_tx_pkt[ch].data_t_prev, encoded_channels[ch], LC3_FRAME_OCTETS);
+            if (request_ack) {
+                m_last_tx_pkt[ch].packet_flags |= 0x80; // Request ACK from last sink in sweep
             }
 
             if (s_tx_done_sem) {
@@ -1131,10 +1148,6 @@ void EspNowBroadcastEngine::runAudioDspLoop() {
             } else {
                 m_tx_mac_error_count++;
             }
-
-            // Save to history buffer for next cycle (t-1)
-            memcpy(m_prev_encoded_channels[ch], encoded_channels[ch], LC3_FRAME_OCTETS);
-            m_prev_encoded_valid[ch] = true;
 
             m_peers[ch].packets_sent++;
             m_tx_packets_this_sec++;
@@ -1402,6 +1415,12 @@ void EspNowBroadcastEngine::runSinkLoop() {
                 m_expected_seq = item.seq;
                 gap = 0;
             }
+            if (m_has_expected_seq && gap < 0) {
+                // Stale duplicate frame (slot was already rendered): discard it cleanly
+                m_sink_fifo_tail = (m_sink_fifo_tail + 1) % SINK_FIFO_PACKETS;
+                m_sink_fifo_count--;
+                continue;
+            }
             if (m_has_expected_seq && gap > 0 && gap <= 4) {
                 // Gap in incoming sequence numbers: synthesize 1 PLC frame for missing sequence number
                 is_gap_plc = true;
@@ -1427,6 +1446,26 @@ void EspNowBroadcastEngine::runSinkLoop() {
                 portENTER_CRITICAL(&m_sink_fifo_lock);
                 if (m_sink_fifo_count > 0) {
                     item = m_sink_fifo[m_sink_fifo_tail];
+                    int8_t gap = m_has_expected_seq ? static_cast<int8_t>(static_cast<uint8_t>(item.seq - m_expected_seq)) : 0;
+                    if (m_has_expected_seq && (gap < -4 || gap > 10)) {
+                        m_expected_seq = item.seq;
+                        gap = 0;
+                    }
+                    if (m_has_expected_seq && gap < 0) {
+                        // Stale duplicate: drop and continue waiting
+                        m_sink_fifo_tail = (m_sink_fifo_tail + 1) % SINK_FIFO_PACKETS;
+                        m_sink_fifo_count--;
+                        portEXIT_CRITICAL(&m_sink_fifo_lock);
+                        continue;
+                    }
+                    if (m_has_expected_seq && gap > 0 && gap <= 4) {
+                        // Sequence gap in arriving packet: trigger PLC for missing slot, do NOT pop item
+                        is_gap_plc = true;
+                        has_item = false;
+                        m_expected_seq++;
+                        portEXIT_CRITICAL(&m_sink_fifo_lock);
+                        break;
+                    }
                     m_sink_fifo_tail = (m_sink_fifo_tail + 1) % SINK_FIFO_PACKETS;
                     m_sink_fifo_count--;
                     has_item = true;
@@ -1440,11 +1479,14 @@ void EspNowBroadcastEngine::runSinkLoop() {
         }
 
         if (!has_item && !is_gap_plc) {
-            m_has_expected_seq = false; // Reset sequence expectation on starvation so arriving frames are not blocked
+            if (m_has_expected_seq) {
+                m_expected_seq++; // Advance sequence for this starvation slot rendered via PLC
+            }
             consecutive_underruns++;
-            if (consecutive_underruns >= 10) {
-                // 100 ms of missing audio: transition back to SCANNING and unlock channel
-                ESP_LOGW(TAG, "SINK: 10 consecutive underruns -> unlocking channel and returning to SCANNING");
+            if (consecutive_underruns >= CONFIG_ESPNOW_WATCHDOG_TIMEOUT_FRAMES) {
+                // Extended outage (> 60 ms): pause I2S and transition to SCANNING to re-buffer 50 ms cushion
+                ESP_LOGW(TAG, "SINK: %lu consecutive underruns -> returning to SCANNING to re-buffer cushion",
+                         (unsigned long)consecutive_underruns);
                 if (m_i2s_dac) {
                     m_i2s_dac->stop();
                 }
@@ -1463,6 +1505,9 @@ void EspNowBroadcastEngine::runSinkLoop() {
         int64_t dec_t0 = esp_timer_get_time();
         size_t actual_samples = 0;
         if (has_item) {
+            if (item.is_redundant) {
+                m_redundancy_recovered_packets++;
+            }
             uint32_t sr = (item.flags != 0) ? get_flags_sample_rate(item.flags) : m_telemetry.sample_rate;
             uint32_t dur = (item.flags != 0) ? get_flags_frame_dur_us(item.flags) : m_frame_duration_us;
             m_lc3_codec.decodeFrame(item.data, item.len, pcm_mono, 480, &actual_samples, sr, dur);
