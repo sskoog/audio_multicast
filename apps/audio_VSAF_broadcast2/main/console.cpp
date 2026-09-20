@@ -3,6 +3,7 @@
 #include "vsaf_broadcast_engine.hpp"
 // #include "lc3_benchmark.hpp" (Disabled)
 #include "driver/uart.h"
+#include "driver/usb_serial_jtag.h"
 #include "esp_wifi.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
@@ -74,6 +75,13 @@ void print_console(const char* format, ...) {
         if (uart_is_driver_installed(UART_NUM_0)) {
             uart_write_bytes(UART_NUM_0, s_out_buf, out_len);
         }
+
+#if defined(CONFIG_SOC_USB_SERIAL_JTAG_SUPPORTED)
+        // 3. Hardware USB Serial/JTAG (COM4 on ESP32-S3 SINK, COM23/COM24 on ESP32-C6)
+        if (usb_serial_jtag_is_driver_installed()) {
+            usb_serial_jtag_write_bytes(s_out_buf, out_len, pdMS_TO_TICKS(10));
+        }
+#endif
 
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
         // 3. TinyUSB CDC ACM (COM116 on ESP32-S3 Node 16)
@@ -330,7 +338,8 @@ void handle_ascii_command(const char* raw_line) {
         int ch = 0;
         if ((sscanf(line, "%*s %d", &ch) == 1) && ch >= 1 && ch <= 13 && s_unicast_engine) {
             s_unicast_engine->setWifiChannel(static_cast<uint8_t>(ch));
-            print_console("[OK] Wi-Fi channel set to %d\n", ch);
+            s_unicast_engine->lockChannel(true);
+            print_console("[OK] Wi-Fi channel set and locked to %d\n", ch);
         } else {
             print_console("[USAGE] wifich <1..13>\n");
         }

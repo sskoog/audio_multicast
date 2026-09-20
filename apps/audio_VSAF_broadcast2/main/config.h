@@ -89,12 +89,14 @@ typedef struct {
     int      i2s_bclk_gpio;
     int      i2s_ws_gpio;
     int      i2s_dout_gpio;
+    int      amp_mute_gpio;    // Power-amp Mute / Shutdown / Enable pin (-1 if unused)
     int      status_led_gpio;
     int      status_led_num;
-    int      user_button_gpio; // GP9 (BOOT button)
+    int      user_button_gpio; // GP9 on C6 / GP0 on S3 (BOOT button)
     bool     has_display;
     uint8_t  default_channel;
     int8_t   max98357a_gain_db;
+    bool     is_pcm5102a;
 } system_config_t;
 
 const system_config_t* get_system_config(void);

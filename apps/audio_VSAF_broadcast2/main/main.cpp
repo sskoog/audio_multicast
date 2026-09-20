@@ -22,7 +22,7 @@
 #include "tusb.h"
 #include "soc/rtc_cntl_reg.h"
 #endif
-#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+#if defined(CONFIG_SOC_USB_SERIAL_JTAG_SUPPORTED)
 #include "driver/usb_serial_jtag.h"
 #include "soc/usb_serial_jtag_struct.h"
 #include "hal/usb_serial_jtag_ll.h"
@@ -60,6 +60,7 @@ static constexpr KnownNodeDescriptor KNOWN_NODE_LIBRARY[] = {
     { {0x98, 0xA3, 0x16, 0x9D, 0x57, 0xEC}, 21, 2, "Center",          "ESP32-C6-WROOM-1 DevKit" },
     { {0xE8, 0x3D, 0xC1, 0xFB, 0xDC, 0xC4}, 25, 3, "Surround Left",   "Heemol ESP32-C6 Mini"    },
     { {0x98, 0xA3, 0x16, 0xAC, 0x13, 0x38}, 26, 4, "Surround Right",  "Heemol ESP32-C6 Mini"    },
+    { {0xE8, 0x3D, 0xC1, 0xFB, 0xE8, 0x3C},  4, 4, "Surround Right",  "XIAO ESP32-S3 PCM5102A"  },
     { {0xAC, 0xEB, 0xE6, 0x23, 0xDC, 0x24}, 20, 5, "Subwoofer",       "Waveshare ESP32-C6-LCD"  },
 
     // SOURCE Node (Master Broadcaster)
@@ -150,7 +151,7 @@ static void usb_serial_cli_task(void* pvParameters) {
     is_s3_source = (cfg && cfg->node_role == NODE_ROLE_SOURCE);
 #endif
 
-#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+#if defined(CONFIG_SOC_USB_SERIAL_JTAG_SUPPORTED)
     // On ESP32-S3 SOURCE, TinyUSB owns the USB OTG PHY. Do NOT install USB-Serial-JTAG driver!
     if (!is_s3_source) {
         usb_serial_jtag_driver_config_t jtag_cfg = {
@@ -180,7 +181,7 @@ static void usb_serial_cli_task(void* pvParameters) {
     uint8_t rx_buf[128];
     while (true) {
         int n_read = 0;
-#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+#if defined(CONFIG_SOC_USB_SERIAL_JTAG_SUPPORTED)
         if (!is_s3_source) {
             n_read = usb_serial_jtag_read_bytes(rx_buf, sizeof(rx_buf), pdMS_TO_TICKS(1));
         }
@@ -275,12 +276,13 @@ static void configure_unused_gpios_pulldown(const system_config_t* cfg) {
         // Flash & Octal PSRAM: GPIO 26..37, 47, 48
         // USB Native CDC: GPIO 19, 20
         // UART0 Console: GPIO 43, 44
-        // JTAG: GPIO 39..42
+        // JTAG / Wio-SX1262 LoRa B2B: GPIO 38..42, 7..9
         if (pin >= 26 && pin <= 37) continue;
         if (pin == 47 || pin == 48) continue;
         if (pin == 19 || pin == 20) continue;
         if (pin == 43 || pin == 44) continue;
-        if (pin >= 39 && pin <= 42) continue;
+        if (pin >= 38 && pin <= 42) continue;
+        if (pin >= 7 && pin <= 9) continue;
 
         // Configured active peripherals:
         if (pin == cfg->status_led_gpio) continue;
@@ -288,6 +290,7 @@ static void configure_unused_gpios_pulldown(const system_config_t* cfg) {
         if (pin == cfg->i2s_bclk_gpio) continue;
         if (pin == cfg->i2s_ws_gpio) continue;
         if (pin == cfg->i2s_dout_gpio) continue;
+        if (pin == cfg->amp_mute_gpio) continue;
 
         gpio_config_t io_conf = {};
         io_conf.pin_bit_mask = (1ULL << pin);
@@ -303,8 +306,12 @@ static void configure_unused_gpios_pulldown(const system_config_t* cfg) {
 }
 
 extern "C" void app_main(void) {
+    const system_config_t* cfg = get_system_config();
+
 #if defined(CONFIG_IDF_TARGET_ESP32C6)
-    USB_SERIAL_JTAG.chip_rst.usb_uart_chip_rst_dis = 1;
+    if (cfg->node_role == NODE_ROLE_SINK) {
+        USB_SERIAL_JTAG.chip_rst.usb_uart_chip_rst_dis = 1;
+    }
 #endif
 
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -329,7 +336,6 @@ extern "C" void app_main(void) {
     ESP_LOGI(TAG, "   High-Fidelity LC3 Multi-Speaker Network        ");
     ESP_LOGI(TAG, "==================================================");
 
-    const system_config_t* cfg = get_system_config();
     configure_unused_gpios_pulldown(cfg);
 
     esp_err_t ret = nvs_flash_init();
@@ -356,10 +362,13 @@ extern "C" void app_main(void) {
             cfg->i2s_ws_gpio,
             cfg->i2s_dout_gpio,
             -1,
-            0
+            cfg->is_pcm5102a ? -1 : 0,
+            cfg->amp_mute_gpio
         );
         s_i2s_dac->init(CONFIG_ESPNOW_SAMPLE_RATE_HZ, 10000, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO);
-        s_i2s_dac->setHardwareGain(static_cast<Hardware::Max98357Gain>(cfg->max98357a_gain_db));
+        if (!cfg->is_pcm5102a && cfg->max98357a_gain_db >= 0) {
+            s_i2s_dac->setHardwareGain(static_cast<Hardware::Max98357Gain>(cfg->max98357a_gain_db));
+        }
     }
 
     // 4. Unicast Engine

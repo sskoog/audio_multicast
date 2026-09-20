@@ -36,7 +36,7 @@ if ($Port -eq "") {
 }
 
 if ($Chip -eq "") {
-    if ($Role -eq "SOURCE" -or $targetPort -eq "COM16" -or $targetPort -eq "COM116") {
+    if ($Role -eq "SOURCE" -or $targetPort -eq "COM16" -or $targetPort -eq "COM116" -or $targetPort -eq "COM4" -or $NodeId -eq 4) {
         $Chip = "esp32s3"
     } else {
         $Chip = "esp32c6"
@@ -46,6 +46,8 @@ if ($Chip -eq "") {
 if ($NodeId -eq 0) {
     if ($targetPort -eq "COM16" -or $targetPort -eq "COM116") {
         $NodeId = 16
+    } elseif ($targetPort -eq "COM4") {
+        $NodeId = 4
     } elseif ($targetPort -eq "COM24") {
         $NodeId = 24
     } elseif ($targetPort -eq "COM23") {
@@ -125,12 +127,12 @@ Get-CimInstance Win32_Process -Filter "CommandLine LIKE '%device monitor%' OR Co
 Start-Sleep -Milliseconds 1000
 
 # 4. Flash Firmware
-if ($Chip -eq "esp32s3") {
+if ($Chip -eq "esp32s3" -and ($NodeId -eq 16 -or $targetPort -eq "COM16" -or $targetPort -eq "COM116" -or $targetPort -eq "AUTO")) {
     # Use hands-free RTC Watchdog reset tool for Node 16
     Write-Host "[FLASH] Executing hands-free S3 flash & reset for Node $NodeId on $targetPort..." -ForegroundColor Yellow
     python -u "$toolsDir\s3_flash_and_reset.py" --port $targetPort --baud $Baud --bin-dir "$buildDir"
 } else {
-    # Standard ESP32-C6 flashing
+    # Standard flashing for ESP32-C6 and ESP32-S3 (Node 4 on USB-Serial/JTAG)
     $bootloader = "$buildDir\bootloader\bootloader.bin"
     $partition = "$buildDir\partition_table\partition-table.bin"
     $appBin = "$buildDir\audio_VSAF_broadcast2.bin"

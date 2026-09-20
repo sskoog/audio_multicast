@@ -15,13 +15,15 @@ static IRAM_ATTR bool i2s_dma_tx_done_cb(i2s_chan_handle_t handle, i2s_event_dat
     return high_task_wakeup == pdTRUE;
 }
 
-I2sAudioDriver::I2sAudioDriver(int bclk_pin, int ws_pin, int dout_pin, int din_pin, int gain_pin)
-    : m_bclk_pin(bclk_pin), m_ws_pin(ws_pin), m_dout_pin(dout_pin), m_din_pin(din_pin), m_gain_pin(gain_pin) {
+I2sAudioDriver::I2sAudioDriver(int bclk_pin, int ws_pin, int dout_pin, int din_pin, int gain_pin, int amp_mute_pin)
+    : m_bclk_pin(bclk_pin), m_ws_pin(ws_pin), m_dout_pin(dout_pin), m_din_pin(din_pin), m_gain_pin(gain_pin), m_amp_mute_pin(amp_mute_pin) {
     m_dma_free_sem = xSemaphoreCreateBinary();
+    setAmpMute(true); // Default to muted on startup
     configurePinElectricalProperties();
 }
 
 I2sAudioDriver::~I2sAudioDriver() {
+    setAmpMute(true);
     stop();
     if (m_tx_handle) {
         i2s_del_channel(m_tx_handle);
@@ -104,9 +106,28 @@ void I2sAudioDriver::setHardwareGain(Max98357Gain gain) {
     }
 }
 
+void I2sAudioDriver::setAmpMute(bool mute) {
+    if (m_amp_mute_pin < 0) return;
+
+    gpio_num_t pin = static_cast<gpio_num_t>(m_amp_mute_pin);
+    if (mute) {
+        // Active LOW -> MUTE / Shutdown
+        gpio_set_direction(pin, GPIO_MODE_OUTPUT);
+        gpio_set_level(pin, 0);
+        ESP_LOGI(TAG, "Power Amplifier MUTED (GPIO %d driven LOW)", m_amp_mute_pin);
+    } else {
+        // High-Z / Input Floating -> UNMUTE / RUN (Internal pull-up on TPA3118)
+        gpio_set_direction(pin, GPIO_MODE_INPUT);
+        gpio_set_pull_mode(pin, GPIO_FLOATING);
+        ESP_LOGI(TAG, "Power Amplifier UNMUTED (GPIO %d set to High-Z / Input)", m_amp_mute_pin);
+    }
+}
+
 esp_err_t I2sAudioDriver::init(uint32_t sample_rate, uint32_t frame_duration_us, i2s_data_bit_width_t bits_per_sample, i2s_slot_mode_t slot_mode) {
-    // Configure MAX98357A GAIN pin: Default to 3 dB (Lowest Volume)
-    setHardwareGain(Max98357Gain::GAIN_3DB);
+    setAmpMute(true);
+    if (m_gain_pin >= 0) {
+        setHardwareGain(Max98357Gain::GAIN_3DB);
+    }
     return reconfigureAudioFormat(sample_rate, bits_per_sample, frame_duration_us, slot_mode);
 }
 
@@ -238,12 +259,14 @@ esp_err_t I2sAudioDriver::start() {
     esp_err_t ret = i2s_channel_enable(m_tx_handle);
     if (ret == ESP_OK) {
         m_is_running = true;
+        setAmpMute(false); // Unmute amplifier (High-Z)
         ESP_LOGI(TAG, "I2S Hardware Clock Started (Playing preloaded DMA descriptors).");
     }
     return ret;
 }
 
 esp_err_t I2sAudioDriver::stop() {
+    setAmpMute(true); // Mute amplifier (Drive LOW)
     if (!m_tx_handle || !m_is_running) return ESP_OK;
     esp_err_t ret = i2s_channel_disable(m_tx_handle);
     if (ret == ESP_OK) {

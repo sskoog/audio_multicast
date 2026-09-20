@@ -209,6 +209,7 @@ public:
     esp_err_t setWifiChannel(uint8_t channel);
     uint8_t getWifiChannel() const { return m_wifi_channel; }
     bool isChannelLocked() const { return m_channel_locked.load(std::memory_order_acquire); }
+    void lockChannel(bool locked) { m_channel_locked.store(locked, std::memory_order_release); }
 
     // Multi-Channel Target Selection (SINK node: 0: Left, 1: Right, 5: Subwoofer)
     void setTargetChannel(uint8_t channel_id);

@@ -20,7 +20,7 @@ enum class Max98357Gain {
 
 class I2sAudioDriver {
 public:
-    I2sAudioDriver(int bclk_pin, int ws_pin, int dout_pin, int din_pin = -1, int gain_pin = 0);
+    I2sAudioDriver(int bclk_pin, int ws_pin, int dout_pin, int din_pin = -1, int gain_pin = -1, int amp_mute_pin = -1);
     ~I2sAudioDriver();
 
     esp_err_t init(uint32_t sample_rate = 32000, 
@@ -45,10 +45,13 @@ public:
     i2s_slot_mode_t getSlotMode() const { return m_slot_mode; }
     size_t getBytesPerSample() const { return (m_bits_per_sample == I2S_DATA_BIT_WIDTH_16BIT) ? 2 : 4; }
 
-    // Hardware gain control (3, 6, 9, 12 dB)
+    // Hardware gain control (3, 6, 9, 12 dB for MAX98357A)
     void setHardwareGain(Max98357Gain gain);
     Max98357Gain getHardwareGain() const { return m_current_gain; }
     uint8_t getHardwareGainDb() const { return static_cast<uint8_t>(m_current_gain); }
+
+    // Power amplifier Mute / SD / Enable control (active LOW mute, High-Z unmute)
+    void setAmpMute(bool mute);
 
     // Starts I2S hardware clocks (BCLK & WS) - called after dual descriptors are pre-filled
     esp_err_t start();
@@ -83,6 +86,7 @@ private:
     int m_dout_pin;
     int m_din_pin;
     int m_gain_pin;
+    int m_amp_mute_pin;
     Max98357Gain m_current_gain = Max98357Gain::GAIN_3DB;
 
     i2s_chan_handle_t m_tx_handle = nullptr;

@@ -91,7 +91,7 @@ EspNowBroadcastEngine::EspNowBroadcastEngine(Codec::Lc3CodecEngine& primary_code
       m_is_stereo(true),
       m_tx_phy_mode(WIFI_PHY_MODE_HT20),
       m_tx_phy_rate(WIFI_PHY_RATE_MCS3_LGI),
-      m_peer_count(2),
+      m_peer_count(MAX_SINK_NODES),
       m_seq(0),
       m_octets_per_frame(CONFIG_ESPNOW_FRAME_LEN_OCTETS),
       m_frame_duration_us(10000),
@@ -195,10 +195,15 @@ esp_err_t EspNowBroadcastEngine::init(uint8_t role, uint8_t node_id, uint8_t wif
 
     // 1. Initialize Wi-Fi Station
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    cfg.static_rx_buf_num = 32;
+    cfg.dynamic_rx_buf_num = 64;
+    cfg.static_tx_buf_num = 16;
+    cfg.dynamic_tx_buf_num = 64;
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     ESP_ERROR_CHECK(esp_wifi_set_channel(m_wifi_channel, WIFI_SECOND_CHAN_NONE));
 
     // Standard 2.4 GHz protocols (11b/g/n on S3, 11b/g/n/ax on C6)
@@ -728,6 +733,8 @@ void EspNowBroadcastEngine::onPacketReceived(const uint8_t* mac_addr, const uint
 
         if (type_id == VSAF_TYPE_AUDIO && data_len >= static_cast<int>(sizeof(vsaf_audio_packet_t))) {
             const auto* pkt = reinterpret_cast<const vsaf_audio_packet_t*>(data);
+            m_channel_locked.store(true, std::memory_order_release);
+
             uint8_t rx_id = get_flags_rx_id(pkt->packet_flags);
             // Instant filter: Reject if not for our channel and not wildcard broadcast (7)
             if (rx_id != m_target_channel && rx_id != NODE_ID_BROADCAST) {
