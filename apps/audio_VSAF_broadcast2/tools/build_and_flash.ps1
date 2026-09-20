@@ -16,7 +16,10 @@ param(
     [int]$Baud = 921600,
 
     [Parameter(Mandatory=$false)]
-    [switch]$OnlyFlash
+    [switch]$OnlyFlash,
+
+    [Parameter(Mandatory=$false)]
+    [switch]$OnlyCompile
 )
 
 $ErrorActionPreference = "Stop"
@@ -118,6 +121,11 @@ if (-not $OnlyFlash) {
         Write-Error "Build failed with exit code $LASTEXITCODE"
         exit $LASTEXITCODE
     }
+}
+
+if ($OnlyCompile) {
+    Write-Host "[SUCCESS] Compilation successful for $Role ($Chip)!" -ForegroundColor Green
+    exit 0
 }
 
 # 3. Kill lingering serial monitors

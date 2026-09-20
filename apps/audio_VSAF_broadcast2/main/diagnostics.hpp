@@ -25,6 +25,7 @@ private:
     uint32_t                       m_last_dma_udr = 0;
     uint32_t                       m_last_plc_count = 0;
     uint32_t                       m_last_fifo_udr = 0;
+    uint32_t                       m_last_fifo_ovf = 0;
     int64_t                        m_last_print_time_us = 0;
     int                            m_cpu_pct = 0;
     uint32_t                       m_last_total_runtime = 0;

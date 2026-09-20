@@ -92,13 +92,16 @@ void SystemDiagnostics::tick() {
         uint32_t dma_udr = m_unicast_engine.getDmaUnderrunCount();
         uint32_t plc_count = m_unicast_engine.getPlcCount();
         uint32_t fifo_ud = m_unicast_engine.getFifoUnderrunCount();
+        uint32_t fifo_ovf = m_unicast_engine.getFifoOverflowCount();
 
         uint32_t delta_dma = (dma_udr >= m_last_dma_udr) ? (dma_udr - m_last_dma_udr) : 0;
         uint32_t delta_plc = (plc_count >= m_last_plc_count) ? (plc_count - m_last_plc_count) : 0;
         uint32_t delta_fifo = (fifo_ud >= m_last_fifo_udr) ? (fifo_ud - m_last_fifo_udr) : 0;
+        uint32_t delta_fifo_ovf = (fifo_ovf >= m_last_fifo_ovf) ? (fifo_ovf - m_last_fifo_ovf) : 0;
         m_last_dma_udr = dma_udr;
         m_last_plc_count = plc_count;
         m_last_fifo_udr = fifo_ud;
+        m_last_fifo_ovf = fifo_ovf;
 
         bool is_audio_active = (m_unicast_engine.getState() == AudioNet::NetworkState::STREAM ||
                                 m_unicast_engine.getState() == AudioNet::NetworkState::CAST ||
@@ -125,7 +128,7 @@ void SystemDiagnostics::tick() {
 
         if (cfg->node_role == NODE_ROLE_SINK &&
             m_unicast_engine.getState() == AudioNet::NetworkState::STREAM &&
-            (delta_dma > 0 || delta_plc > 0 || delta_fifo > 0)) {
+            (delta_dma > 0 || delta_plc > 0 || delta_fifo > 0 || delta_fifo_ovf > 0)) {
             m_status_led.triggerUnderrunFlash(200);
         }
 
@@ -318,12 +321,15 @@ void SystemDiagnostics::tick() {
             char red_str[8];
             snprintf(red_str, sizeof(red_str), "%3lu", (unsigned long)red_rec);
 
+            char fifo_ovf_str[8];
+            snprintf(fifo_ovf_str, sizeof(fifo_ovf_str), "%3lu", (unsigned long)fifo_ovf);
+
             char fifo_udr_str[8];
             snprintf(fifo_udr_str, sizeof(fifo_udr_str), "%3lu", (unsigned long)fifo_ud);
 
             snprintf(mid_block, sizeof(mid_block),
-                     " %3.3s %3.3s  %4.4s  %3.3s  %3.3s  %3.3s   %3.3s    ",
-                     gain_sw_str, gain_hw_str, pkts_str, red_str, plc_str, dma_udr_str, fifo_udr_str);
+                     " %3.3s %3.3s  %4.4s  %3.3s %3.3s %3.3s %3.3s %3.3s  ",
+                     gain_sw_str, gain_hw_str, pkts_str, red_str, plc_str, dma_udr_str, fifo_ovf_str, fifo_udr_str);
         }
 
         uint32_t t_local = static_cast<uint32_t>((esp_timer_get_time() / 1000ULL) % 1000000ULL);
@@ -436,8 +442,8 @@ void SystemDiagnostics::tick() {
                 print_console("|    CPU      | STATE | NODES  |    WIFI     |  AUDIO dBFS  |     STAGE TIMINGS (ms)       |  SOURCE      PKTS  ACK%%  FAIL   TOT  |             ROUND-TRIP NET (us)        |\n");
                 print_console("|  %%   C  MHz |       | 012345 | GAIN Ch PHY |   RMS    Pk  |  DSP   Enc1  Enc2  Enc3   TX  |  INPUT        1/s     %%   1/s  pkts   |              L_Net       R_Net         |\n");
             } else {
-                print_console("|    CPU      | STATE |  CHAN  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | AMP dB   PKTS  RED  PLC  DMA   FIFO    |         TIME & SYNCHRONIZATION (ms)    |\n");
-                print_console("|  %%   C  MHz |       |        | RSSI Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  SW  HW   1/s  rec  tot  UDR   UDR     |  Local  Master  EMA_offs RB_med RB_rng |\n");
+                print_console("|    CPU      | STATE |  CHAN  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | AMP dB   PKTS  RED PLC DMA OVF UDR   |         TIME & SYNCHRONIZATION (ms)    |\n");
+                print_console("|  %%   C  MHz |       |        | RSSI Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  SW  HW   1/s  rec tot UDR ovf udr   |  Local  Master  EMA_offs RB_med RB_rng |\n");
             }
         }
         print_console("%s\n", row_buf);
