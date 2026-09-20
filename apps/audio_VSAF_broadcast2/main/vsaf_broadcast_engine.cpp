@@ -1376,9 +1376,9 @@ void EspNowBroadcastEngine::runSinkLoop() {
         // -------------------------------------------------------------------
         // 3. STREAM: Hardware DMA Paced Audio Decode
         // -------------------------------------------------------------------
-        // Buffer regulation: if buffer backlog exceeds target (e.g. > 14 frames), drop oldest frame cleanly
+        // Buffer regulation: if buffer backlog exceeds target (e.g. > 18 frames = 180 ms), drop oldest frame cleanly
         portENTER_CRITICAL(&m_sink_fifo_lock);
-        while (m_sink_fifo_count > 14) {
+        while (m_sink_fifo_count > 18) {
             m_sink_fifo_tail = (m_sink_fifo_tail + 1) % SINK_FIFO_PACKETS;
             m_sink_fifo_count--;
             m_fifo_overflows++;
@@ -1433,6 +1433,14 @@ void EspNowBroadcastEngine::runSinkLoop() {
                 portENTER_CRITICAL(&m_sink_fifo_lock);
                 if (m_sink_fifo_count > 0) {
                     item = m_sink_fifo[m_sink_fifo_tail];
+                    int8_t gap = m_has_expected_seq ? static_cast<int8_t>(static_cast<uint8_t>(item.seq - m_expected_seq)) : 0;
+                    if (m_has_expected_seq && gap < 0) {
+                        // Stale frame that arrived late after starvation: drop it
+                        m_sink_fifo_tail = (m_sink_fifo_tail + 1) % SINK_FIFO_PACKETS;
+                        m_sink_fifo_count--;
+                        portEXIT_CRITICAL(&m_sink_fifo_lock);
+                        continue;
+                    }
                     m_sink_fifo_tail = (m_sink_fifo_tail + 1) % SINK_FIFO_PACKETS;
                     m_sink_fifo_count--;
                     has_item = true;
@@ -1446,7 +1454,9 @@ void EspNowBroadcastEngine::runSinkLoop() {
         }
 
         if (!has_item && !is_gap_plc) {
-            m_has_expected_seq = false; // Re-sync sequence counter when genuinely starved
+            if (m_has_expected_seq) {
+                m_expected_seq++; // Advance sequence to account for this starvation frame rendered via PLC
+            }
             consecutive_underruns++;
             if (consecutive_underruns >= 10) {
                 // 100 ms of missing audio: transition back to SCANNING and unlock channel
