@@ -67,6 +67,8 @@ public:
     esp_err_t encodeFrame(const int16_t* pcm_in, size_t pcm_samples, uint8_t* out_lc3_buf, size_t max_out_bytes, size_t* actual_out_bytes, uint8_t channel_idx = 0, int stride = 1);
     esp_err_t decodeFrame(const uint8_t* in_lc3_buf, size_t in_bytes, int16_t* pcm_out, size_t max_pcm_samples,
                           size_t* actual_pcm_samples, uint32_t stream_sample_rate = 0, uint32_t stream_duration_us = 0);
+    esp_err_t decodeFrame(const uint8_t* in_lc3_buf, size_t in_bytes, int32_t* pcm_out, size_t max_pcm_samples,
+                          size_t* actual_pcm_samples, uint32_t stream_sample_rate = 0, uint32_t stream_duration_us = 0);
 
     uint32_t getSampleRate() const { return m_sample_rate; }
     uint32_t getFrameDurationUs() const { return m_frame_duration_us; }
@@ -83,6 +85,8 @@ private:
     void* m_dec_handle = nullptr;
     void* m_google_encoder[3] = {nullptr, nullptr, nullptr};
     void* m_google_enc_mem[3] = {nullptr, nullptr, nullptr};
+    void* m_google_decoder = nullptr;
+    void* m_google_dec_mem = nullptr;
     uint32_t m_sample_rate = AUDIO_SAMPLE_RATE_HZ;
     uint8_t  m_channels = AUDIO_CHANNELS_NUM;
     uint32_t m_frame_duration_us = AUDIO_FRAME_DURATION_US;

@@ -19,6 +19,11 @@ Lc3CodecEngine::~Lc3CodecEngine() {
         }
         m_google_encoder[i] = nullptr;
     }
+    if (m_google_dec_mem) {
+        free(m_google_dec_mem);
+        m_google_dec_mem = nullptr;
+    }
+    m_google_decoder = nullptr;
 #endif
     if (m_enc_handle) {
         esp_lc3_enc_close(m_enc_handle);
@@ -106,6 +111,39 @@ esp_err_t Lc3CodecEngine::initEncoder(uint32_t sample_rate_hz, uint8_t channels,
 }
 
 esp_err_t Lc3CodecEngine::initDecoder(uint32_t sample_rate_hz, uint8_t channels, uint32_t frame_duration_us, uint16_t octets_per_frame) {
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+    if (m_google_dec_mem) {
+        free(m_google_dec_mem);
+        m_google_dec_mem = nullptr;
+    }
+    m_google_decoder = nullptr;
+    m_decoder_ready = false;
+
+    m_sample_rate = sample_rate_hz;
+    m_channels = channels;
+    m_frame_duration_us = (frame_duration_us == 7500) ? 7500 : 10000;
+    m_octets_per_frame = octets_per_frame;
+
+    unsigned mem_size = lc3_decoder_size(m_frame_duration_us, m_sample_rate);
+    m_google_dec_mem = malloc(mem_size);
+    if (!m_google_dec_mem) {
+        ESP_LOGE(TAG, "Failed to allocate %u bytes for Google liblc3 decoder", mem_size);
+        return ESP_ERR_NO_MEM;
+    }
+
+    m_google_decoder = lc3_setup_decoder(m_frame_duration_us, m_sample_rate, 0, m_google_dec_mem);
+    if (!m_google_decoder) {
+        ESP_LOGE(TAG, "Failed to setup Google liblc3 decoder (%lu Hz, %.1f ms)", (unsigned long)m_sample_rate, m_frame_duration_us / 1000.0f);
+        free(m_google_dec_mem);
+        m_google_dec_mem = nullptr;
+        return ESP_FAIL;
+    }
+
+    m_decoder_ready = true;
+    ESP_LOGI(TAG, "Google liblc3 (Hardware FPU, IRAM) Decoder Initialized: %lu Hz, %u-ch, %.1f ms, %u octets/frame (24-bit native)",
+             (unsigned long)m_sample_rate, m_channels, m_frame_duration_us / 1000.0f, m_octets_per_frame);
+    return ESP_OK;
+#else
     if (m_dec_handle) {
         esp_lc3_dec_close(m_dec_handle);
         m_dec_handle = nullptr;
@@ -137,6 +175,7 @@ esp_err_t Lc3CodecEngine::initDecoder(uint32_t sample_rate_hz, uint8_t channels,
     ESP_LOGD(TAG, "Espressif Fixed-Point LC3 Decoder Initialized: %lu Hz, %u-ch, %.1f ms duration, %u octets/frame",
              (unsigned long)m_sample_rate, m_channels, m_frame_duration_us / 1000.0f, m_octets_per_frame);
     return ESP_OK;
+#endif
 }
 
 esp_err_t Lc3CodecEngine::reconfigureEncoder(uint32_t sample_rate_hz, uint16_t octets_per_frame, uint32_t frame_duration_us) {
@@ -240,6 +279,35 @@ esp_err_t Lc3CodecEngine::decodeFrame(const uint8_t* in_lc3_buf, size_t in_bytes
                  (unsigned long)target_rate, target_dur / 1000.0f, target_octets);
         initDecoder(target_rate, m_channels, target_dur, target_octets);
     }
+
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+    if (!m_decoder_ready || !m_google_decoder) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    size_t required_samples = calculateRequiredPcmSamples(m_sample_rate, m_frame_duration_us);
+    if (max_pcm_samples < required_samples) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    bool is_plc = (in_lc3_buf == nullptr || in_bytes == 0);
+    if (is_plc) {
+        incrementPlcCount();
+    }
+
+    int ret = lc3_decode(static_cast<lc3_decoder_t>(m_google_decoder),
+                         in_lc3_buf, (is_plc ? 0 : static_cast<int>(in_bytes)),
+                         LC3_PCM_FORMAT_S16, pcm_out, 1);
+    if (ret == 1 && !is_plc) {
+        incrementPlcCount();
+    } else if (ret < 0) {
+        if (!is_plc) incrementPlcCount();
+        lc3_decode(static_cast<lc3_decoder_t>(m_google_decoder), nullptr, 0, LC3_PCM_FORMAT_S16, pcm_out, 1);
+    }
+
+    *actual_pcm_samples = required_samples;
+    return ESP_OK;
+#else
     if (!m_decoder_ready || !m_dec_handle) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -285,6 +353,65 @@ esp_err_t Lc3CodecEngine::decodeFrame(const uint8_t* in_lc3_buf, size_t in_bytes
         *actual_pcm_samples = required_samples;
     }
     return ESP_OK;
+#endif
+}
+
+esp_err_t Lc3CodecEngine::decodeFrame(const uint8_t* in_lc3_buf, size_t in_bytes, int32_t* pcm_out, size_t max_pcm_samples,
+                                      size_t* actual_pcm_samples, uint32_t stream_sample_rate, uint32_t stream_duration_us) {
+    if (!pcm_out || !actual_pcm_samples) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    uint32_t target_rate = (stream_sample_rate > 0) ? stream_sample_rate : m_sample_rate;
+    uint32_t target_dur = (stream_duration_us > 0) ? stream_duration_us : m_frame_duration_us;
+    uint16_t target_octets = (in_bytes >= 20 && in_bytes <= 120) ? static_cast<uint16_t>(in_bytes) : m_octets_per_frame;
+
+    /* Dynamically adapt decoder if stream sample rate, duration, or octets per frame change on-the-fly */
+    if (target_rate != m_sample_rate || target_dur != m_frame_duration_us || target_octets != m_octets_per_frame || !m_decoder_ready) {
+        ESP_LOGI(TAG, "Dynamic decoder adaptation: %lu Hz (%.1f ms, %u oct) -> %lu Hz (%.1f ms, %u oct)",
+                 (unsigned long)m_sample_rate, m_frame_duration_us / 1000.0f, m_octets_per_frame,
+                 (unsigned long)target_rate, target_dur / 1000.0f, target_octets);
+        initDecoder(target_rate, m_channels, target_dur, target_octets);
+    }
+
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+    if (!m_decoder_ready || !m_google_decoder) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    size_t required_samples = calculateRequiredPcmSamples(m_sample_rate, m_frame_duration_us);
+    if (max_pcm_samples < required_samples) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    bool is_plc = (in_lc3_buf == nullptr || in_bytes == 0);
+    if (is_plc) {
+        incrementPlcCount();
+    }
+
+    int ret = lc3_decode(static_cast<lc3_decoder_t>(m_google_decoder),
+                         in_lc3_buf, (is_plc ? 0 : static_cast<int>(in_bytes)),
+                         LC3_PCM_FORMAT_S24, pcm_out, 1);
+    if (ret == 1 && !is_plc) {
+        incrementPlcCount();
+    } else if (ret < 0) {
+        if (!is_plc) incrementPlcCount();
+        lc3_decode(static_cast<lc3_decoder_t>(m_google_decoder), nullptr, 0, LC3_PCM_FORMAT_S24, pcm_out, 1);
+    }
+
+    *actual_pcm_samples = required_samples;
+    return ESP_OK;
+#else
+    static int16_t tmp_16[480];
+    esp_err_t err = decodeFrame(in_lc3_buf, in_bytes, tmp_16, 480, actual_pcm_samples, stream_sample_rate, stream_duration_us);
+    if (err == ESP_OK) {
+        for (size_t i = 0; i < *actual_pcm_samples; ++i) {
+            pcm_out[i] = static_cast<int32_t>(tmp_16[i]) << 8;
+        }
+    }
+    return err;
+#endif
 }
 
 } // namespace Codec
+

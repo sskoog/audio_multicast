@@ -169,6 +169,7 @@ void handle_ascii_command(const char* raw_line) {
                       "  scan [auto] / survey       - Passive 802.11 sniffer survey ch 1..13\n"
                       "  wifich <1..13>             - Set Wi-Fi channel manually\n"
                       "  phy <rate>                 - Switch PHY rate (primary/ht3, etc.)\n"
+                      "  txpower <2..20|max>        - Set Wi-Fi max TX power (dBm)\n"
                       "  start / play / cast        - Transition SOURCE to CAST / SINK to SCAN\n"
                       "  stop / pause               - Stop transmission / receiver (IDLE)\n");
         vTaskDelay(pdMS_TO_TICKS(5));
@@ -183,6 +184,7 @@ void handle_ascii_command(const char* raw_line) {
         print_console("--- VOLUME & SYSTEM CONTROL ---\n"
                       "  vol <0..100> / voldb <-96..0> - Set volume (%% or dB)\n"
                       "  volu8 <0..255> / volch <c> <v> - Set raw uint8 volume\n"
+                      "  postgain <-48..12>         - Set SINK software post-gain (dB)\n"
                       "  mute / unmute              - Mute / Unmute audio (slew-limited)\n"
                       "  gain <0|3|6|9|12|15>       - Set I2S DAC hardware gain (dB)\n"
                       "  clear / cls                - Reset / clear error counters\n"
@@ -342,6 +344,32 @@ void handle_ascii_command(const char* raw_line) {
             print_console("[OK] Wi-Fi channel set and locked to %d\n", ch);
         } else {
             print_console("[USAGE] wifich <1..13>\n");
+        }
+    } else if (strncasecmp(line, "txp ", 4) == 0 || strncasecmp(line, "txpower ", 8) == 0) {
+        float dbm = 0.0f;
+        const char* val_str = (strncasecmp(line, "txpower ", 8) == 0) ? line + 8 : line + 4;
+        while (*val_str == ' ') val_str++;
+        if (strcasecmp(val_str, "max") == 0) {
+            dbm = 20.0f;
+        } else {
+            dbm = atof(val_str);
+        }
+        if (dbm < 2.0f) dbm = 2.0f;
+        if (dbm > 20.0f) dbm = 20.0f;
+        int8_t pwr_unit = static_cast<int8_t>(std::round(dbm * 4.0f)); // 0.25 dBm units
+        if (pwr_unit < 8) pwr_unit = 8;
+        if (pwr_unit > 84) pwr_unit = 84;
+        if (s_unicast_engine) {
+            s_unicast_engine->setWifiTxPower(pwr_unit);
+            print_console("[OK] Wi-Fi Max TX Power set to %+4.2f dBm (%d / 0.25 dBm)\n", pwr_unit * 0.25f, pwr_unit);
+        }
+    } else if (strncasecmp(line, "postgain ", 9) == 0) {
+        float db = atof(line + 9);
+        if (db < -48.0f) db = -48.0f;
+        if (db > 12.0f) db = 12.0f;
+        if (s_unicast_engine) {
+            s_unicast_engine->setPostGainDb(db);
+            print_console("[OK] Software post-gain set to %+5.1f dB\n", db);
         }
     } else if (strncasecmp(line, "ch ", 3) == 0) {
         int ch = atoi(line + 3);

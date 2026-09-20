@@ -342,7 +342,8 @@ extern "C" void app_main(void) {
             cfg->is_pcm5102a ? -1 : 0,
             cfg->amp_mute_gpio
         );
-        s_i2s_dac->init(CONFIG_ESPNOW_SAMPLE_RATE_HZ, 10000, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO);
+        i2s_data_bit_width_t bit_width = cfg->is_pcm5102a ? I2S_DATA_BIT_WIDTH_24BIT : I2S_DATA_BIT_WIDTH_16BIT;
+        s_i2s_dac->init(CONFIG_ESPNOW_SAMPLE_RATE_HZ, 10000, bit_width, I2S_SLOT_MODE_STEREO);
         if (!cfg->is_pcm5102a && cfg->max98357a_gain_db >= 0) {
             s_i2s_dac->setHardwareGain(static_cast<Hardware::Max98357Gain>(cfg->max98357a_gain_db));
         }
@@ -367,6 +368,16 @@ extern "C" void app_main(void) {
             s_unicast_engine->setTargetChannel(cfg->default_channel); // Fallback to config's default audio channel
             ESP_LOGW(TAG, "Unrecognized SINK MAC %02X:%02X:%02X:%02X:%02X:%02X! Defaulting to Channel %d",
                      base_mac[0], base_mac[1], base_mac[2], base_mac[3], base_mac[4], base_mac[5], cfg->default_channel);
+        }
+
+        // Apply -12.0 dB software post-gain attenuation and 24-bit depth for all nodes with PCM5102A DAC
+        if (cfg->is_pcm5102a) {
+            s_unicast_engine->setPostGainDb(-12.0f);
+            s_unicast_engine->setBitDepth(24);
+            ESP_LOGI(TAG, "PCM5102A DAC detected: configured software post-gain attenuation of -12.0 dB and 24-bit depth");
+        } else {
+            s_unicast_engine->setPostGainDb(0.0f);
+            s_unicast_engine->setBitDepth(16);
         }
     } else if (cfg->node_role == NODE_ROLE_SOURCE) {
         // Initialize USB Audio + CDC for SOURCE

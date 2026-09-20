@@ -126,6 +126,41 @@ public:
         m_total_frames.fetch_add(1, std::memory_order_relaxed);
     }
 
+    /**
+     * @brief Computes Peak and RMS for 24-bit PCM samples (stored in int32_t) mapped to standard 16-bit reference.
+     * @param pcm Array of signed 24-bit PCM samples in int32_t container [-8388608, 8388607].
+     * @param num_samples Number of samples in the frame.
+     */
+    inline void pushFramePcm(const int32_t* pcm, size_t num_samples, int stride = 1) {
+        if (__builtin_expect(pcm == nullptr || num_samples == 0, 0)) {
+            pushSilence();
+            return;
+        }
+
+        int32_t min_s = pcm[0];
+        int32_t max_s = pcm[0];
+        int64_t sum_sq = 0;
+
+        for (size_t i = 0; i < num_samples; ++i) {
+            int32_t s24 = pcm[i * stride];
+            if (s24 < min_s) min_s = s24;
+            if (s24 > max_s) max_s = s24;
+            int32_t s16 = s24 >> 8; // Scale 24-bit down to 16-bit reference
+            sum_sq += static_cast<int64_t>(s16) * static_cast<int64_t>(s16);
+        }
+
+        int32_t pk2pk = (max_s - min_s) >> 8;
+        int16_t frame_peak = static_cast<int16_t>(pk2pk / 2);
+        if (frame_peak < 0) frame_peak = 32767;
+
+        uint32_t mean_sq = static_cast<uint32_t>(sum_sq / num_samples);
+        int16_t frame_rms = static_cast<int16_t>(isqrt32(mean_sq));
+
+        m_peak_ring_buf.push(frame_peak);
+        m_rms_ring_buf.push(frame_rms);
+        m_total_frames.fetch_add(1, std::memory_order_relaxed);
+    }
+
     inline void pushPeak(int16_t peak) {
         m_peak_ring_buf.push(peak);
     }

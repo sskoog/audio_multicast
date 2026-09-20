@@ -98,6 +98,7 @@ EspNowBroadcastEngine::EspNowBroadcastEngine(Codec::Lc3CodecEngine& primary_code
       m_target_volume_u8(255),
       m_target_gain_db(0.0f),
       m_current_gain_db(0.0f),
+      m_post_gain_db(0.0f),
       m_instant_vol_update(false),
       m_audio_dsp_task_handle(nullptr),
       m_source_tx_task_handle(nullptr),
@@ -203,7 +204,7 @@ esp_err_t EspNowBroadcastEngine::init(uint8_t role, uint8_t node_id, uint8_t wif
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
-    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_MIN_MODEM));
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     ESP_ERROR_CHECK(esp_wifi_set_channel(m_wifi_channel, WIFI_SECOND_CHAN_NONE));
 
     // Standard 2.4 GHz protocols (11b/g/n on S3, 11b/g/n/ax on C6)
@@ -213,7 +214,7 @@ esp_err_t EspNowBroadcastEngine::init(uint8_t role, uint8_t node_id, uint8_t wif
     ESP_ERROR_CHECK(esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N));
 #endif
 
-    esp_wifi_set_max_tx_power(12); // +3.00 dBm (12 * 0.25 dBm)
+    ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(12)); // +3.00 dBm (12 * 0.25 dBm)
 
     // 2. Wi-Fi RF Sniffer Scan on SOURCE Node (Auto-select cleanest channel at bootup)
     if (m_node_role == NODE_ROLE_SOURCE) {
@@ -225,10 +226,10 @@ esp_err_t EspNowBroadcastEngine::init(uint8_t role, uint8_t node_id, uint8_t wif
     ESP_ERROR_CHECK(esp_now_register_send_cb(onEspNowSendCb));
     ESP_ERROR_CHECK(esp_now_register_recv_cb(onEspNowRecvCb));
 
-    // 4. Register Single Broadcast Peer (FF:FF:FF:FF:FF:FF) with Primary Default PHY (HT20 MCS3: 16QAM 1/2)
+    // 4. Register Single Broadcast Peer (FF:FF:FF:FF:FF:FF) with Primary Default PHY
     esp_now_peer_info_t peer_info = {};
     memcpy(peer_info.peer_addr, s_broadcast_mac, 6);
-    peer_info.channel = m_wifi_channel;
+    peer_info.channel = 0; // 0 = follow current STA interface channel
     peer_info.ifidx = WIFI_IF_STA;
     peer_info.encrypt = false;
 
@@ -238,7 +239,11 @@ esp_err_t EspNowBroadcastEngine::init(uint8_t role, uint8_t node_id, uint8_t wif
         return ret;
     }
 
-    setWifiPhyProfile(WifiPhyProfile::PRIMARY_HT20_MCS3);
+    if (m_node_role == NODE_ROLE_SOURCE) {
+        setWifiPhyProfile(WifiPhyProfile::PRIMARY_HT20_MCS3);
+    } else {
+        setWifiPhyProfile(WifiPhyProfile::TERTIARY_HT20_MCS0); // Robust MCS0 for SINK Soft-ACK telemetry replies
+    }
 
     // 5. Initialize Codec (SOURCE: 3 encoders - Left 48k, Right 48k, Sub 8k)
     if (m_node_role == NODE_ROLE_SOURCE) {
@@ -337,11 +342,12 @@ void EspNowBroadcastEngine::transitionTo(NetworkState new_state) {
     m_state.store(new_state, std::memory_order_release);
 
     // Dynamic Wi-Fi Power Save Management:
-    // - IDLE, SCANNING, OFF: WIFI_PS_MIN_MODEM (default modem sleep when inactive or searching)
-    // - PREFILL, STREAM, CAST: WIFI_PS_NONE (continuous full-power radio during active prefill/streaming/broadcasting)
-    if (new_state == NetworkState::IDLE || new_state == NetworkState::SCANNING || new_state == NetworkState::OFF) {
+    // - IDLE, OFF: WIFI_PS_MIN_MODEM (default modem sleep when inactive or paused)
+    // - SCANNING, PREFILL, STREAM, CAST: WIFI_PS_NONE (continuous full-power radio for scanning packet discovery and streaming)
+    if (new_state == NetworkState::IDLE || new_state == NetworkState::OFF) {
         esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
-    } else if (new_state == NetworkState::PREFILL || new_state == NetworkState::STREAM || new_state == NetworkState::CAST) {
+    } else if (new_state == NetworkState::SCANNING || new_state == NetworkState::PREFILL ||
+               new_state == NetworkState::STREAM || new_state == NetworkState::CAST) {
         esp_wifi_set_ps(WIFI_PS_NONE);
     }
 
@@ -549,26 +555,21 @@ esp_err_t EspNowBroadcastEngine::setWifiChannel(uint8_t channel) {
         ESP_LOGE(TAG, "esp_wifi_set_channel(%d) failed: %s", channel, esp_err_to_name(err));
         return err;
     }
-
-    // Refresh broadcast peer channel binding
-    esp_now_del_peer(s_broadcast_mac);
-    esp_now_peer_info_t peer_info = {};
-    memcpy(peer_info.peer_addr, s_broadcast_mac, 6);
-    peer_info.channel = channel;
-    peer_info.ifidx = WIFI_IF_STA;
-    peer_info.encrypt = false;
-    esp_now_add_peer(&peer_info);
-
-    // Re-apply rate configuration to refreshed peer
-    esp_now_rate_config_t rate_cfg = {
-        .phymode = m_tx_phy_mode,
-        .rate = m_tx_phy_rate,
-        .ersu = false,
-        .dcm = false
-    };
-    esp_now_set_peer_rate_config(s_broadcast_mac, &rate_cfg);
-
     return ESP_OK;
+}
+
+esp_err_t EspNowBroadcastEngine::setWifiTxPower(int8_t power_0_25dbm) {
+    if (power_0_25dbm < 8) power_0_25dbm = 8;
+    if (power_0_25dbm > 84) power_0_25dbm = 84;
+    return esp_wifi_set_max_tx_power(power_0_25dbm);
+}
+
+int8_t EspNowBroadcastEngine::getWifiTxPower() const {
+    int8_t pwr = 0;
+    if (esp_wifi_get_max_tx_power(&pwr) == ESP_OK) {
+        return pwr;
+    }
+    return 78;
 }
 
 uint8_t EspNowBroadcastEngine::scanAndSelectBestChannel(uint32_t dwell_ms_per_ch, bool auto_apply, bool print_results) {
@@ -737,6 +738,7 @@ void EspNowBroadcastEngine::onPacketSent(const uint8_t* mac_addr, esp_now_send_s
 
 void EspNowBroadcastEngine::onPacketReceived(const uint8_t* mac_addr, const uint8_t* data, int data_len, int8_t rssi, uint8_t rate) {
     if (!data || data_len < 2) return;
+    m_raw_espnow_rx_count++;
     int64_t t_now_us = esp_timer_get_time();
 
     uint16_t type_id = *reinterpret_cast<const uint16_t*>(data);
@@ -751,9 +753,12 @@ void EspNowBroadcastEngine::onPacketReceived(const uint8_t* mac_addr, const uint
 
         if (type_id == VSAF_TYPE_AUDIO && data_len >= static_cast<int>(sizeof(vsaf_audio_packet_t))) {
             const auto* pkt = reinterpret_cast<const vsaf_audio_packet_t*>(data);
+            m_raw_audio_pkt_count++;
             m_channel_locked.store(true, std::memory_order_release);
+            m_last_rx_audio_pkt_us.store(t_now_us, std::memory_order_release);
 
             uint8_t rx_id = get_flags_rx_id(pkt->packet_flags);
+            m_last_seen_rx_id.store(rx_id, std::memory_order_relaxed);
             // Instant filter: Reject if not for our channel and not wildcard broadcast (7)
             if (rx_id != m_target_channel && rx_id != NODE_ID_BROADCAST) {
                 return;
@@ -1280,11 +1285,18 @@ void EspNowBroadcastEngine::sinkTaskTrampoline(void* arg) {
 void EspNowBroadcastEngine::runSinkLoop() {
     ESP_LOGI(TAG, "SINK Audio Decoder & I2S Task started on Core 0");
 
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+    static int32_t pcm_mono[480];
+    static int32_t pcm_stereo[480 * 2];
+    constexpr size_t SAMPLE_SIZE = sizeof(int32_t);
+#else
     static int16_t pcm_mono[480];
     static int16_t pcm_stereo[480 * 2];
+    constexpr size_t SAMPLE_SIZE = sizeof(int16_t);
+#endif
     size_t samples_per_frame = (m_telemetry.sample_rate * 10) / 1000;
     uint32_t consecutive_underruns = 0;
-    static constexpr size_t PREFILL_THRESHOLD = 8; // 8 packets = 80 ms cushion
+    static constexpr size_t PREFILL_THRESHOLD = CONFIG_ESPNOW_PREFILL_THRESHOLD_FRAMES; // 2 packets = 20 ms cushion
     int64_t last_hop_time_us = esp_timer_get_time();
 
     while (m_running.load(std::memory_order_acquire)) {
@@ -1334,6 +1346,11 @@ void EspNowBroadcastEngine::runSinkLoop() {
                          buffered, m_wifi_channel);
                 transitionTo(NetworkState::PREFILL);
             } else {
+                int64_t now_us = esp_timer_get_time();
+                if (now_us - m_last_rx_audio_pkt_us.load(std::memory_order_acquire) >= 500000) {
+                    m_channel_locked.store(false, std::memory_order_release);
+                    last_hop_time_us = now_us;
+                }
                 ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
                 continue;
             }
@@ -1366,22 +1383,37 @@ void EspNowBroadcastEngine::runSinkLoop() {
                 m_lc3_codec.decodeFrame(item1.data, item1.len, pcm_mono, 480, &actual_samples, sr1, dur1);
                 if (actual_samples == 80 && samples_per_frame == 480) {
                     for (int i = 79; i >= 0; --i) {
-                        int16_t s = pcm_mono[i];
+                        auto s = pcm_mono[i];
                         for (int k = 0; k < 6; ++k) {
                             pcm_mono[i * 6 + k] = s;
                         }
                     }
                     actual_samples = 480;
                 }
-                float gain = std::pow(10.0f, m_current_gain_db / 20.0f);
+                float total_gain_db = m_current_gain_db + m_post_gain_db;
+                float gain = (m_current_gain_db <= -90.0f) ? 0.0f : std::pow(10.0f, total_gain_db / 20.0f);
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
                 for (size_t i = 0; i < samples_per_frame; ++i) {
-                    int16_t sample = static_cast<int16_t>(pcm_mono[i] * gain);
+                    int64_t val = static_cast<int64_t>(pcm_mono[i] * gain);
+                    if (val > 8388607) val = 8388607;
+                    if (val < -8388608) val = -8388608;
+                    int32_t sample = static_cast<int32_t>(val << 8) & 0xffffff00;
                     pcm_stereo[i * 2]     = sample;
                     pcm_stereo[i * 2 + 1] = sample;
                 }
+#else
+                for (size_t i = 0; i < samples_per_frame; ++i) {
+                    int32_t val = static_cast<int32_t>(pcm_mono[i] * gain);
+                    if (val > 32767) val = 32767;
+                    if (val < -32768) val = -32768;
+                    int16_t sample = static_cast<int16_t>(val);
+                    pcm_stereo[i * 2]     = sample;
+                    pcm_stereo[i * 2 + 1] = sample;
+                }
+#endif
                 if (m_i2s_dac) {
                     size_t bytes_written = 0;
-                    m_i2s_dac->preload(pcm_stereo, samples_per_frame * sizeof(int16_t) * 2, &bytes_written);
+                    m_i2s_dac->preload(pcm_stereo, samples_per_frame * SAMPLE_SIZE * 2, &bytes_written);
                 }
             }
 
@@ -1404,22 +1436,37 @@ void EspNowBroadcastEngine::runSinkLoop() {
                 m_lc3_codec.decodeFrame(item2.data, item2.len, pcm_mono, 480, &actual_samples, sr2, dur2);
                 if (actual_samples == 80 && samples_per_frame == 480) {
                     for (int i = 79; i >= 0; --i) {
-                        int16_t s = pcm_mono[i];
+                        auto s = pcm_mono[i];
                         for (int k = 0; k < 6; ++k) {
                             pcm_mono[i * 6 + k] = s;
                         }
                     }
                     actual_samples = 480;
                 }
-                float gain = std::pow(10.0f, m_current_gain_db / 20.0f);
+                float total_gain_db = m_current_gain_db + m_post_gain_db;
+                float gain = (m_current_gain_db <= -90.0f) ? 0.0f : std::pow(10.0f, total_gain_db / 20.0f);
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
                 for (size_t i = 0; i < samples_per_frame; ++i) {
-                    int16_t sample = static_cast<int16_t>(pcm_mono[i] * gain);
+                    int64_t val = static_cast<int64_t>(pcm_mono[i] * gain);
+                    if (val > 8388607) val = 8388607;
+                    if (val < -8388608) val = -8388608;
+                    int32_t sample = static_cast<int32_t>(val << 8) & 0xffffff00;
                     pcm_stereo[i * 2]     = sample;
                     pcm_stereo[i * 2 + 1] = sample;
                 }
+#else
+                for (size_t i = 0; i < samples_per_frame; ++i) {
+                    int32_t val = static_cast<int32_t>(pcm_mono[i] * gain);
+                    if (val > 32767) val = 32767;
+                    if (val < -32768) val = -32768;
+                    int16_t sample = static_cast<int16_t>(val);
+                    pcm_stereo[i * 2]     = sample;
+                    pcm_stereo[i * 2 + 1] = sample;
+                }
+#endif
                 if (m_i2s_dac) {
                     size_t bytes_written = 0;
-                    m_i2s_dac->preload(pcm_stereo, samples_per_frame * sizeof(int16_t) * 2, &bytes_written);
+                    m_i2s_dac->preload(pcm_stereo, samples_per_frame * SAMPLE_SIZE * 2, &bytes_written);
                 }
                 m_expected_seq = item2.seq + 1;
                 m_has_expected_seq = true;
@@ -1535,7 +1582,7 @@ void EspNowBroadcastEngine::runSinkLoop() {
             m_lc3_codec.decodeFrame(item.data, item.len, pcm_mono, 480, &actual_samples, sr, dur);
             if (actual_samples == 80 && samples_per_frame == 480) {
                 for (int i = 79; i >= 0; --i) {
-                    int16_t s = pcm_mono[i];
+                    auto s = pcm_mono[i];
                     for (int k = 0; k < 6; ++k) {
                         pcm_mono[i * 6 + k] = s;
                     }
@@ -1547,7 +1594,7 @@ void EspNowBroadcastEngine::runSinkLoop() {
             m_lc3_codec.decodeFrame(nullptr, 0, pcm_mono, 480, &actual_samples);
             if (actual_samples == 80 && samples_per_frame == 480) {
                 for (int i = 79; i >= 0; --i) {
-                    int16_t s = pcm_mono[i];
+                    auto s = pcm_mono[i];
                     for (int k = 0; k < 6; ++k) {
                         pcm_mono[i * 6 + k] = s;
                     }
@@ -1564,19 +1611,41 @@ void EspNowBroadcastEngine::runSinkLoop() {
         m_audio_meter.pushFramePcm(pcm_mono, samples_per_frame);
 
         // Mono to Stereo duplication for I2S DAC
-        float gain = std::pow(10.0f, m_current_gain_db / 20.0f);
+        float total_gain_db = m_current_gain_db + m_post_gain_db;
+        float gain = (m_current_gain_db <= -90.0f) ? 0.0f : std::pow(10.0f, total_gain_db / 20.0f);
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
         for (size_t i = 0; i < samples_per_frame; ++i) {
-            int16_t sample = static_cast<int16_t>(pcm_mono[i] * gain);
+            int64_t val = static_cast<int64_t>(pcm_mono[i] * gain);
+            if (val > 8388607) val = 8388607;
+            if (val < -8388608) val = -8388608;
+            int32_t sample = static_cast<int32_t>(val << 8) & 0xffffff00;
             pcm_stereo[i * 2]     = sample;
             pcm_stereo[i * 2 + 1] = sample;
         }
 
         if (m_i2s_dac) {
             size_t bytes_written = 0;
-            m_i2s_dac->write(pcm_stereo, samples_per_frame * sizeof(int16_t) * 2, &bytes_written, 50);
+            m_i2s_dac->write(pcm_stereo, samples_per_frame * SAMPLE_SIZE * 2, &bytes_written, 50);
         } else {
             vTaskDelay(pdMS_TO_TICKS(10));
         }
+#else
+        for (size_t i = 0; i < samples_per_frame; ++i) {
+            int32_t val = static_cast<int32_t>(pcm_mono[i] * gain);
+            if (val > 32767) val = 32767;
+            if (val < -32768) val = -32768;
+            int16_t sample = static_cast<int16_t>(val);
+            pcm_stereo[i * 2]     = sample;
+            pcm_stereo[i * 2 + 1] = sample;
+        }
+
+        if (m_i2s_dac) {
+            size_t bytes_written = 0;
+            m_i2s_dac->write(pcm_stereo, samples_per_frame * SAMPLE_SIZE * 2, &bytes_written, 50);
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+#endif
     }
     vTaskDelete(nullptr);
 }

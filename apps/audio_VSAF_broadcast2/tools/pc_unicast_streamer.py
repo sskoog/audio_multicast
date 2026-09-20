@@ -63,6 +63,14 @@ except ImportError:
 try:
     import serial
     import serial.tools.list_ports
+    import serial.serialwin32 as sw
+    _orig_reconf = sw.Serial._reconfigure_port
+    def _safe_reconf(self):
+        try:
+            _orig_reconf(self)
+        except Exception:
+            pass
+    sw.Serial._reconfigure_port = _safe_reconf
 except ImportError:
     print("[ERROR] pyserial module is required. Run: pip install pyserial")
     raise
@@ -166,10 +174,11 @@ class PcUnicastStreamer:
         self.stereo_phase_r = 0.0
 
     def open_serial(self):
-        print(f"Connecting to SOURCE Dongle on {self.port} at {self.baud} baud...", flush=True)
+        target_port = rf"\\.\{self.port}" if not self.port.startswith("\\\\.\\") else self.port
+        print(f"Connecting to SOURCE Dongle on {target_port} at {self.baud} baud...", flush=True)
         try:
             self.serial_conn = serial.Serial(
-                self.port,
+                target_port,
                 self.baud,
                 timeout=0.1,
                 write_timeout=1.0,

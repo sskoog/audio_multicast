@@ -304,13 +304,13 @@ void SystemDiagnostics::tick() {
             if (!is_audio_active || vol_u8 == 0) {
                 snprintf(gain_sw_str, sizeof(gain_sw_str), " - ");
             } else {
-                int gain_sw_db = static_cast<int>(std::round(m_unicast_engine.getTargetVolumeDb()));
+                int gain_sw_db = static_cast<int>(std::round(m_unicast_engine.getTargetVolumeDb() + m_unicast_engine.getPostGainDb()));
                 snprintf(gain_sw_str, sizeof(gain_sw_str), "%3d", gain_sw_db);
             }
 
             char gain_hw_str[8];
-            if (!m_unicast_engine.hasLocalAudioOutput()) {
-                snprintf(gain_hw_str, sizeof(gain_hw_str), " -");
+            if (!m_unicast_engine.hasLocalAudioOutput() || cfg->is_pcm5102a) {
+                snprintf(gain_hw_str, sizeof(gain_hw_str), "  -");
             } else {
                 snprintf(gain_hw_str, sizeof(gain_hw_str), "%+3d", m_unicast_engine.getHardwareGainDb());
             }
@@ -319,7 +319,12 @@ void SystemDiagnostics::tick() {
             uint32_t raw_rx_pkts = m_unicast_engine.getAndResetRxPacketsSec();
             uint32_t rx_pkts_sec = static_cast<uint32_t>((static_cast<uint64_t>(raw_rx_pkts) * 1000000ULL) / elapsed_us);
             if (!is_audio_active && raw_rx_pkts == 0) {
-                snprintf(pkts_str, sizeof(pkts_str), "   -");
+                uint32_t raw_espnow = m_unicast_engine.getRawEspNowRxCount();
+                if (raw_espnow > 0) {
+                    snprintf(pkts_str, sizeof(pkts_str), "%4lu", (unsigned long)(raw_espnow % 10000));
+                } else {
+                    snprintf(pkts_str, sizeof(pkts_str), "   -");
+                }
             } else {
                 snprintf(pkts_str, sizeof(pkts_str), "%4lu", (unsigned long)rx_pkts_sec);
             }

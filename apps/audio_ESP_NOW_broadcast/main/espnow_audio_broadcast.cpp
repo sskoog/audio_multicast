@@ -937,12 +937,13 @@ void EspNowAudioBroadcast::transitionTo(NetworkState new_state) {
     ESP_LOGI(TAG, "State Machine Transition: [%s] ---> [%s]", old_str, new_str);
 
     // Dynamic Wi-Fi Power Save Management:
-    // - IDLE, SCANNING, OFF: WIFI_PS_MIN_MODEM (default modem sleep when inactive or searching)
-    // - PREFILL, STREAMING, BROADCASTING: WIFI_PS_NONE (continuous full-power radio during active prefill/streaming/broadcasting)
+    // - IDLE, OFF: WIFI_PS_MIN_MODEM (default modem sleep when inactive or paused)
+    // - SCANNING, PREFILL, STREAMING, BROADCASTING: WIFI_PS_NONE (continuous full-power radio for scanning packet discovery and streaming)
     if (m_wifi_initialized) {
-        if (new_state == NetworkState::IDLE || new_state == NetworkState::SCANNING || new_state == NetworkState::OFF) {
+        if (new_state == NetworkState::IDLE || new_state == NetworkState::OFF) {
             esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
-        } else if (new_state == NetworkState::PREFILL || new_state == NetworkState::STREAMING || new_state == NetworkState::BROADCASTING) {
+        } else if (new_state == NetworkState::SCANNING || new_state == NetworkState::PREFILL ||
+                   new_state == NetworkState::STREAMING || new_state == NetworkState::BROADCASTING) {
             esp_wifi_set_ps(WIFI_PS_NONE);
         }
     }

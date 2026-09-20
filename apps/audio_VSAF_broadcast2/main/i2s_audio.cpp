@@ -183,7 +183,10 @@ esp_err_t I2sAudioDriver::reconfigureAudioFormat(uint32_t sample_rate, i2s_data_
     i2s_channel_register_event_callback(m_tx_handle, &cbs, this);
 
     // Philips I2S Slot Configuration:
-    // 16-bit slot width per channel (32 BCLK cycles per stereo frame: 1.536 MHz at 48 kHz).
+    // For 16-bit: 16-bit data width & 16-bit slot width (2 bytes per sample in DMA).
+    // For 24-bit / 32-bit: 32-bit data width & 32-bit slot width (4 bytes per sample in DMA, MSB-aligned).
+    i2s_data_bit_width_t hw_data_bit_width = (bits_per_sample == I2S_DATA_BIT_WIDTH_16BIT) ? 
+                                             I2S_DATA_BIT_WIDTH_16BIT : I2S_DATA_BIT_WIDTH_32BIT;
     i2s_slot_bit_width_t slot_bit_width = (bits_per_sample == I2S_DATA_BIT_WIDTH_16BIT) ? 
                                            I2S_SLOT_BIT_WIDTH_16BIT : I2S_SLOT_BIT_WIDTH_32BIT;
     uint32_t ws_width = (bits_per_sample == I2S_DATA_BIT_WIDTH_16BIT) ? 16 : 32;
@@ -191,7 +194,7 @@ esp_err_t I2sAudioDriver::reconfigureAudioFormat(uint32_t sample_rate, i2s_data_
     i2s_std_config_t std_cfg = {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate),
         .slot_cfg = {
-            .data_bit_width = bits_per_sample,
+            .data_bit_width = hw_data_bit_width,
             .slot_bit_width = slot_bit_width,
             .slot_mode = slot_mode,
             .slot_mask = (slot_mode == I2S_SLOT_MODE_MONO) ? I2S_STD_SLOT_LEFT : I2S_STD_SLOT_BOTH,

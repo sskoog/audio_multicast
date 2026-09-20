@@ -229,12 +229,12 @@ To achieve maximum energy efficiency when inactive without risking audio dropout
 
 | System State | Power Save Mode (`esp_wifi_set_ps`) | Baseband RF Status | Operational Rationale |
 | :--- | :--- | :--- | :--- |
-| **`IDLE`** / **`SCANNING`** / **`OFF`** | **`WIFI_PS_MIN_MODEM`** | Radio cycles into low-power modem sleep between wake intervals. | Eliminates 2.4 GHz ambient packet filtering overhead and RX DMA bus contention, dropping idle CPU load from **24% down to ~2%** on SINK nodes. |
-| **`PREFILL`** / **`STREAM`** / **`CAST`** | **`WIFI_PS_NONE`** | Continuous 100% active radio, baseband ADC, and RF PLL. | Eliminates sleep wake-up latency and sleep-induced packet loss. Ensures 100% frame delivery on the 10.0 ms audio cadence and microsecond-level PTP time synchronization. |
+| **`IDLE`** / **`OFF`** | **`WIFI_PS_MIN_MODEM`** | Radio cycles into low-power modem sleep when audio receiver is paused or muted. | Eliminates 2.4 GHz ambient packet filtering overhead and RX DMA bus contention, dropping idle CPU load from **24% down to ~2%** on muted SINK nodes. |
+| **`SCANNING`** / **`PREFILL`** / **`STREAM`** / **`CAST`** | **`WIFI_PS_NONE`** | Continuous 100% active radio, baseband ADC, and RF PLL. | Required during `SCANNING` to capture connectionless 802.11 ESP-NOW broadcast frames (no AP beacon timing), and during `STREAM`/`CAST` for 100% packet delivery on 10.0 ms cadence with sub-10 microsecond synchronization. |
 
 > [!NOTE]
 > **State-Driven Transition Mechanism**:
-> When a SINK node in `SCANNING` catches incoming broadcast packets and reaches the jitter buffer prefill threshold, `transitionTo(NetworkState::PREFILL)` instantly invokes `esp_wifi_set_ps(WIFI_PS_NONE)`. If stream signal is lost (10 consecutive underruns), `transitionTo(NetworkState::SCANNING)` automatically reverts to `WIFI_PS_MIN_MODEM` to conserve power and reduce thermals.
+> When a SINK node is in `IDLE` (muted), `WIFI_PS_MIN_MODEM` conserves power. When unmuted into `SCANNING` (or when active in `STREAM`/`CAST`), `WIFI_PS_NONE` keeps the RF receiver active 100% of the time so that incoming broadcast frames are immediately detected and captured upon channel hopping without sleep-induced packet drops.
 
 ---
 

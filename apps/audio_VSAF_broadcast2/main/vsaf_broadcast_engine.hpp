@@ -178,6 +178,8 @@ public:
     float getTargetVolumeDb() const;
     float getCurrentSlewDb() const { return m_current_gain_db; }
     void sendVolumeCommand(uint8_t channel_id, uint8_t vol_u8, bool instant = false);
+    void setPostGainDb(float db) { m_post_gain_db = db; }
+    float getPostGainDb() const { return m_post_gain_db; }
 
     // Dynamic Stream Configuration
     esp_err_t setSampleRate(uint32_t sample_rate_hz);
@@ -210,6 +212,8 @@ public:
     uint8_t getWifiChannel() const { return m_wifi_channel; }
     bool isChannelLocked() const { return m_channel_locked.load(std::memory_order_acquire); }
     void lockChannel(bool locked) { m_channel_locked.store(locked, std::memory_order_release); }
+    esp_err_t setWifiTxPower(int8_t power_0_25dbm);
+    int8_t getWifiTxPower() const;
 
     // Multi-Channel Target Selection (SINK node: 0: Left, 1: Right, 5: Subwoofer)
     void setTargetChannel(uint8_t channel_id);
@@ -255,6 +259,9 @@ public:
 
     uint32_t getRxPacketsTotal() const { return m_rx_packets_total.load(std::memory_order_relaxed); }
     uint32_t getAndResetRxPacketsSec() { return m_rx_packets_sec.exchange(0, std::memory_order_relaxed); }
+    uint32_t getRawEspNowRxCount() const { return m_raw_espnow_rx_count.load(std::memory_order_relaxed); }
+    uint32_t getRawAudioPktCount() const { return m_raw_audio_pkt_count.load(std::memory_order_relaxed); }
+    uint8_t getLastSeenRxId() const { return m_last_seen_rx_id.load(std::memory_order_relaxed); }
 
     uint32_t getFifoOverflowCount() const { return m_fifo_overflows.load(std::memory_order_relaxed); }
     uint32_t getFifoUnderrunCount() const { return m_fifo_underflows.load(std::memory_order_relaxed); }
@@ -379,6 +386,7 @@ private:
     std::atomic<uint8_t>       m_target_volume_u8;
     float                      m_target_gain_db;
     float                      m_current_gain_db;
+    float                      m_post_gain_db{0.0f};
     bool                       m_instant_vol_update;
 
     esp_timer_handle_t         m_frame_timer{nullptr};
@@ -442,6 +450,10 @@ private:
     bool                       m_first_packet_received;
     uint8_t                    m_expected_seq;
     bool                       m_has_expected_seq;
+    std::atomic<int64_t>       m_last_rx_audio_pkt_us{0};
+    std::atomic<uint32_t>      m_raw_espnow_rx_count{0};
+    std::atomic<uint32_t>      m_raw_audio_pkt_count{0};
+    std::atomic<uint8_t>       m_last_seen_rx_id{255};
 
     static constexpr size_t    SINK_FIFO_PACKETS = 24;
     struct SinkFifoItem {
