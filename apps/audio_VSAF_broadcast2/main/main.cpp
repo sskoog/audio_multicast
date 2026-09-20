@@ -24,6 +24,7 @@
 #endif
 #if defined(CONFIG_SOC_USB_SERIAL_JTAG_SUPPORTED)
 #include "driver/usb_serial_jtag.h"
+#include "driver/usb_serial_jtag_vfs.h"
 #include "soc/usb_serial_jtag_struct.h"
 #include "hal/usb_serial_jtag_ll.h"
 #endif
@@ -151,39 +152,17 @@ static void usb_serial_cli_task(void* pvParameters) {
     is_s3_source = (cfg && cfg->node_role == NODE_ROLE_SOURCE);
 #endif
 
-#if defined(CONFIG_SOC_USB_SERIAL_JTAG_SUPPORTED)
-    // On ESP32-S3 SOURCE, TinyUSB owns the USB OTG PHY. Do NOT install USB-Serial-JTAG driver!
-    if (!is_s3_source) {
-        usb_serial_jtag_driver_config_t jtag_cfg = {
-            .tx_buffer_size = 512,
-            .rx_buffer_size = 1024,
-        };
-        usb_serial_jtag_driver_install(&jtag_cfg);
-    }
-#endif
-
-    // 2. Install UART0 driver (2MBaud)
-    int uart_baud = 2000000;
-    uart_config_t uart_cfg = {
-        .baud_rate = uart_baud,
-        .data_bits = UART_DATA_8_BITS,
-        .parity    = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .rx_flow_ctrl_thresh = 0,
-        .source_clk = UART_SCLK_DEFAULT,
-    };
-    uart_param_config(UART_NUM_0, &uart_cfg);
-    uart_driver_install(UART_NUM_0, 1024, 512, 0, NULL, 0);
-
-    print_console("\n[CONSOLE READY] CLI command input active on USB-Serial and UART0 (%d baud).\n", uart_baud);
+    print_console("\n[CONSOLE READY] CLI command input active on USB-Serial and UART0 (2000000 baud).\n");
 
     uint8_t rx_buf[128];
     while (true) {
         int n_read = 0;
 #if defined(CONFIG_SOC_USB_SERIAL_JTAG_SUPPORTED)
         if (!is_s3_source) {
-            n_read = usb_serial_jtag_read_bytes(rx_buf, sizeof(rx_buf), pdMS_TO_TICKS(1));
+            int r = read(STDIN_FILENO, rx_buf, sizeof(rx_buf));
+            if (r > 0) {
+                n_read = r;
+            }
         }
 #endif
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
@@ -191,11 +170,9 @@ static void usb_serial_cli_task(void* pvParameters) {
             if (tud_cdc_available()) {
                 n_read = tud_cdc_read(rx_buf, sizeof(rx_buf));
             }
-            vTaskDelay(pdMS_TO_TICKS(1));
         }
-#else
-        vTaskDelay(pdMS_TO_TICKS(1));
 #endif
+        vTaskDelay(pdMS_TO_TICKS(5));
 
         // Also check UART0
         int n_uart = uart_read_bytes(UART_NUM_0, rx_buf + n_read, sizeof(rx_buf) - n_read, 0);
@@ -412,11 +389,30 @@ extern "C" void app_main(void) {
     // Run stats component self-test suite
     run_stats_self_test();
 
-    // 7. Start Background CLI Task on Core 1 (Core 0 on single-core targets)
+    // 7. Configure non-blocking VFS for USB-Serial-JTAG and install UART0 driver
+#if defined(CONFIG_SOC_USB_SERIAL_JTAG_SUPPORTED)
+    if (cfg->node_role == NODE_ROLE_SINK) {
+        usb_serial_jtag_vfs_use_nonblocking();
+    }
+#endif
+
+    uart_config_t uart_cfg = {
+        .baud_rate = 2000000,
+        .data_bits = UART_DATA_8_BITS,
+        .parity    = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .rx_flow_ctrl_thresh = 0,
+        .source_clk = UART_SCLK_DEFAULT,
+    };
+    uart_param_config(UART_NUM_0, &uart_cfg);
+    uart_driver_install(UART_NUM_0, 1024, 512, 0, NULL, 0);
+
+    // 8. Start Background CLI Task on Core 1 (Core 0 on single-core targets)
     const BaseType_t app_core = (SOC_CPU_CORES_NUM > 1) ? 1 : 0;
     xTaskCreatePinnedToCore(usb_serial_cli_task, "cli_task", 4096, nullptr, 2, nullptr, app_core);
 
-    // 8. Start Background Diagnostics Task on Core 1 (Core 0 on single-core targets)
+    // 9. Start Background Diagnostics Task on Core 1 (Core 0 on single-core targets)
     xTaskCreatePinnedToCore(sys_diag_task, "sys_diag", 4096, nullptr, 1, nullptr, app_core);
 
     ESP_LOGI(TAG, "Device Node ID: %d | Role: %s | Name: %s",
