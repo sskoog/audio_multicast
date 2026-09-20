@@ -11,7 +11,11 @@ Legacy / exploratory experiments in Bluetooth Low Energy Audio (Auracast) are al
 
 | Node ID | Board / Hardware | SoC Target | Flash / RAM | Factory MAC Address | Default COM Port(s) | Default Role / Function |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Node 4**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa LX7 + FPU) | 8 MB / 8 MB PSRAM | `E8:3D:C1:FB:E8:3C` | **COM4** | **Audio SINK (Ch 4: Surround Right)** (PCM5102A I2S DAC + TPA3118 Amp) |
+| **Node 1**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa LX7 + FPU) | 8 MB / 8 MB PSRAM | TBD | **COM1** | Audio SINK (PCM5102A DAC + TPA3118 Amp, GPIO 3 Mute) |
+| **Node 2**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa LX7 + FPU) | 8 MB / 8 MB PSRAM | TBD | **COM2** | Audio SINK (PCM5102A DAC + TPA3118 Amp, GPIO 3 Mute) |
+| **Node 3**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa LX7 + FPU) | 8 MB / 8 MB PSRAM | TBD | **COM3** | Audio SINK (PCM5102A DAC + TPA3118 Amp, GPIO 3 Mute) |
+| **Node 4**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa LX7 + FPU) | 8 MB / 8 MB PSRAM | `E8:3D:C1:FB:E8:3C` | **COM4** | **Audio SINK (Ch 4: Surround Right)** (PCM5102A DAC + TPA3118 Amp) |
+| **Node 5**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa LX7 + FPU) | 8 MB / 8 MB PSRAM | TBD | **COM5** | Audio SINK (PCM5102A DAC + TPA3118 Amp, GPIO 3 Mute) |
 | **Node 16** | Seeed Studio XIAO ESP32-S3 | ESP32-S3 (Xtensa LX7 + FPU) | 4 MB / 512 KB | `E0:72:A1:D8:4C:D0` | **COM16** (Boot) / **COM116** (App) | **Audio SOURCE** (Stereo/Mono LC3 Encoder + Broadcaster) |
 | **Node 20** | Waveshare ESP32-C6-LCD-1.47 | ESP32-C6 (RISC-V) | 8 MB / 512 KB | `AC:EB:E6:23:DC:24` | **COM20** | Audio SINK / Subwoofer (Ch 5) (ST7789 LCD Console + WS2812B RGB) |
 | **Node 21** | ESP32-C6-WROOM-1 DevKit | ESP32-C6 (RISC-V) | 8 MB / 512 KB | `98:A3:16:9D:57:EC` | **COM21** (Flash) & **COM121** (Bumble/App) | Audio SINK (Ch 2: Center) / USB Host Bridge |
@@ -21,7 +25,7 @@ Legacy / exploratory experiments in Bluetooth Low Energy Audio (Auracast) are al
 | **Node 26** | Heemol ESP32-C6 Mini | ESP32-C6 (RISC-V) | 8 MB / 512 KB | `98:A3:16:AC:13:38` | **COM26** (or COM22) | Audio SINK (Ch 4: Surround Right) / Test Node |
 
 ### Pinout Reference
-- **Node 4 (SINK PCM5102A + TPA3118 Amp on XIAO S3 Plus)**:
+- **Node 1, 2, 3, 4, 5 (SINK PCM5102A + TPA3118 Amp on XIAO S3 Plus)**:
   - BCK: D5 / GPIO 6
   - LCK (WS): D3 / GPIO 4
   - DIN (DOUT): D4 / GPIO 5

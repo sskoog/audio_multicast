@@ -46,23 +46,7 @@ const system_config_t* get_system_config(void) {
         esp_read_mac(mac, ESP_MAC_WIFI_STA);
 
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
-        if (mac[5] == 0x3C && mac[4] == 0xE8 && mac[3] == 0xFB) {
-            // Node 4: Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B + PCM5102A DAC + TPA3118 Amp
-            s_active_config.node_id = 4;
-            s_active_config.node_role = NODE_ROLE_SINK;
-            s_active_config.device_name = "ESP32-S3-04-SURR";
-            s_active_config.i2s_bclk_gpio = 6;  // D5 of XIAO
-            s_active_config.i2s_ws_gpio = 4;    // D3 of XIAO
-            s_active_config.i2s_dout_gpio = 5;  // D4 of XIAO
-            s_active_config.amp_mute_gpio = 3;  // D2 of XIAO (Active LOW Mute / High-Z Unmute)
-            s_active_config.status_led_gpio = 21; // Active LOW user LED
-            s_active_config.status_led_num = 0;
-            s_active_config.user_button_gpio = 0; // BOOT button
-            s_active_config.has_display = false;
-            s_active_config.default_channel = 4; // Surround Right (Ch 4)
-            s_active_config.max98357a_gain_db = -1;
-            s_active_config.is_pcm5102a = true;
-        } else {
+        if (mac[5] == 0xD0 && mac[4] == 0x4C) {
             // Node 16: Seeed Studio XIAO ESP32-S3 (Audio SOURCE)
             s_active_config.node_id = 16;
             s_active_config.node_role = NODE_ROLE_SOURCE;
@@ -78,6 +62,38 @@ const system_config_t* get_system_config(void) {
             s_active_config.default_channel = 1;
             s_active_config.max98357a_gain_db = 3;
             s_active_config.is_pcm5102a = false;
+        } else if (mac[5] == 0x3C && mac[4] == 0xE8 && mac[3] == 0xFB) {
+            // Node 4: Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B + PCM5102A DAC + TPA3118 Amp
+            s_active_config.node_id = 4;
+            s_active_config.node_role = NODE_ROLE_SINK;
+            s_active_config.device_name = "ESP32-S3-04-RSUR";
+            s_active_config.i2s_bclk_gpio = 6;  // D5 of XIAO
+            s_active_config.i2s_ws_gpio = 4;    // D3 of XIAO
+            s_active_config.i2s_dout_gpio = 5;  // D4 of XIAO
+            s_active_config.amp_mute_gpio = 3;  // D2 of XIAO (Active LOW Mute / High-Z Unmute)
+            s_active_config.status_led_gpio = 21; // Active LOW user LED
+            s_active_config.status_led_num = 0;
+            s_active_config.user_button_gpio = 0; // BOOT button
+            s_active_config.has_display = false;
+            s_active_config.default_channel = 4; // Surround Right (Ch 4)
+            s_active_config.max98357a_gain_db = -1;
+            s_active_config.is_pcm5102a = true;
+        } else {
+            // Nodes 1, 2, 3, 5: Seeed Studio XIAO ESP32-S3 Plus SINK baseline (PCM5102A + TPA3118 Amp)
+            s_active_config.node_id = 1;
+            s_active_config.node_role = NODE_ROLE_SINK;
+            s_active_config.device_name = "ESP32-S3-SINK";
+            s_active_config.i2s_bclk_gpio = 6;  // D5 of XIAO
+            s_active_config.i2s_ws_gpio = 4;    // D3 of XIAO
+            s_active_config.i2s_dout_gpio = 5;  // D4 of XIAO
+            s_active_config.amp_mute_gpio = 3;  // D2 of XIAO (Active LOW Mute / High-Z Unmute)
+            s_active_config.status_led_gpio = 21; // Active LOW user LED
+            s_active_config.status_led_num = 0;
+            s_active_config.user_button_gpio = 0; // BOOT button
+            s_active_config.has_display = false;
+            s_active_config.default_channel = 0;
+            s_active_config.max98357a_gain_db = -1;
+            s_active_config.is_pcm5102a = true;
         }
 #elif defined(CONFIG_IDF_TARGET_ESP32C6)
         if (mac[5] == 0x44 && mac[4] == 0x38) {

@@ -25,7 +25,11 @@ import serial.tools.list_ports
 
 # Known node registry
 KNOWN_NODES = {
+    1:  {"chip": "esp32s3", "role": "SINK",   "name": "Node 1 (XIAO S3 SINK Ch 0)",       "default_port": "COM1"},
+    2:  {"chip": "esp32s3", "role": "SINK",   "name": "Node 2 (XIAO S3 SINK Ch 1)",       "default_port": "COM2"},
+    3:  {"chip": "esp32s3", "role": "SINK",   "name": "Node 3 (XIAO S3 SINK Ch 2)",       "default_port": "COM3"},
     4:  {"chip": "esp32s3", "role": "SINK",   "name": "Node 4 (XIAO S3 SINK Ch 4)",       "default_port": "COM4"},
+    5:  {"chip": "esp32s3", "role": "SINK",   "name": "Node 5 (XIAO S3 SINK Ch 5)",       "default_port": "COM5"},
     16: {"chip": "esp32s3", "role": "SOURCE", "name": "Node 16 (XIAO ESP32-S3 SOURCE)", "default_port": "COM16", "app_port": "COM116"},
     20: {"chip": "esp32c6", "role": "SINK",   "name": "Node 20 (C6 LCD Console)",        "default_port": "COM20"},
     21: {"chip": "esp32c6", "role": "SINK",   "name": "Node 21 (C6 DevKit / Host)",       "default_port": "COM21", "app_port": "COM121"},
