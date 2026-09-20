@@ -5,17 +5,6 @@
 * Use flag `--audio-quality` to control output mp3 compression. 
 
 
-## VBR vs CBR
-Using variable bit rate (VBR) for mp3 generally results in better audio quality per file size for dynamic audio (music). However, VBR-files must be read in big chunks (sometimes the entire file) before decoding. This can be a problem for embedded devices, like decoding VBR mp3 on an ESP32. If you are streaming mp3 from an ESP32, it is recommended to use CBR, which can be decoded in small chunks.
-
-Quick guide on mp3 quality (bit rate):
-| Quality tier | Bit rate | --audio-quality |
-|---|---|---|
-| YouTube free | VBR ~140–185 kbps | 4 or 3 |
-| YouTube free | CBR 192 kbps | 192K |
-| YouTube Premium | VBR 220–260 kbps | 0 |
-| YouTube Premium | CBR 256/320 kbps | 256K or 320K | 
-
 ## Recommended usage prompt
 Using for 192 kbps CBR mp3 (good quality audio apt for streaming):
 ```bash
@@ -27,6 +16,18 @@ Install using winget:
 winget install ffmpeg
 winget install yt-dlp
 ```
+
+## VBR vs CBR
+Using variable bit rate (VBR) for mp3 generally results in better audio quality per file size for dynamic audio (music). However, VBR-files must be read in big chunks (sometimes the entire file) before decoding. This can be a problem for embedded devices, like decoding VBR mp3 on an ESP32. If you are streaming mp3 from an ESP32, it is recommended to use CBR, which can be decoded in small chunks.
+
+Quick guide on mp3 quality (bit rate):
+| Quality tier | Bit rate | --audio-quality |
+|---|---|---|
+| YouTube free | VBR ~140–185 kbps | 4 or 3 |
+| YouTube free | CBR 192 kbps | 192K |
+| YouTube Premium | VBR 220–260 kbps | 0 |
+| YouTube Premium | CBR 256/320 kbps | 256K or 320K | 
+
 
 ## YouTube Audio quality
 YouTube caps its standard streaming audio at a maximum bit rate of roughly 128 kbps AAC (format 140) or 160 kbps Opus (format 251). Your saved mp3 will not get better audio quality than this baseline.

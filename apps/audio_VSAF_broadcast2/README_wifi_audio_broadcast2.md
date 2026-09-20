@@ -209,6 +209,22 @@ The 6-channel broadcast sweep is paced directly by the Wi-Fi baseband hardware i
 
 ## 5. LC3 Codec Pipeline & Inter-Core Architecture
 
+## 5.0. Expected LC3 Encoder performance
+Comprehensive benchmark of LC3-encoder CPU walltime evaluated at [lc3_encoder_ESP32_S3_rev2.md](../../docs/lc3_encoder_ESP32_S3_rev2.md).
+
+Reference encoder times:
+- liblc3, LTPF OFF, IRAM, 48.0 kHz, 10.0 ms, 120 B, 96 kbps: 0.862 ms
+- liblc3, LTPF OFF, IRAM, 8.0 kHz, 10.0 ms, 80 B, 64 kbps: 0.334 ms
+- liblc3, LTPF ON, FLASH, 48.0 kHz, 10.0 ms, 120 B, 96 kbps: 3.233 ms <-- VERY SLOW!
+- liblc3, LTPF ON, FLASH, 8.0 kHz, 10.0 ms, 80 B, 64 kbps: 2.516 ms <-- VERY SLOW!
+
+Reference decoder times:
+- esp_audio_codec (FixP), FLASH, 48.0 kHz, 10.0 ms, 120 B, 96 kbps: 0.953 ms
+- esp_audio_codec (FixP), IRAM, 48.0 kHz, 7.5 ms, 120 B, 127 kbps: 0.755 ms
+- esp_audio_codec (FixP), FLASH, 8.0 kHz, 10.0 ms, 80 B, 64 kbps: 0.279 ms
+- esp_audio_codec (FixP), IRAM, 8.0 kHz, 10.0 ms, 80 B, 64 kbps: 0.213 ms
+
+
 > [!IMPORTANT]
 > ### Critical Codec Optimization & Execution Requirements
 > - **IRAM Placement Mandatory (`linker.lf`)**: Google `liblc3` (on ESP32-S3) and Espressif fixed-point LC3 (on ESP32-C6) **must** be hosted in internal fast SRAM / IRAM instead of external SPI flash. Empirical hardware benchmarks demonstrate that executing from IRAM runs **3x to 5x faster**: from ~4.5 ms down to **0.8 - 1.5 ms** per 48 kHz encode pass, eliminating SPI flash cache misses and bus contention during 10 ms audio frames!
