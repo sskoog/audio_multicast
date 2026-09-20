@@ -67,36 +67,19 @@ void print_console(const char* format, ...) {
         }
         s_out_buf[out_len] = '\0';
 
-        // 1. Stdout / VFS console
-        fwrite(s_out_buf, 1, out_len, stdout);
-        fflush(stdout);
-
-        // 2. Hardware UART0 if driver is active
+        // 1. Hardware UART0 if driver is active
         if (uart_is_driver_installed(UART_NUM_0)) {
             uart_write_bytes(UART_NUM_0, s_out_buf, out_len);
         }
 
-#if defined(CONFIG_SOC_USB_SERIAL_JTAG_SUPPORTED)
-        // 3. Hardware USB Serial/JTAG (COM4 on ESP32-S3 SINK, COM23/COM24 on ESP32-C6)
-        if (usb_serial_jtag_is_driver_installed()) {
-            usb_serial_jtag_write_bytes(s_out_buf, out_len, pdMS_TO_TICKS(10));
-        }
-#endif
+        // 2. Standard output / USB-Serial-JTAG VFS (COM4 on S3 SINK, COM23/COM24 on C6)
+        write(STDOUT_FILENO, s_out_buf, out_len);
 
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
-        // 3. TinyUSB CDC ACM (COM116 on ESP32-S3 Node 16)
+        // 3. TinyUSB CDC ACM (COM116 on ESP32-S3 Node 16 SOURCE)
         if (tud_cdc_ready()) {
-            uint32_t written = 0;
-            uint32_t total = static_cast<uint32_t>(out_len);
-            int retry = 0;
-            while (written < total && retry++ < 20) {
-                uint32_t chunk = tud_cdc_write(s_out_buf + written, total - written);
-                written += chunk;
-                tud_cdc_write_flush();
-                if (written < total) {
-                    vTaskDelay(pdMS_TO_TICKS(1));
-                }
-            }
+            tud_cdc_write(s_out_buf, static_cast<uint32_t>(out_len));
+            tud_cdc_write_flush();
         }
 #endif
     }

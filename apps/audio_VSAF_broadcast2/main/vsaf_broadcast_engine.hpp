@@ -342,10 +342,8 @@ public:
 private:
     static void IRAM_ATTR frameTimerCb(void* arg);
     static void audioDspTaskTrampoline(void* arg);
-    static void sourceTxTaskTrampoline(void* arg);
     static void sinkTaskTrampoline(void* arg);
     void runAudioDspLoop();
-    void runSourceTxLoop();
     void runSinkLoop();
 
     void handleAudioPacket(const vsaf_audio_packet_t* pkt, int8_t rssi, int64_t t_rx1_us);
@@ -391,10 +389,7 @@ private:
 
     esp_timer_handle_t         m_frame_timer{nullptr};
     TaskHandle_t               m_audio_dsp_task_handle{nullptr};
-    TaskHandle_t               m_source_tx_task_handle{nullptr};
     TaskHandle_t               m_sink_task_handle{nullptr};
-
-    SemaphoreHandle_t          m_tx_start_sem{nullptr};
 
     std::atomic<uint32_t>      m_tx_timeout_count{0};
     std::atomic<uint32_t>      m_tx_fail_count{0};
@@ -418,17 +413,6 @@ private:
     // Crossover DSP Filters (esp-dsp SIMD block accelerated)
     DSP::LinkwitzRiley4Stereo          m_hpf_stereo;
     DSP::SubwooferPolyphaseDecimator   m_sub_decimator;
-
-    // Double-buffered encoded audio frame from Parallel Encode Tasks to TX Task (3 LC3 channels)
-    struct EncodedAudioBuffer {
-        uint8_t  data[3][LC3_FRAME_OCTETS]; // 0: Left 48k, 1: Right 48k, 2: Sub 8k
-        uint16_t octets;
-        bool     ch_valid[3];
-    };
-    EncodedAudioBuffer         m_enc_ping_pong[2];
-    std::atomic<uint8_t>       m_enc_active_idx{0};
-    std::atomic<uint8_t>       m_enc_write_idx{0};
-    std::atomic<uint8_t>       m_enc_read_idx{0};
 
     mutable SpscDurationRingBuffer<float, 64> m_codec_duration_buf;
     mutable SpscDurationRingBuffer<float, 64> m_dsp_duration_buf;

@@ -31,107 +31,77 @@ try:
 except Exception:
     pass
 
+try:
+    import serial.serialwin32 as sw
+    _orig_reconf = sw.Serial._reconfigure_port
+    def _safe_reconf(self):
+        try:
+            _orig_reconf(self)
+        except Exception:
+            pass
+    sw.Serial._reconfigure_port = _safe_reconf
+except Exception:
+    pass
+
 RTC_CNTL_OPTION1_REG = 0x6000812C
 RTC_CNTL_FORCE_DOWNLOAD_BOOT_MASK = 0x1
 
 
 def find_com_ports():
-    """Return a dictionary of detected relevant COM ports."""
+    """Return a dictionary of detected relevant COM ports for Node 16."""
     ports = {}
     for p in serial.tools.list_ports.comports():
         hwid = p.hwid.upper()
         dev = p.device.upper()
-        if dev in ["COM23", "COM24", "COM20", "COM21", "COM22", "COM25", "COM26", "COM121"]:
+        vid = getattr(p, "vid", None)
+        pid = getattr(p, "pid", None)
+        # Explicitly skip known SINK ports
+        if dev in ["COM1", "COM2", "COM4", "COM5", "COM20", "COM21", "COM22", "COM23", "COM24", "COM25", "COM26", "COM121"]:
             continue
-        if "VID_303A" in hwid:
-            if "PID_1001" in hwid or dev == "COM16":
-                ports["jtag"] = p.device      # Native USB-Serial/JTAG ROM bootloader (COM16)
-            elif "PID_0009" in hwid or dev == "COM3":
-                ports["otg"] = p.device       # Native USB-OTG ROM bootloader (COM3)
-            elif "PID_4002" in hwid or dev == "COM116":
-                ports["app"] = p.device       # Running TinyUSB Application (COM116)
-        if dev == "COM16":
+        if dev == "COM16" or (vid == 0x303A and pid == 0x1001):
+            ports["jtag"] = p.device      # Native USB-Serial/JTAG ROM bootloader (COM16)
             ports["com16"] = p.device
-        elif dev == "COM3":
+        elif dev == "COM3" or (vid == 0x303A and pid == 0x0009) or "0009" in hwid:
+            ports["otg"] = p.device       # Native USB-OTG ROM bootloader (COM3)
             ports["com3"] = p.device
-        elif dev == "COM116":
+        elif dev == "COM116" or (vid == 0x303A and pid == 0x4002) or "4002" in hwid:
+            ports["app"] = p.device       # Running TinyUSB Application (COM116)
             ports["com116"] = p.device
     return ports
 
 
 def trigger_app_to_bootloader(app_port):
-    """Attempt to reboot running TinyUSB app into ROM bootloader via CLI or 1200bps touch."""
+    """Attempt to reboot running TinyUSB app into ROM bootloader via 1200bps touch and CLI."""
     print(f"[INFO] Attempting to reboot Node 16 on {app_port} into ROM bootloader...")
     target_port = rf"\\.\{app_port}" if not app_port.startswith("\\\\.\\") else app_port
-    # Try 0: Direct Win32 CreateFile / WriteFile to bypass pyserial SetCommState failure on TinyUSB CDC
-    try:
-        import ctypes
-        from ctypes import wintypes
-        k32 = ctypes.windll.kernel32
-        k32.CreateFileW.restype = wintypes.HANDLE
-        class COMMTIMEOUTS(ctypes.Structure):
-            _fields_ = [
-                ("ReadIntervalTimeout", wintypes.DWORD),
-                ("ReadTotalTimeoutMultiplier", wintypes.DWORD),
-                ("ReadTotalTimeoutConstant", wintypes.DWORD),
-                ("WriteTotalTimeoutMultiplier", wintypes.DWORD),
-                ("WriteTotalTimeoutConstant", wintypes.DWORD),
-            ]
-        h = k32.CreateFileW(target_port, 0xC0000000, 3, None, 3, 0x80, None)
-        if h != -1 and h != 0xFFFFFFFF and h != 0:
-            timeouts = COMMTIMEOUTS(50, 10, 100, 10, 200)
-            k32.SetCommTimeouts(h, ctypes.byref(timeouts))
-            k32.EscapeCommFunction(h, 5) # SETDTR
-            k32.EscapeCommFunction(h, 3) # SETRTS
-            written = wintypes.DWORD()
-            msg = b"\r\nbootloader\r\n"
-            res = k32.WriteFile(h, msg, len(msg), ctypes.byref(written), None)
-            time.sleep(0.2)
-            k32.CloseHandle(h)
-            if res and written.value > 0:
-                print(f"[OK] Sent 'bootloader' command via Win32 to {app_port}.")
-                return True
-    except Exception as e:
-        print(f"[DEBUG] Win32 command skipped: {e}")
 
+    # Try 1: 1200-baud touch reset
     try:
-        # Try 1: CLI 'bootloader' command via pyserial
-        s = serial.Serial()
-        s.port = target_port
-        s.baudrate = 115200
-        s.dtr = False
-        s.rts = False
-        s.timeout = 1.0
-        s.write_timeout = 1.0
-        s.open()
-        s.write(b"\r\nbootloader\r\n")
-        time.sleep(0.1)
-        s.close()
-        print(f"[OK] Sent 'bootloader' command to {app_port}.")
-        return True
-    except serial.SerialException as e:
-        if "PermissionError" in str(e) or "Access is denied" in str(e):
-            print(f"[WARNING] Cannot access {app_port}: Port is open by another program.")
-        else:
-            print(f"[INFO] CLI command skipped: {e}")
-
-    try:
-        # Try 2: 1200-baud touch reset
-        s = serial.Serial()
-        s.port = target_port
-        s.baudrate = 1200
-        s.timeout = 0.5
-        s.write_timeout = 0.5
+        s = serial.Serial(target_port, 1200, timeout=0.5, dsrdtr=False, rtscts=False)
         s.dtr = True
-        s.open()
         time.sleep(0.05)
         s.dtr = False
         time.sleep(0.05)
         s.close()
         print(f"[OK] Sent 1200-baud touch to {app_port}.")
+    except Exception as e:
+        print(f"[DEBUG] 1200-baud touch skipped: {e}")
+
+    time.sleep(0.5)
+    p = find_com_ports()
+    if "jtag" in p or "otg" in p or "com16" in p or "com3" in p:
+        return True
+
+    # Try 2: CLI 'bootloader' command via pyserial
+    try:
+        s = serial.Serial(target_port, 115200, timeout=1, dsrdtr=False, rtscts=False)
+        s.write(b"\r\nbootloader\r\n")
+        time.sleep(0.2)
+        s.close()
+        print(f"[OK] Sent 'bootloader' command to {app_port}.")
         return True
     except Exception as e:
-        print(f"[INFO] 1200-baud touch skipped: {e}")
+        print(f"[DEBUG] CLI command skipped: {e}")
 
     return False
 
@@ -277,6 +247,10 @@ def main():
 
     if args.port == "COM116" or (args.port != "AUTO" and ports.get("app") == args.port):
         trigger_app_to_bootloader(args.port)
+        flash_port = wait_for_bootloader_port(timeout=15)
+    elif args.port in ["COM16", "COM3"] and (args.port not in [ports.get("jtag"), ports.get("otg"), ports.get("com16"), ports.get("com3")]) and ("app" in ports or "com116" in ports):
+        app_p = ports.get("app") or ports.get("com116")
+        trigger_app_to_bootloader(app_p)
         flash_port = wait_for_bootloader_port(timeout=15)
     elif args.port != "AUTO":
         flash_port = args.port

@@ -329,7 +329,7 @@ void usb_audio_init(void) {
     tusb_cfg.phy.self_powered = false;
     tusb_cfg.phy.vbus_monitor_io = -1; // -1 if not using
     tusb_cfg.task.size = 4096;
-    tusb_cfg.task.priority = 7; // Priority 7 ensures USB DCD is never starved
+    tusb_cfg.task.priority = 6; // Priority 6: Services USB Audio endpoints smoothly without starving RF TX task
     tusb_cfg.task.xCoreID = 0; // Pinned to Core 0 (I/O & Wi-Fi Core)
 
     esp_err_t ret = tinyusb_driver_install(&tusb_cfg);

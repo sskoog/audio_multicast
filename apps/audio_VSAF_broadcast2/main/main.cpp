@@ -370,11 +370,11 @@ extern "C" void app_main(void) {
                      base_mac[0], base_mac[1], base_mac[2], base_mac[3], base_mac[4], base_mac[5], cfg->default_channel);
         }
 
-        // Apply -12.0 dB software post-gain attenuation and 24-bit depth for all nodes with PCM5102A DAC
+        // Apply -20.0 dB software post-gain attenuation and 24-bit depth for all nodes with PCM5102A DAC
         if (cfg->is_pcm5102a) {
-            s_unicast_engine->setPostGainDb(-12.0f);
+            s_unicast_engine->setPostGainDb(-20.0f);
             s_unicast_engine->setBitDepth(24);
-            ESP_LOGI(TAG, "PCM5102A DAC detected: configured software post-gain attenuation of -12.0 dB and 24-bit depth");
+            ESP_LOGI(TAG, "PCM5102A DAC detected: configured software post-gain attenuation of -20.0 dB and 24-bit depth");
         } else {
             s_unicast_engine->setPostGainDb(0.0f);
             s_unicast_engine->setBitDepth(16);

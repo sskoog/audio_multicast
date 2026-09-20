@@ -75,10 +75,12 @@ void SystemDiagnostics::tick() {
 
         const auto& stream = m_unicast_engine.getStreamTelemetry();
 
-        float temp_c = 0.0f;
-        if (m_temp_sensor) {
-            temperature_sensor_get_celsius(m_temp_sensor, &temp_c);
+        static float s_cached_temp_c = 0.0f;
+        static uint32_t s_temp_read_div = 0;
+        if (m_temp_sensor && (s_temp_read_div++ % 5) == 0) { // Read temperature every 5 seconds
+            temperature_sensor_get_celsius(m_temp_sensor, &s_cached_temp_c);
         }
+        float temp_c = s_cached_temp_c;
 
         uint32_t cpu_freq_mhz = 160;
 #if defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32)
@@ -98,51 +100,34 @@ void SystemDiagnostics::tick() {
         m_last_plc_count = plc_count;
         m_last_fifo_udr = fifo_ud;
 
-        // FreeRTOS CPU load measurement sampled over the 1-second interval (zero dynamic allocation)
-        int cpu_load_pct = m_cpu_pct;
-#if (configGENERATE_RUN_TIME_STATS == 1 && configUSE_TRACE_FACILITY == 1)
-        static TaskStatus_t s_task_status_array[32];
-        UBaseType_t task_count = uxTaskGetNumberOfTasks();
-        if (task_count > 0) {
-            UBaseType_t query_count = (task_count <= 32) ? task_count : 32;
-            uint32_t total_runtime_dummy = 0;
-            UBaseType_t num_tasks = uxTaskGetSystemState(s_task_status_array, query_count, &total_runtime_dummy);
-            uint32_t total_tasks_runtime = 0;
-            uint32_t idle_runtime = 0;
-            for (UBaseType_t i = 0; i < num_tasks; ++i) {
-                total_tasks_runtime += s_task_status_array[i].ulRunTimeCounter;
-                if (strncmp(s_task_status_array[i].pcTaskName, "IDLE", 4) == 0) {
-                    idle_runtime += s_task_status_array[i].ulRunTimeCounter;
-                }
-            }
+        bool is_audio_active = (m_unicast_engine.getState() == AudioNet::NetworkState::STREAM ||
+                                m_unicast_engine.getState() == AudioNet::NetworkState::CAST ||
+                                m_unicast_engine.getState() == AudioNet::NetworkState::PREFILL);
 
-                if (m_has_prev_runtime) {
-                    uint32_t delta_total = total_tasks_runtime - m_last_total_runtime;
-                    uint32_t delta_idle = idle_runtime - m_last_idle_runtime;
-                    if (delta_total > 0 && delta_idle <= delta_total) {
-                        uint32_t active_time = delta_total - delta_idle;
-                        cpu_load_pct = static_cast<int>((static_cast<uint64_t>(active_time) * 100ULL + (delta_total / 2)) / delta_total);
-                        if (cpu_load_pct > 100) cpu_load_pct = 100;
-                        if (cpu_load_pct < 0) cpu_load_pct = 0;
-                        m_cpu_pct = cpu_load_pct;
-                    }
-                } else {
-                    m_has_prev_runtime = true;
-                }
-                m_last_total_runtime = total_tasks_runtime;
-                m_last_idle_runtime = idle_runtime;
+        // Direct pipeline duration CPU load calculation (zero hooks, zero locks, zero scheduler suspension)
+        int cpu_load_pct = 0;
+        if (cfg->node_role == NODE_ROLE_SOURCE) {
+            float dsp_ms = 0.0f, enc1_ms = 0.0f, enc2_ms = 0.0f, enc3_ms = 0.0f, tx_ms = 0.0f;
+            m_unicast_engine.getStageDurationStats(dsp_ms, enc1_ms, enc2_ms, enc3_ms, tx_ms);
+            float total_active_ms = dsp_ms + enc1_ms + enc2_ms + enc3_ms + tx_ms;
+            float frame_ms = (stream.frame_duration_us > 0) ? (stream.frame_duration_us / 1000.0f) : 10.0f;
+            cpu_load_pct = is_audio_active ? static_cast<int>(std::round((total_active_ms * 100.0f) / (frame_ms * 2.0f))) : 0;
+        } else {
+            float codec_avg_ms = 0.0f, codec_peak_ms = 0.0f;
+            bool has_codec = false;
+            m_unicast_engine.getCodecDurationStats(codec_avg_ms, codec_peak_ms, has_codec);
+            float frame_ms = (stream.frame_duration_us > 0) ? (stream.frame_duration_us / 1000.0f) : 10.0f;
+            cpu_load_pct = (is_audio_active && has_codec) ? static_cast<int>(std::round((codec_avg_ms * 100.0f) / frame_ms)) : 0;
         }
-#endif
+        if (cpu_load_pct < 0) cpu_load_pct = 0;
+        if (cpu_load_pct > 100) cpu_load_pct = 100;
+        m_cpu_pct = cpu_load_pct;
 
         if (cfg->node_role == NODE_ROLE_SINK &&
             m_unicast_engine.getState() == AudioNet::NetworkState::STREAM &&
             (delta_dma > 0 || delta_plc > 0 || delta_fifo > 0)) {
             m_status_led.triggerUnderrunFlash(200);
         }
-
-        bool is_audio_active = (m_unicast_engine.getState() == AudioNet::NetworkState::STREAM ||
-                                m_unicast_engine.getState() == AudioNet::NetworkState::CAST ||
-                                m_unicast_engine.getState() == AudioNet::NetworkState::PREFILL);
 
         float rms_db = is_audio_active ? m_unicast_engine.getAudioFrameRMS_dBFS() : -INFINITY;
         float peak_db = is_audio_active ? m_unicast_engine.getAudioPeak_dBFS() : -INFINITY;
@@ -160,23 +145,13 @@ void SystemDiagnostics::tick() {
             snprintf(peak_str, sizeof(peak_str), "%5.1f", peak_db);
         }
 
-        // 1. Read WiFi Channel dynamically from WiFi hardware
+        // 1. Read WiFi Channel directly from engine
         uint8_t wifi_ch = m_unicast_engine.getWifiChannel();
-        wifi_second_chan_t second_ch = WIFI_SECOND_CHAN_NONE;
-        uint8_t current_hw_ch = 0;
-        if (esp_wifi_get_channel(&current_hw_ch, &second_ch) == ESP_OK && current_hw_ch > 0) {
-            wifi_ch = current_hw_ch;
-        }
 
-        // 2. Read WiFi RSSI / TX Gain dynamically
+        // 2. Read WiFi RSSI / TX Gain
         char rssi_str[8];
         if (cfg->node_role == NODE_ROLE_SOURCE) {
-            int8_t actual_tx_power = 0;
-            if (esp_wifi_get_max_tx_power(&actual_tx_power) == ESP_OK) {
-                snprintf(rssi_str, sizeof(rssi_str), "%+4.1f", actual_tx_power * 0.25f);
-            } else {
-                snprintf(rssi_str, sizeof(rssi_str), "+9.0");
-            }
+            snprintf(rssi_str, sizeof(rssi_str), "+3.0");
         } else if (m_unicast_engine.getState() == AudioNet::NetworkState::OFF ||
                    m_unicast_engine.getState() == AudioNet::NetworkState::IDLE) {
             snprintf(rssi_str, sizeof(rssi_str), "  - ");
