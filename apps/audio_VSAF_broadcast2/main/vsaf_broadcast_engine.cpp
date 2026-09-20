@@ -1402,12 +1402,6 @@ void EspNowBroadcastEngine::runSinkLoop() {
                 m_expected_seq = item.seq;
                 gap = 0;
             }
-            if (m_has_expected_seq && gap < 0) {
-                // Stale frame that arrived late after PLC: drop it and check next in FIFO
-                m_sink_fifo_tail = (m_sink_fifo_tail + 1) % SINK_FIFO_PACKETS;
-                m_sink_fifo_count--;
-                continue;
-            }
             if (m_has_expected_seq && gap > 0 && gap <= 4) {
                 // Gap in incoming sequence numbers: synthesize 1 PLC frame for missing sequence number
                 is_gap_plc = true;
@@ -1415,7 +1409,7 @@ void EspNowBroadcastEngine::runSinkLoop() {
                 m_expected_seq++;
                 break;
             }
-            // In-sequence frame
+            // In-sequence frame (or resynchronized frame)
             m_sink_fifo_tail = (m_sink_fifo_tail + 1) % SINK_FIFO_PACKETS;
             m_sink_fifo_count--;
             has_item = true;
@@ -1433,14 +1427,6 @@ void EspNowBroadcastEngine::runSinkLoop() {
                 portENTER_CRITICAL(&m_sink_fifo_lock);
                 if (m_sink_fifo_count > 0) {
                     item = m_sink_fifo[m_sink_fifo_tail];
-                    int8_t gap = m_has_expected_seq ? static_cast<int8_t>(static_cast<uint8_t>(item.seq - m_expected_seq)) : 0;
-                    if (m_has_expected_seq && gap < 0) {
-                        // Stale frame that arrived late after starvation: drop it
-                        m_sink_fifo_tail = (m_sink_fifo_tail + 1) % SINK_FIFO_PACKETS;
-                        m_sink_fifo_count--;
-                        portEXIT_CRITICAL(&m_sink_fifo_lock);
-                        continue;
-                    }
                     m_sink_fifo_tail = (m_sink_fifo_tail + 1) % SINK_FIFO_PACKETS;
                     m_sink_fifo_count--;
                     has_item = true;
@@ -1454,9 +1440,7 @@ void EspNowBroadcastEngine::runSinkLoop() {
         }
 
         if (!has_item && !is_gap_plc) {
-            if (m_has_expected_seq) {
-                m_expected_seq++; // Advance sequence to account for this starvation frame rendered via PLC
-            }
+            m_has_expected_seq = false; // Reset sequence expectation on starvation so arriving frames are not blocked
             consecutive_underruns++;
             if (consecutive_underruns >= 10) {
                 // 100 ms of missing audio: transition back to SCANNING and unlock channel
