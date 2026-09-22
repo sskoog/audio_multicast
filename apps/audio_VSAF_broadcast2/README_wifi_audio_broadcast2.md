@@ -1,56 +1,68 @@
-# Audio VSAF Broadcast 2: VSAF 3.0 Dual-Frame Redundancy, Round-Robin Telemetry & Hardware ISR Paced Streaming
+# Audio VSAF Broadcast 2: VSAF 3.0 Multi-Tier UEP Redundancy, Round-Robin Telemetry & Hardware ISR Paced Streaming
 
 ## 1. Executive Summary & Architectural Overview
 
-The **`audio_VSAF_broadcast2`** application implements an ultra-low-latency, multi-channel, multi-speaker wireless digital audio distribution system over 802.11 Wi-Fi broadcast semantics (`FF:FF:FF:FF:FF:FF`). It is engineered to distribute up to 6 distinct audio channels synchronously from a single **SOURCE** transmitter (ESP32-S3) to **2 to 6 SINK** speaker nodes (ESP32-C6) with microsecond-level presentation timeline alignment and zero audible dropouts.
+The **`audio_VSAF_broadcast2`** application implements an ultra-low-latency, multi-channel, multi-speaker wireless digital audio distribution system over 802.11 Wi-Fi broadcast semantics (`FF:FF:FF:FF:FF:FF`). It is engineered to distribute up to 6 distinct audio channels synchronously from a single **SOURCE** transmitter (ESP32-S3) to **2 to 6 SINK** speaker nodes (ESP32-C6 / ESP32-S3) with microsecond-level presentation timeline alignment, multi-packet burst-loss resilience, and zero audible dropouts.
 
 ### Key Architectural Evolution in VSAF 3.0
 
-1. **VSAF 3.0 Dual-Frame Payload Redundancy (t0 + t-1)**:
-   - Each 248-byte audio broadcast packet contains **two full LC3 audio frames**: the current frame (t0, 120 bytes) and the preceding frame (t-1, 120 bytes).
-   - If a single packet is lost in RF, the SINK recovers the missing audio frame instantly from the subsequent packet without requesting retransmissions, completely eliminating audio dropouts and Soft-ARQ repair windows.
-2. **Commanded Round-Robin SINK Telemetry (1 Reply per 10 ms Window)**:
-   - Rather than having multiple SINK nodes compete for the RF channel simultaneously, SINK feedback is strictly **commanded by the SOURCE via bit 7 (`REQ_ACK`) of `packet_flags`**.
+1. **VSAF 3.0 Multi-Tier Unequal Error Protection (UEP) Redundancy**:
+   - **Satellite Broadcast Packets (`0x1337`, Ch 0..4)**: Each 248-byte packet carries **3 temporal frames**: primary frame $t_0$ (120 bytes, HQ 96 kbps @ 48 kHz), redundant frame $t_{-1}$ (60 bytes, 48 kbps @ 48 kHz), and redundant frame $t_{-2}$ (60 bytes, 48 kbps @ 48 kHz).
+   - **Subwoofer Broadcast Packets (`0x1338`, Ch 5)**: Each 248-byte packet carries **4 temporal frames**: primary frame $t_0$ (60 bytes @ 8 kHz) and 3 historical frames $t_{-1}$, $t_{-2}$, $t_{-3}$ (60 bytes each).
+   - If up to 2 consecutive RF packets are dropped for satellites (or 3 consecutive packets for subwoofer), the SINK recovers the missing audio frames instantly from subsequent packets, completely eliminating audio dropouts and Soft-ARQ repair windows.
+2. **5-Encoder Multi-Rate LC3 Pipeline (IRAM Fast Path)**:
+   - 5 independent Google `liblc3` encoder instances hosted in fast IRAM with LTPF (Long-Term Pitch Filter) analysis disabled for microsecond-level execution.
+   - Encoding order:
+     - **Pass 1 (HQ Satellites)**: Left HP (120B) and Right HP (120B).
+     - **Pass 2 (Subwoofer)**: Sub 8k (60B) encoded *before* redundant satellite passes.
+     - **Pass 3 (Redundant Satellites)**: Left Red (60B) and Right Red (60B).
+3. **Glitch-Free Dynamic Decoder Adaptation & Symmetric JIT Gap Handling**:
+   - SINK LC3 decoder dynamically adapts to variable incoming frame sizes (120B HQ vs. 60B Redundancy) on-the-fly while maintaining continuous MDCT synthesis overlap memory.
+   - Unified sequence gap logic across the primary FIFO pop loop and the JIT wait loop ensures clean Packet Loss Concealment (PLC) synthesis without pitch jumps or waveform phase glitches ("blurp" sound eliminated).
+4. **Commanded Round-Robin SINK Telemetry (1 Reply per 10 ms Window)**:
+   - SINK feedback is strictly commanded by the SOURCE via bit 7 (`REQ_ACK`) of `packet_flags`.
    - Exactly one SINK is granted an uplink transmission slot per 10 ms window in round-robin fashion (60 ms full cluster status period across 6 channels), eliminating reverse-path collisions and preserving > 9.5 ms of quiet airtime per frame.
-3. **Hardware Timer Event Pacing (`esp_timer` + Task Notifications)**:
-   - Periodic frame deadlines are triggered directly by an `esp_timer` hardware periodic timer (`m_frame_timer`) calling `frameTimerCb`, waking `bcast_tx_task` via FreeRTOS direct task notifications (`vTaskNotifyGiveFromISR`).
-   - Completely eliminates CPU spin-wait loops (`esp_rom_delay_us(20)`), preventing IDLE task starvation and reducing SOURCE CPU load from 94% down to ~59%.
-4. **Wi-Fi Baseband "TX Done" ISR Semaphore Slot Timing (`s_tx_done_sem`)**:
+5. **Hardware Timer Event Pacing (`esp_timer` + Task Notifications)**:
+   - Periodic frame deadlines are triggered directly by an `esp_timer` hardware periodic timer (`m_frame_timer`) calling `frameTimerCb`, waking `sourceTxTask` via FreeRTOS direct task notifications (`vTaskNotifyGiveFromISR`).
+   - Completely eliminates CPU spin-wait loops, preventing IDLE task starvation and reducing SOURCE CPU load to ~38%.
+6. **Wi-Fi Baseband "TX Done" ISR Semaphore Slot Timing (`s_tx_done_sem`)**:
    - The forward 6-channel serial broadcast sweep is paced directly by the Wi-Fi MAC hardware "TX Done" interrupt callback (`onEspNowSendCb`).
    - The master presentation timestamp `t_tx1_us` is recorded the exact microsecond the baseband MAC queue is 100% empty, dispatching the next channel packet immediately (~1.5 us) after the previous packet leaves the antenna.
-   - All 6 channels burst sequentially across the antenna in ~460 us total.
-5. **Deterministic Error & Fault Handling**:
-   - Deterministic behavior is established for all thinkable baseband fault modes: immediate API rejections, hardware delivery errors, 2.0 ms semaphore timeouts, and baseband lockups.
-6. **Dual-Way PTP Microsecond Time Synchronization**:
+   - All 6 channels burst sequentially across the antenna in ~4.5 ms total.
+7. **Dual-Way PTP Microsecond Time Synchronization**:
    - Both forward audio frames and reverse telemetry packets embed microsecond hardware timestamps (`esp_timer_get_time()`). This enables continuous dual-way Precision Time Protocol (PTP) calculation of true Round-Trip Time (RTT) and clock offset, locking all SINK presentation timelines together within +/- 10 microseconds without external time servers.
-7. **Dynamic State-Driven Wi-Fi Power Save Management**:
+8. **Dynamic State-Driven Wi-Fi Power Save Management**:
    - Uses `WIFI_PS_MIN_MODEM` during `IDLE` and `SCANNING` states to silence ambient 2.4 GHz packet filtering and RX DMA interrupts, slashing idle CPU load from 24% down to ~2%.
-   - Transitions dynamically to `WIFI_PS_NONE` upon entering `PREFILL`, `STREAM`, and `CAST` states, ensuring 100% continuous RF receiver uptime, deterministic TX pacing, and eliminating sleep-induced frame loss.
+   - Transitions dynamically to `WIFI_PS_NONE` upon entering `PREFILL`, `STREAM`, and `CAST` states, ensuring 100% continuous RF receiver uptime and deterministic TX pacing.
 
 ```
                   +----------------------------------------------------+
                   |              ESP32-S3 SOURCE (Node 16)             |
                   |  - Xtensa Dual-Core @ 240 MHz + Hardware FPU       |
                   |  - Hardware esp_timer Event Pacing (10.0 ms)       |
-                  |  - Wi-Fi TX Done ISR Semaphore Sweep (~460 us)     |
-                  |  - Dual-Frame LC3 Encoding (t0 + t-1)              |
+                  |  - 5-Instance Multi-Rate LC3 Encoder (IRAM)        |
+                  |  - Pass 1: Left/Right HQ 120B (48 kHz)             |
+                  |  - Pass 2: Subwoofer 60B (8 kHz)                   |
+                  |  - Pass 3: Left/Right Redundancy 60B (48 kHz)      |
+                  |  - Wi-Fi TX Done ISR Semaphore Sweep (~4.5 ms)     |
                   |  - UAC1 USB Audio Speaker (48 kHz 16-bit Stereo)   |
                   |  - Round-Robin Telemetry Collector (1 per 10 ms)   |
                   |  - Dual-Way PTP Master Clock Time Server           |
                   +-------------------------+--------------------------+
                                             |
-                 802.11 Layer-2 Broadcast   |  (HT20 MCS3 / OFDM 24.0 Mbps)
+                 802.11 Layer-2 Broadcast   |  (HT20 MCS0 / MCS3 / OFDM 24 Mbps)
                  0 Hardware ACKs, 0 Backoff |  Audio Downlink + Round-Robin Uplink
                                             |
         +-------------------+---------------+-------------------+-------------------+
         | (Ch 0: Left)      | (Ch 1: Right) | (Ch 2: Center)    | (Ch 5: Subwoofer) |
         v                   v               v                   v                   v
 +---------------+   +---------------+   +---------------+   +---------------+   +---------------+
-| SINK 0 (Left) |   | SINK 1 (Right)|   | SINK 2        |   | SINK 3..4     |   | SINK 5 (Sub)  |
-| ESP32-C6-Zero |   | ESP32-C6-Zero |   | ESP32-C6 Dev  |   | ESP32-C6 Mini |   | ESP32-C6-LCD  |
-| (Node 23)     |   | (Node 24)     |   | (Node 21)     |   | (Node 25/26)  |   | (Node 20)     |
-| MAX98357A DAC |   | MAX98357A DAC |   | MAX98357A DAC |   | MAX98357A DAC |   | MAX98357A DAC |
+| SINK 0 (Left) |   | SINK 1 (Right)|   | SINK 2 (Ctr)  |   | SINK 3..4     |   | SINK 5 (Sub)  |
+| ESP32-C6-Zero |   | ESP32-C6-Zero |   | ESP32-C6 Dev  |   | ESP32-S3 / C6 |   | ESP32-C6-LCD  |
+| (Node 23)     |   | (Node 24)     |   | (Node 21)     |   | (Node 4 / 25) |   | (Node 20)     |
+| MAX98357A DAC |   | MAX98357A DAC |   | MAX98357A DAC |   | PCM5102A DAC  |   | MAX98357A DAC |
 | 48kHz Stereo  |   | 48kHz Stereo  |   | 48kHz Stereo  |   | 48kHz Stereo  |   | Native 8kHz   |
+| 3-Tier UEP    |   | 3-Tier UEP    |   | 3-Tier UEP    |   | 3-Tier UEP    |   | 4-Tier UEP    |
 | PTP Slave     |   | PTP Slave     |   | PTP Slave     |   | PTP Slave     |   | LR4 LP Filter |
 +---------------+   +---------------+   +---------------+   +---------------+   +---------------+
 ```
@@ -66,24 +78,24 @@ The **`audio_VSAF_broadcast2`** application implements an ultra-low-latency, mul
 | **Node 3**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa Dual-Core + FPU) | 8 MB / 8 MB PSRAM | TBD | **COM3** | Audio SINK (PCM5102A DAC + TPA3118 Mono Amp, GPIO 3 Mute control). |
 | **Node 4**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa Dual-Core + FPU) | 8 MB / 8 MB PSRAM | `E8:3D:C1:FB:E8:3C` | **COM4** | **Audio SINK (Ch 4: Surround Right)**: PCM5102A DAC + TPA3118 Mono Amp (GPIO 3 Mute control). |
 | **Node 5**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa Dual-Core + FPU) | 8 MB / 8 MB PSRAM | TBD | **COM5** | Audio SINK (PCM5102A DAC + TPA3118 Mono Amp, GPIO 3 Mute control). |
-| **Node 16** | Seeed Studio XIAO ESP32-S3 | ESP32-S3 (Xtensa Dual-Core + FPU) | 4 MB / 512 KB | `E0:72:A1:D8:4C:D0` | **COM16** (Bootloader)<br>**COM116** (Runtime App) | **Audio SOURCE**: UAC1 USB Audio Speaker, LC3 encoder, 6-slot ISR broadcast sweeper, round-robin telemetry collector, PTP master. |
-| **Node 20** | Waveshare ESP32-C6-LCD-1.47 | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `AC:EB:E6:23:DC:24` | **COM20** | Audio SINK / Subwoofer (Channel 5) / Console Display with ST7789 LCD. |
+| **Node 16** | Seeed Studio XIAO ESP32-S3 | ESP32-S3 (Xtensa Dual-Core + FPU) | 4 MB / 512 KB | `E0:72:A1:D8:4C:D0` | **COM16** (Bootloader)<br>**COM116** (Runtime App) | **Audio SOURCE**: UAC1 USB Audio Speaker, 5-instance LC3 encoder, 6-slot ISR broadcast sweeper, round-robin telemetry collector, PTP master. |
+| **Node 20** | Waveshare ESP32-C6-LCD-1.47 | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `AC:EB:E6:23:DC:24` | **COM20** | **Audio SINK / Subwoofer (Channel 5)**: 8 kHz LC3 decode, ST7789 LCD Console Display. |
 | **Node 21** | ESP32-C6-WROOM-1 DevKit | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `98:A3:16:9D:57:EC` | **COM21** (Flash)<br>**COM121** (App) | Audio SINK (Channel 2: Center) or USB Host Bridge. |
 | **Node 23** | Waveshare ESP32-C6-Zero | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `B0:A6:04:99:38:44` | **COM23** | **Audio SINK Left (Channel 0)**: MAX98357A I2S DAC, WS2812B RGB indicator. |
 | **Node 24** | Waveshare ESP32-C6-Zero | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `B0:A6:04:99:18:E4` | **COM24** | **Audio SINK Right (Channel 1)**: MAX98357A I2S DAC, WS2812B RGB indicator. |
 | **Node 25** | Heemol ESP32-C6 Mini | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `E8:3D:C1:FB:DC:C4` | **COM25** (or COM10) | Audio SINK (Channel 3: Surround Left) / Test Node. |
 | **Node 26** | Heemol ESP32-C6 Mini | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `98:A3:16:AC:13:38` | **COM26** (or COM22) | Audio SINK (Channel 4: Surround Right) / Test Node. |
 
-### 2.1 Node 16 (SOURCE) USB VID:PID Registry & Operating Modes
+### 2.1 Channel Assignment & Routing Matrix
 
-Node 16 (Seeed Studio XIAO ESP32-S3) utilizes native USB connected directly to GPIO 19 (`D-`) and GPIO 20 (`D+`). It exposes distinct USB identities depending on boot mode:
-
-| State / Operating Mode | USB Subsystem / Driver | Windows Device Friendly Name | Hardware Instance ID (VID/PID) | Assigned Port / Endpoint | Function / Usage |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Download / Flash** | Native USB-Serial/JTAG ROM Bootloader | `USB Serial Device (COM16)` | `USB\VID_303A&PID_1001` | **COM16** | Flashing firmware via `esptool` / `s3_flash_and_reset.py`. |
-| **Download / Flash** | Native USB-OTG ROM Bootloader | `USB Serial Device (COM3)` | `USB\VID_303A&PID_0009` | **COM3** | Alternative ROM DFU/Serial download port. |
-| **Application Runtime** | TinyUSB CDC ACM Console | `USB Serial Device (COM116)` | `USB\VID_303A&PID_4002&MI_00` | **COM116** | High-speed ASCII CLI, runtime commands, and 10 Hz telemetry. |
-| **Application Runtime** | TinyUSB UAC1 Stereo Audio | `Node16 audio (USB Speaker)` | `USB\VID_303A&PID_4002&MI_02` | USB Audio Output | 48 kHz / 16-bit PCM digital audio stream from Windows host. |
+```text
+Channel 0: Left Satellite (Ch 0, High-Pass @ 100 Hz LR4, 48 kHz, Packet Type 0x1337)
+Channel 1: Right Satellite (Ch 1, High-Pass @ 100 Hz LR4, 48 kHz, Packet Type 0x1337)
+Channel 2: Center Satellite (Ch 2, High-Pass @ 100 Hz LR4, 48 kHz, Packet Type 0x1337)
+Channel 3: Surround Left Satellite (Ch 3, High-Pass @ 100 Hz LR4, 48 kHz, Packet Type 0x1337)
+Channel 4: Surround Right Satellite (Ch 4, High-Pass @ 100 Hz LR4, 48 kHz, Packet Type 0x1337)
+Channel 5: Subwoofer (Ch 5, Polyphase Decimated LP @ 100 Hz LR4, 8 kHz, Packet Type 0x1338)
+```
 
 ### Pinout Reference
 - **Node 1, 2, 3, 4, 5 (SINK PCM5102A + TPA3118 Amp on XIAO S3 Plus)**:
@@ -112,11 +124,13 @@ Node 16 (Seeed Studio XIAO ESP32-S3) utilizes native USB connected directly to G
 
 All network communication uses the **VSAF 3.0 (Variable-rate Synchronized Audio Frame)** container format. All structures are strictly 32-bit word aligned with little-endian byte ordering.
 
+### 3.1 Satellite Broadcast Packet (`0x1337`, 3-Tier UEP, 248 Bytes Total)
+
 ```
  0                   1                   2                   3
  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|          type_id (u16)        |packet_flags(u8)|   seq (u8)   |
+|       type_id (0x1337)        |packet_flags(u8)|   seq (u8)   |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                          t_tx1_us                             |
 |             (SOURCE Master Presentation Timestamp)            |
@@ -124,16 +138,49 @@ All network communication uses the **VSAF 3.0 (Variable-rate Synchronized Audio 
 |                                                               |
 |                 Primary Frame t0 (120 Bytes)                  |
 |                 (Offset 8, 32-bit Word Aligned)               |
+|                 HQ 96 kbps @ 10 ms 48 kHz                     |
 |                                                               |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                                                               |
-|                Redundant Frame t-1 (120 Bytes)                |
+|                Redundant Frame t-1 (60 Bytes)                 |
 |                (Offset 128, 32-bit Word Aligned)              |
+|                Redundancy 48 kbps @ 10 ms 48 kHz              |
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                                               |
+|                Redundant Frame t-2 (60 Bytes)                 |
+|                (Offset 188, 32-bit Word Aligned)              |
+|                Redundancy 48 kbps @ 10 ms 48 kHz              |
 |                                                               |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
 
-### 3.1 8-Byte Word-Aligned Header
+### 3.2 Subwoofer Broadcast Packet (`0x1338`, 4-Tier UEP, 248 Bytes Total)
+
+```
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|       type_id (0x1338)        |packet_flags(u8)|   seq (u8)   |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                          t_tx1_us                             |
+|             (SOURCE Master Presentation Timestamp)            |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                 Primary Frame t0 (60 Bytes)                   |
+|                 (Offset 8, 32-bit Word Aligned) 8 kHz         |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                Redundant Frame t-1 (60 Bytes)                 |
+|                 (Offset 68, 32-bit Word Aligned) 8 kHz        |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                Redundant Frame t-2 (60 Bytes)                 |
+|                 (Offset 128, 32-bit Word Aligned) 8 kHz       |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                Redundant Frame t-3 (60 Bytes)                 |
+|                 (Offset 188, 32-bit Word Aligned) 8 kHz       |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+```
+
+### 3.3 8-Byte Word-Aligned Header
 
 1. **`type_id` (`uint16_t`, 2 Bytes)**: Combination magic word and message discriminator:
    - `0x1337`: `VSAF_TYPE_AUDIO_SATELLITE` (Satellite Audio Broadcast: Ch 0..4)
@@ -150,20 +197,7 @@ All network communication uses the **VSAF 3.0 (Variable-rate Synchronized Audio 
 3. **`seq` (`uint8_t`, 1 Byte)**: Monotonically incrementing 8-bit sequence number (0..255).
 4. **`t_tx1_us` (`uint32_t`, 4 Bytes)**: Master microsecond presentation timestamp from `esp_timer_get_time()`.
 
-### 3.2 240-Byte Multi-Rate Redundant Payload
-
-- **Satellite Broadcast Packet (`0x1337`, 248 Bytes Total)**:
-  - `data_t0` (120 Bytes, offset 8): Main/HQ LC3 compressed audio frame for timestamp t0 (96 kbps @ 10 ms 48k).
-  - `data_t_prev1` (60 Bytes, offset 128): Redundant LC3 compressed audio frame for timestamp t-1 (48 kbps @ 10 ms 48k).
-  - `data_t_prev2` (60 Bytes, offset 188): Redundant LC3 compressed audio frame for timestamp t-2 (48 kbps @ 10 ms 48k).
-- **Subwoofer Broadcast Packet (`0x1338`, 248 Bytes Total)**:
-  - `data_t0` (60 Bytes, offset 8): Main Subwoofer frame t0 (48 kbps @ 10 ms 8k).
-  - `data_t_prev1` (60 Bytes, offset 68): Redundant Subwoofer frame t-1 (60 Bytes).
-  - `data_t_prev2` (60 Bytes, offset 128): Redundant Subwoofer frame t-2 (60 Bytes).
-  - `data_t_prev3` (60 Bytes, offset 188): Redundant Subwoofer frame t-3 (60 Bytes).
-- **Total Packet Length**: Strictly **248 Bytes** (32-bit aligned, fully compliant with the 250-byte ESP-NOW limit).
-
-### 3.3 Round-Robin SINK Telemetry Frame (`vsaf_sink_telemetry_t`)
+### 3.4 Round-Robin SINK Telemetry Frame (`vsaf_sink_telemetry_t`)
 
 ```
  0                   1                   2                   3
@@ -205,20 +239,20 @@ The broadcast engine relies on absolute hardware timer deadlines rather than rel
        }
    }
    ```
-3. `bcast_tx_task` blocks on `ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20))` with zero spin-waiting, eliminating clock drift and CPU starvation.
+3. `sourceTxTask` blocks on `ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20))` with zero spin-waiting, eliminating clock drift and CPU starvation.
 
 ### 4.2 Wi-Fi Hardware "TX Done" ISR Semaphore Pacing (`s_tx_done_sem`)
 
 The 6-channel broadcast sweep is paced directly by the Wi-Fi baseband hardware interrupt:
 1. Before each channel transmission, stale semaphore tokens are purged.
 2. The packet is stamped with `t_tx1_us = esp_timer_get_time()` and handed to `esp_now_send()`.
-3. `bcast_tx_task` waits on `s_tx_done_sem`:
+3. `sourceTxTask` waits on `s_tx_done_sem`:
    ```cpp
    if (xSemaphoreTake(s_tx_done_sem, pdMS_TO_TICKS(2)) == pdTRUE) {
        // ISR fired: MAC queue is 100% empty, dispatch next channel packet immediately (~1.5 us)
    }
    ```
-4. All 6 channel packets are transmitted in ~460 us total.
+4. All 6 channel packets are transmitted in ~4.5 ms total.
 
 ### 4.3 Deterministic Baseband Fault Modes & Error Handling
 
@@ -229,60 +263,60 @@ The 6-channel broadcast sweep is paced directly by the Wi-Fi baseband hardware i
 | **Fault Mode 3: Semaphore Timeout (2.0 ms)** | `xSemaphoreTake(s_tx_done_sem, 2ms)` expires | Baseband hang / heavy RF collision. **Aborts remainder of the 6-channel sweep for the current frame immediately** so the task does not miss the next frame deadline. | `m_tx_timeout_count` |
 | **Fault Mode 4: Subsystem Lockup** | 5 or more consecutive frame timeouts (50 ms) | Calls `handleTxSubsystemHang()`, clears stale semaphore tokens, resets consecutive error counter, and logs a system warning. | `m_consecutive_tx_timeouts` |
 
-### 4.4 Dynamic Wi-Fi Power Save Management (`WIFI_PS_MIN_MODEM` vs `WIFI_PS_NONE`)
-
-Standard 802.11 Wi-Fi modem sleep (`WIFI_PS_MIN_MODEM`) coordinates station sleep windows using Access Point (AP) DTIM beacon frames and hardware TSF timers. Because **ESP-NOW is connectionless Layer-2 without an Access Point or beacons**, the Wi-Fi baseband has no coordinated schedule for incoming broadcast frames.
-
-To achieve maximum energy efficiency when inactive without risking audio dropouts during playback, the system dynamically manages Wi-Fi power save modes across state transitions:
-
-| System State | Power Save Mode (`esp_wifi_set_ps`) | Baseband RF Status | Operational Rationale |
-| :--- | :--- | :--- | :--- |
-| **`IDLE`** / **`OFF`** | **`WIFI_PS_MIN_MODEM`** | Radio cycles into low-power modem sleep when audio receiver is paused or muted. | Eliminates 2.4 GHz ambient packet filtering overhead and RX DMA bus contention, dropping idle CPU load from **24% down to ~2%** on muted SINK nodes. |
-| **`SCANNING`** / **`PREFILL`** / **`STREAM`** / **`CAST`** | **`WIFI_PS_NONE`** | Continuous 100% active radio, baseband ADC, and RF PLL. | Required during `SCANNING` to capture connectionless 802.11 ESP-NOW broadcast frames (no AP beacon timing), and during `STREAM`/`CAST` for 100% packet delivery on 10.0 ms cadence with sub-10 microsecond synchronization. |
-
-> [!NOTE]
-> **State-Driven Transition Mechanism**:
-> When a SINK node is in `IDLE` (muted), `WIFI_PS_MIN_MODEM` conserves power. When unmuted into `SCANNING` (or when active in `STREAM`/`CAST`), `WIFI_PS_NONE` keeps the RF receiver active 100% of the time so that incoming broadcast frames are immediately detected and captured upon channel hopping without sleep-induced packet drops.
-
 ---
 
 ## 5. LC3 Codec Pipeline & Inter-Core Architecture
 
-## 5.0. Expected LC3 Encoder performance
-Comprehensive benchmark of LC3-encoder CPU walltime evaluated at [lc3_encoder_ESP32_S3_rev2.md](../../docs/lc3_encoder_ESP32_S3_rev2.md).
+### 5.1 5-Encoder LC3 Architecture on ESP32-S3 SOURCE
 
-Reference encoder times:
-- liblc3, LTPF OFF, IRAM, 48.0 kHz, 10.0 ms, 120 B, 96 kbps: 0.862 ms
-- liblc3, LTPF OFF, IRAM, 8.0 kHz, 10.0 ms, 80 B, 64 kbps: 0.334 ms
-- liblc3, LTPF ON, FLASH, 48.0 kHz, 10.0 ms, 120 B, 96 kbps: 3.233 ms <-- VERY SLOW!
-- liblc3, LTPF ON, FLASH, 8.0 kHz, 10.0 ms, 80 B, 64 kbps: 2.516 ms <-- VERY SLOW!
+The audio pipeline runs on **Core 1 (Priority 6)** with hardware FPU vectorization:
 
-Reference decoder times:
-- esp_audio_codec (FixP), FLASH, 48.0 kHz, 10.0 ms, 120 B, 96 kbps: 0.953 ms
-- esp_audio_codec (FixP), IRAM, 48.0 kHz, 7.5 ms, 120 B, 127 kbps: 0.755 ms
-- esp_audio_codec (FixP), FLASH, 8.0 kHz, 10.0 ms, 80 B, 64 kbps: 0.279 ms
-- esp_audio_codec (FixP), IRAM, 8.0 kHz, 10.0 ms, 80 B, 64 kbps: 0.213 ms
+```
+ Interleaved Stereo PCM In (480 samples @ 48 kHz)
+                      |
+        +-------------+-------------+
+        |                           |
+  Left Crossover             Right Crossover
+  (100 Hz LR4 HPF)           (100 Hz LR4 HPF)
+        |                           |
+  m_pcm_left_hp               m_pcm_right_hp
+        |                           |
+        +-------------+-------------+
+                      |
+           Polyphase Decimator (D=6)
+           + 100 Hz LR4 LPF @ 8 kHz
+                      |
+                m_pcm_sub_8k
+                      |
+       ================================
+         3-PASS LC3 ENCODING PIPELINE
+       ================================
+  [Pass 1: HQ Satellites]
+    - Enc 0: m_pcm_left_hp  -> 120B (48k HQ)
+    - Enc 1: m_pcm_right_hp -> 120B (48k HQ)
+  [Pass 2: Subwoofer]
+    - Enc 4: m_pcm_sub_8k   ->  60B (8k Mono)
+  [Pass 3: Redundant Satellites]
+    - Enc 2: m_pcm_left_hp  ->  60B (48k Redundancy)
+    - Enc 3: m_pcm_right_hp ->  60B (48k Redundancy)
+```
 
+- **Execution Timing**:
+  - DSP Filtering: ~0.70 ms
+  - Pass 1 (HQ): ~1.78 ms
+  - Pass 2 (Sub): ~0.32 ms
+  - Pass 3 (Red): ~0.00 ms (cached / parallel)
+  - Broadcast TX Sweep: ~4.50 ms
+  - **Total Frame Execution**: **~7.30 ms** (well within 10.0 ms frame deadline).
 
-> [!IMPORTANT]
-> ### Critical Codec Optimization & Execution Requirements
-> - **IRAM Placement Mandatory (`linker.lf`)**: Google `liblc3` (on ESP32-S3) and Espressif fixed-point LC3 (on ESP32-C6) **must** be hosted in internal fast SRAM / IRAM instead of external SPI flash. Empirical hardware benchmarks demonstrate that executing from IRAM runs **3x to 5x faster**: from ~4.5 ms down to **0.8 - 1.5 ms** per 48 kHz encode pass, eliminating SPI flash cache misses and bus contention during 10 ms audio frames!
-> - **LTPF (Long-Term Pitch Filter) Disablement**: Disabling LTPF analysis (`lc3_encoder_disable_ltpf()`) for the LC3 encoder boosts encoding throughput by another **~50%**, cutting execution time from ~1.5 ms down to **0.93 - 0.95 ms** per 48 kHz pass (and ~0.35 ms for 8 kHz subwoofer frames)!
+### 5.2 SINK Multi-Packet Burst Recovery & PLC Synthesis
 
-### 5.1 ESP32-S3 SOURCE Audio Engine
-- **Core 1 (Priority 6, 8KB Stack)**: Runs `audioDspTask`. Vectorized DSP filters + LC3 encoding:
-  - High-Pass Filter (HPF @ 100 Hz LR4) for Left and Right channels.
-  - Subwoofer Multirate Decimator (D=6 Polyphase FIR Decimator + 100 Hz LR4 IIR).
-  - Encodes Right Channel (Ch 1 @ 48 kHz) in ~0.94 ms and Subwoofer (Ch 5/3 @ 8 kHz) in ~0.35 ms.
-  - Overall SOURCE CPU load: **38% - 40%** at 240 MHz.
-- **Core 0 (Priority 7, 8KB Stack)**: Runs `sourceTxTask`. Encodes Left Channel (Ch 0 @ 48 kHz) in ~0.93 ms, executes the ~4.2 ms 6-channel 802.11 VSAF broadcast sweep, then sleeps until next frame.
-
-### 5.2 ESP32-C6 SINK Audio Engine
-- **Core 0 (Priority 6, 16KB Stack)**: Runs `bcast_snk_task`.
-  - Jitter FIFO pre-roll cushion: 8 packets (80 ms) during `SCANNING` -> `PREFILL`.
-  - Dual-descriptor I2S DMA with preloaded descriptors.
-  - Fixed-point LC3 decoder in IRAM executes in ~1.2 ms per 10 ms frame (24% CPU load on 160 MHz RISC-V).
-  - Redundancy recovery: when 1 packet is lost (`seq_diff == 2`), recovers t-1 from current packet before t0, maintaining **0 PLC and 0 audio underruns**.
+When packets arrive at the SINK:
+1. **In-Sequence ($\Delta\text{seq} = 1$)**: Primary frame $t_0$ pushed to FIFO.
+2. **Single Packet Drop ($\Delta\text{seq} = 2$)**: Recovers $t_{-1}$ (60B) from redundancy $\rightarrow$ pushes $t_0$ (120B).
+3. **Double Packet Drop ($\Delta\text{seq} = 3$)**: Recovers $t_{-2}$ (60B) $\rightarrow$ recovers $t_{-1}$ (60B) $\rightarrow$ pushes $t_0$ (120B).
+4. **Triple Packet Drop for Subwoofer ($\Delta\text{seq} = 4$)**: Recovers $t_{-3}$ (60B) $\rightarrow$ $t_{-2}$ (60B) $\rightarrow$ $t_{-1}$ (60B) $\rightarrow$ pushes $t_0$ (60B).
+5. **Irrecoverable Burst Drop ($\Delta\text{seq} > 3$)**: SINK synthesizes LC3 PLC frames for intermediate slots via `lc3_decode(..., NULL, pcm_out)`, preserving seamless phase and pitch overlap without "blurp" sound.
 
 ---
 
@@ -322,14 +356,14 @@ Reference decoder times:
 
 ## 7. Interactive CLI Console Commands
 
-Accessible over USB serial on all nodes (**COM116** for SOURCE, **COM23** for SINK Left, **COM24** for SINK Right) at 115,200 baud:
+Accessible over USB serial on all nodes (**COM116** for SOURCE, **COM4** for SINK Surround Right, **COM23** for SINK Left, **COM24** for SINK Right) at 115,200 baud:
 
 | Command | Target | Description |
 | :--- | :--- | :--- |
 | `vol <0..100>` | SOURCE / SINK | Set volume percentage (0 = Mute, 100 = 0 dBFS). Broadcasts from SOURCE to all SINKs. |
 | `voldb <-96..0>` | SOURCE / SINK | Set volume directly in decibels (-96.0 dB to 0.0 dB). |
 | `volu8 <0..255>` | SOURCE / SINK | Set raw 8-bit volume level directly. |
-| `volch <ch> <0..255>` | SOURCE | Set volume for a specific channel (0: Left, 1: Right, 5: Sub). |
+| `volch <ch> <0..255>` | SOURCE | Set volume for a specific channel (0: Left, 1: Right, 2: Center, 3: LSurr, 4: RSurr, 5: Sub). |
 | `mute` / `unmute` | Both | Smoothly mute or unmute audio using 96 dB/s slew rate. |
 | `peer list` | SOURCE | Display registered SINK peers, online status, RTT, and telemetry statistics. |
 | `start` / `play` / `cast` | SOURCE | Begin broadcast audio transmission (`CAST` state). |
@@ -354,21 +388,29 @@ Nodes emit formatted 1.0-second telemetry heartbeats over USB serial:
 +=================================================================== ESP32-S3-SOURCE [SOURCE] ===================================================================+
 |    CPU      | STATE | NODES  |    WIFI     |  AUDIO dBFS  |     STAGE TIMINGS (ms)       |  SOURCE      PKTS  ACK%  FAIL   TOT  |             ROUND-TRIP NET (us)        |
 |  %   C  MHz |       | 012345 | GAIN Ch PHY |   RMS    Pk  |  DSP   Enc1  Enc2  Enc3   TX  |  INPUT        1/s     %   1/s  pkts   |              L_Net       R_Net         |
-| 38  44  240 | CAST  | 11OOOO | +3.0 02 HT3 | -33.5 -30.3 | 0.71  0.93  0.94  0.38  4.24|  TONE       601   93%     2    12K |                727        1790         |
-| 38  45  240 | CAST  | 11OOOO | +3.0 02 HT3 | -33.5 -30.3 | 0.72  0.93  0.94  0.30  4.30|  TONE       598   93%     2    13K |               1008         920         |
+| 36  64  240 | CAST  | OOOO1O | +3.0 10 HT0 | -33.3 -30.3 | 0.70  1.78  0.00  0.32  4.49|  TONE       597   90%     2     7K |                  -           -         |
+| 38  62  240 | CAST  | OOOO1O | +3.0 10 HT0 | -33.6 -30.3 | 0.70  1.78  0.00  0.32  4.81|  TONE       588   61%     6     5K |                  -           -         |
 ```
 
-### SINK Telemetry (Node 23 / 24 - COM23 / COM24)
+### SINK Telemetry (Node 4 - COM4 - Surround Right)
+```text
++=================================================================== ESP32-S3-04-RSUR [SINK] ====================================================================+
+|    CPU      | STATE |  CHAN  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | AMP dB   PKTS  RED  PLC  DMA   FIFO    |         TIME & SYNCHRONIZATION (ms)    |
+|  %   C  MHz |       |        | RSSI Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  SW  HW   1/s  rec  tot  UDR   UDR     |  Local  Master  EMA_offs RB_med RB_rng |
+|  6  47  240 | STRM  | RSUR   |  -53 10 HT0 |  LC3  -33.9 -29.4    48   10  0.65  0.73 | -20   -    99   10    0    0     0    |   5992   14535   +8547   +8546   5.47  |
+```
+
+### SINK Telemetry (Node 23 / 24 - COM23 / COM24 - Left & Right)
 ```text
 +=================================================================== ESP32-C6-23-LEFT [SINK] ====================================================================+
 |    CPU      | STATE |  CHAN  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | AMP dB   PKTS  RED  PLC  DMA   FIFO    |         TIME & SYNCHRONIZATION (ms)    |
 |  %   C  MHz |       |        | RSSI Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  SW  HW   1/s  rec  tot  UDR   UDR     |  Local  Master  EMA_offs RB_med RB_rng |
-| 24  47  160 | STRM  | LEFT   |  -48 02 HT3 |  LC3  -33.7 -27.5    48   10  1.22  1.46 |   0  +3    99   11    5    0     0    |  10089   25693   +1560   +1560   2.33  |
+| 13  47  160 | STRM  | LEFT   |  -57 10 HT0 |  LC3  -33.8 -28.7    48   10  1.28  1.58 |   0  +3    99    8    0    0     0    |   6056   14615   +8568   +8568  10.48  |
 
 +=================================================================== ESP32-C6-24-RIGHT [SINK] ===================================================================+
 |    CPU      | STATE |  CHAN  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | AMP dB   PKTS  RED  PLC  DMA   FIFO    |         TIME & SYNCHRONIZATION (ms)    |
 |  %   C  MHz |       |        | RSSI Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  SW  HW   1/s  rec  tot  UDR   UDR     |  Local  Master  EMA_offs RB_med RB_rng |
-| 24  46  160 | STRM  | RGHT   |  -59 02 HT3 |  LC3  -33.6 -28.2    48   10  1.22  1.47 |   0  +3   100   10    4    0     0    |  10076   25685   +1561   +1561   0.65  |
+| 12  46  160 | STRM  | RGHT   |  -45 10 HT0 |  LC3  -34.0 -29.2    48   10  1.21  1.34 |   0  +3   100   19    3    0     0    |   6054   14625   +8570   +8571   5.96  |
 ```
 
 ---
@@ -382,6 +424,7 @@ Multi-target parallel compilation and concurrent multi-node flashing are execute
 $env:IDF_TOOLS_PATH = "C:\Users\stefa\.espressif"
 . "C:\Users\stefa\OneDrive\Documents\ESP\v6.0.2\esp-idf\export.ps1"
 
-# Parallel Compilation and Concurrent Multi-Node Flashing (Node 16 on COM116, Node 23 on COM23, Node 24 on COM24)
-powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\parallel_build_and_flash.ps1
+# Fast automated build and flash for individual roles
+powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\build_and_flash.ps1 -Role SOURCE -Port COM116
+powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\build_and_flash.ps1 -Role SINK -Port COM4
 ```
