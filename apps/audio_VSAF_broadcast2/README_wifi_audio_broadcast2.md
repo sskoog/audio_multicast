@@ -136,24 +136,32 @@ All network communication uses the **VSAF 3.0 (Variable-rate Synchronized Audio 
 ### 3.1 8-Byte Word-Aligned Header
 
 1. **`type_id` (`uint16_t`, 2 Bytes)**: Combination magic word and message discriminator:
-   - `0x1337`: `VSAF_TYPE_AUDIO` (Forward Audio Broadcast from SOURCE)
-   - `0x1338`: `VSAF_TYPE_CONTROL` (Control Frame from SOURCE)
-   - `0x1339`: `VSAF_TYPE_SINK_TELEMETRY` (Reverse Telemetry Reply from SINK)
+   - `0x1337`: `VSAF_TYPE_AUDIO_SATELLITE` (Satellite Audio Broadcast: Ch 0, 1, 2, 4, 5)
+   - `0x1338`: `VSAF_TYPE_AUDIO_SUBWOOFER` (Subwoofer Audio Broadcast: Ch 3, 4x60B frames)
+   - `0x1350`: `VSAF_TYPE_CONTROL` (Control Frame from SOURCE)
+   - `0x1360`: `VSAF_TYPE_SINK_TELEMETRY` (Reverse Telemetry Reply from SINK)
 2. **`packet_flags` (`uint8_t`, 1 Byte)**: Bit-packed stream configuration:
-   - **Bit 0 (`FRAME_DUR`)**: Frame duration (`0` = 7.5 ms, `1` = 10.0 ms).
+   - **Bit 0 (`FRAME_DUR`)**: Frame duration (`1` = 10.0 ms standard, 7.5 ms deprecated).
    - **Bits 1..3 (`SAMPLE_RATE`)**: Sample rate code (`0` = 8k, `1` = 16k, `2` = 24k, `3` = 32k, `4` = 48k).
-   - **Bits 4..6 (`RECEIVER_ID`)**: Target audio channel (`0` = Left, `1` = Right, `2` = Center, `3` = Surround L, `4` = Surround R, `5` = Sub, `7` = Wildcard Broadcast).
+   - **Bits 4..6 (`RECEIVER_ID`)**: Target audio channel (`0` = Left, `1` = Right, `2` = Center, `3` = Sub, `4` = Surround L, `5` = Surround R, `7` = Wildcard Broadcast).
    - **Bit 7 (`REQ_ACK`)**: **Request for ACK / Telemetry Reply**:
      - `1`: Target SINK is explicitly commanded by SOURCE to send a telemetry reply in this 10 ms window.
      - `0`: SINK remains silent.
 3. **`seq` (`uint8_t`, 1 Byte)**: Monotonically incrementing 8-bit sequence number (0..255).
 4. **`t_tx1_us` (`uint32_t`, 4 Bytes)**: Master microsecond presentation timestamp from `esp_timer_get_time()`.
 
-### 3.2 240-Byte Dual-LC3 Payload
+### 3.2 240-Byte Multi-Rate Redundant Payload
 
-- **`data_t0` (120 Bytes, offset 8)**: Primary LC3 compressed audio frame for current timestamp t0.
-- **`data_t_prev` (120 Bytes, offset 128)**: Redundant LC3 compressed audio frame for previous timestamp t-1.
-- **Total Packet Length**: Strictly **248 Bytes** (fully compliant with the 250-byte ESP-NOW limit).
+- **Satellite Broadcast Packet (`0x1337`, 248 Bytes Total)**:
+  - `data_t0` (120 Bytes, offset 8): Main/HQ LC3 compressed audio frame for timestamp t0 (96 kbps @ 10 ms 48k).
+  - `data_t_prev1` (60 Bytes, offset 128): Redundant LC3 compressed audio frame for timestamp t-1 (48 kbps @ 10 ms 48k).
+  - `data_t_prev2` (60 Bytes, offset 188): Redundant LC3 compressed audio frame for timestamp t-2 (48 kbps @ 10 ms 48k).
+- **Subwoofer Broadcast Packet (`0x1338`, 248 Bytes Total)**:
+  - `data_t0` (60 Bytes, offset 8): Main Subwoofer frame t0 (48 kbps @ 10 ms 8k).
+  - `data_t_prev1` (60 Bytes, offset 68): Redundant Subwoofer frame t-1 (60 Bytes).
+  - `data_t_prev2` (60 Bytes, offset 128): Redundant Subwoofer frame t-2 (60 Bytes).
+  - `data_t_prev3` (60 Bytes, offset 188): Redundant Subwoofer frame t-3 (60 Bytes).
+- **Total Packet Length**: Strictly **248 Bytes** (32-bit aligned, fully compliant with the 250-byte ESP-NOW limit).
 
 ### 3.3 Round-Robin SINK Telemetry Frame (`vsaf_sink_telemetry_t`)
 
@@ -161,7 +169,7 @@ All network communication uses the **VSAF 3.0 (Variable-rate Synchronized Audio 
  0                   1                   2                   3
  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|          type_id (0x1339)     |  sink_id (u8) |  ack_seq (u8) |
+|          type_id (0x1360)     |  sink_id (u8) |  ack_seq (u8) |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                          t_tx1_echo                           |
 |             (Echoed SOURCE Timestamp in Microseconds)         |

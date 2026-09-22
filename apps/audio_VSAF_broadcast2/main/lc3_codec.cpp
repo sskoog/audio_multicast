@@ -12,7 +12,7 @@ Lc3CodecEngine::Lc3CodecEngine() {}
 
 Lc3CodecEngine::~Lc3CodecEngine() {
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
-    for (int i = 0; i < 3; ++i) {
+    for (size_t i = 0; i < NUM_ENCODERS; ++i) {
         if (m_google_enc_mem[i]) {
             free(m_google_enc_mem[i]);
             m_google_enc_mem[i] = nullptr;
@@ -37,7 +37,7 @@ Lc3CodecEngine::~Lc3CodecEngine() {
 
 esp_err_t Lc3CodecEngine::initEncoder(uint32_t sample_rate_hz, uint8_t channels, uint32_t frame_duration_us, uint16_t octets_per_frame) {
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
-    for (int i = 0; i < 3; ++i) {
+    for (size_t i = 0; i < NUM_ENCODERS; ++i) {
         if (m_google_enc_mem[i]) {
             free(m_google_enc_mem[i]);
             m_google_enc_mem[i] = nullptr;
@@ -47,12 +47,12 @@ esp_err_t Lc3CodecEngine::initEncoder(uint32_t sample_rate_hz, uint8_t channels,
     m_encoder_ready = false;
 
     m_sample_rate = sample_rate_hz;
-    m_channels = (channels >= 3) ? 3 : (channels >= 2 ? 2 : 1);
-    m_frame_duration_us = (frame_duration_us == 7500) ? 7500 : 10000;
+    m_channels = (channels >= 5) ? 5 : (channels >= 3 ? 3 : (channels >= 2 ? 2 : 1));
+    m_frame_duration_us = 10000;
     m_octets_per_frame = octets_per_frame;
 
     for (uint8_t i = 0; i < m_channels; ++i) {
-        uint32_t ch_sr = (i == 2) ? 8000 : m_sample_rate;
+        uint32_t ch_sr = (i == 4 || (m_channels == 3 && i == 2)) ? 8000 : m_sample_rate;
         unsigned mem_size = lc3_encoder_size(m_frame_duration_us, ch_sr);
         m_google_enc_mem[i] = malloc(mem_size);
         if (!m_google_enc_mem[i]) {
@@ -68,12 +68,12 @@ esp_err_t Lc3CodecEngine::initEncoder(uint32_t sample_rate_hz, uint8_t channels,
             return ESP_FAIL;
         }
 
-        // Disable LTPF (Long Term Pitch Filter) analysis for significant encoding speedup
+        // Disable LTPF (Long Term Pitch Filter) analysis for significant encoding speedup & clean subwoofer bass
         lc3_encoder_disable_ltpf(static_cast<lc3_encoder_t>(m_google_encoder[i]));
     }
 
     m_encoder_ready = true;
-    ESP_LOGI(TAG, "Google liblc3 (Hardware FPU, No-LTPF) Encoder Initialized: %u-ch (Ch0/1: %lu Hz, Ch2 Sub: 8000 Hz, %u octets/frame)",
+    ESP_LOGI(TAG, "Google liblc3 (Hardware FPU, No-LTPF) Encoder Initialized: %u-ch (Ch0..3: %lu Hz, Ch4 Sub: 8000 Hz, %u octets/frame)",
              m_channels, (unsigned long)m_sample_rate, m_octets_per_frame);
     return ESP_OK;
 #else
@@ -220,24 +220,25 @@ esp_err_t Lc3CodecEngine::encodeFrame(const int16_t* pcm_in, size_t pcm_samples,
     if (!m_encoder_ready || channel_idx >= m_channels || !m_google_encoder[channel_idx] || !pcm_in || !out_lc3_buf || !actual_out_bytes) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (max_out_bytes < m_octets_per_frame) {
-        return ESP_ERR_NO_MEM;
+    size_t target_nbytes = max_out_bytes;
+    if (target_nbytes < 20) {
+        target_nbytes = m_octets_per_frame;
     }
 
     int ret = lc3_encode(static_cast<lc3_encoder_t>(m_google_encoder[channel_idx]), LC3_PCM_FORMAT_S16,
-                         pcm_in, stride, m_octets_per_frame, out_lc3_buf);
+                         pcm_in, stride, static_cast<int>(target_nbytes), out_lc3_buf);
     if (ret != 0) {
         ESP_LOGE(TAG, "liblc3 encode error: %d on ch %u", ret, channel_idx);
         return ESP_FAIL;
     }
 
-    *actual_out_bytes = m_octets_per_frame;
+    *actual_out_bytes = target_nbytes;
     return ESP_OK;
 #else
     if (!m_encoder_ready || !m_enc_handle || !pcm_in || !out_lc3_buf || !actual_out_bytes) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (max_out_bytes < m_octets_per_frame) {
+    if (max_out_bytes < 20) {
         return ESP_ERR_NO_MEM;
     }
 
@@ -270,14 +271,13 @@ esp_err_t Lc3CodecEngine::decodeFrame(const uint8_t* in_lc3_buf, size_t in_bytes
 
     uint32_t target_rate = (stream_sample_rate > 0) ? stream_sample_rate : m_sample_rate;
     uint32_t target_dur = (stream_duration_us > 0) ? stream_duration_us : m_frame_duration_us;
-    uint16_t target_octets = (in_bytes >= 20 && in_bytes <= 120) ? static_cast<uint16_t>(in_bytes) : m_octets_per_frame;
 
-    /* Dynamically adapt decoder if stream sample rate, duration, or octets per frame change on-the-fly */
-    if (target_rate != m_sample_rate || target_dur != m_frame_duration_us || target_octets != m_octets_per_frame || !m_decoder_ready) {
-        ESP_LOGI(TAG, "Dynamic decoder adaptation: %lu Hz (%.1f ms, %u oct) -> %lu Hz (%.1f ms, %u oct)",
-                 (unsigned long)m_sample_rate, m_frame_duration_us / 1000.0f, m_octets_per_frame,
-                 (unsigned long)target_rate, target_dur / 1000.0f, target_octets);
-        initDecoder(target_rate, m_channels, target_dur, target_octets);
+    /* Dynamically adapt decoder ONLY if sample rate or frame duration change on-the-fly (LC3 frame octet length is dynamic per frame) */
+    if (target_rate != m_sample_rate || target_dur != m_frame_duration_us || !m_decoder_ready) {
+        ESP_LOGI(TAG, "Dynamic decoder adaptation: %lu Hz (%.1f ms) -> %lu Hz (%.1f ms)",
+                 (unsigned long)m_sample_rate, m_frame_duration_us / 1000.0f,
+                 (unsigned long)target_rate, target_dur / 1000.0f);
+        initDecoder(target_rate, m_channels, target_dur, m_octets_per_frame);
     }
 
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
@@ -364,14 +364,13 @@ esp_err_t Lc3CodecEngine::decodeFrame(const uint8_t* in_lc3_buf, size_t in_bytes
 
     uint32_t target_rate = (stream_sample_rate > 0) ? stream_sample_rate : m_sample_rate;
     uint32_t target_dur = (stream_duration_us > 0) ? stream_duration_us : m_frame_duration_us;
-    uint16_t target_octets = (in_bytes >= 20 && in_bytes <= 120) ? static_cast<uint16_t>(in_bytes) : m_octets_per_frame;
 
-    /* Dynamically adapt decoder if stream sample rate, duration, or octets per frame change on-the-fly */
-    if (target_rate != m_sample_rate || target_dur != m_frame_duration_us || target_octets != m_octets_per_frame || !m_decoder_ready) {
-        ESP_LOGI(TAG, "Dynamic decoder adaptation: %lu Hz (%.1f ms, %u oct) -> %lu Hz (%.1f ms, %u oct)",
-                 (unsigned long)m_sample_rate, m_frame_duration_us / 1000.0f, m_octets_per_frame,
-                 (unsigned long)target_rate, target_dur / 1000.0f, target_octets);
-        initDecoder(target_rate, m_channels, target_dur, target_octets);
+    /* Dynamically adapt decoder ONLY if sample rate or frame duration change on-the-fly (LC3 frame octet length is dynamic per frame) */
+    if (target_rate != m_sample_rate || target_dur != m_frame_duration_us || !m_decoder_ready) {
+        ESP_LOGI(TAG, "Dynamic decoder adaptation: %lu Hz (%.1f ms) -> %lu Hz (%.1f ms)",
+                 (unsigned long)m_sample_rate, m_frame_duration_us / 1000.0f,
+                 (unsigned long)target_rate, target_dur / 1000.0f);
+        initDecoder(target_rate, m_channels, target_dur, m_octets_per_frame);
     }
 
 #if defined(CONFIG_IDF_TARGET_ESP32S3)

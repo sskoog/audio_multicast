@@ -346,7 +346,7 @@ private:
     void runAudioDspLoop();
     void runSinkLoop();
 
-    void handleAudioPacket(const vsaf_audio_packet_t* pkt, int8_t rssi, int64_t t_rx1_us);
+    void handleAudioPacket(const uint8_t* data, size_t data_len, int8_t rssi, int64_t t_rx1_us);
     void sendSinkTelemetry(uint8_t ack_seq, uint32_t t_tx1_echo, int64_t t_rx1_us, int8_t rssi);
 
     Codec::Lc3CodecEngine&          m_lc3_codec;
@@ -378,8 +378,18 @@ private:
     uint16_t                   m_octets_per_frame;
     uint32_t                   m_frame_duration_us;
     vsaf_audio_packet_t        m_last_tx_pkt[MAX_SINK_NODES];
-    uint8_t                    m_prev_encoded_channels[MAX_SINK_NODES][LC3_FRAME_OCTETS];
-    bool                       m_prev_encoded_valid[MAX_SINK_NODES];
+    vsaf_sub_packet_t          m_last_tx_sub_pkt;
+    uint8_t                    m_prev1_encoded_sat[MAX_SINK_NODES][LC3_FRAME_OCTETS_RED];
+    uint8_t                    m_prev2_encoded_sat[MAX_SINK_NODES][LC3_FRAME_OCTETS_RED];
+    bool                       m_prev1_sat_valid[MAX_SINK_NODES];
+    bool                       m_prev2_sat_valid[MAX_SINK_NODES];
+
+    uint8_t                    m_prev1_encoded_sub[LC3_FRAME_OCTETS_RED];
+    uint8_t                    m_prev2_encoded_sub[LC3_FRAME_OCTETS_RED];
+    uint8_t                    m_prev3_encoded_sub[LC3_FRAME_OCTETS_RED];
+    bool                       m_prev1_sub_valid;
+    bool                       m_prev2_sub_valid;
+    bool                       m_prev3_sub_valid;
 
     std::atomic<uint8_t>       m_target_volume_u8;
     float                      m_target_gain_db;
@@ -445,7 +455,7 @@ private:
         uint8_t  len;
         uint8_t  flags;
         bool     is_redundant;
-        uint8_t  data[LC3_FRAME_OCTETS];
+        uint8_t  data[LC3_FRAME_OCTETS_HQ];
     };
     SinkFifoItem               m_sink_fifo[SINK_FIFO_PACKETS];
     size_t                     m_sink_fifo_head;

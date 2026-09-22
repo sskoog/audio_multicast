@@ -126,8 +126,17 @@ EspNowBroadcastEngine::EspNowBroadcastEngine(Codec::Lc3CodecEngine& primary_code
     m_hpf_stereo.initHighPass(100.0f, static_cast<float>(m_telemetry.sample_rate));
     m_sub_decimator.init(100.0f, static_cast<float>(m_telemetry.sample_rate));
 
-    memset(m_prev_encoded_channels, 0, sizeof(m_prev_encoded_channels));
-    memset(m_prev_encoded_valid, 0, sizeof(m_prev_encoded_valid));
+    memset(m_prev1_encoded_sat, 0, sizeof(m_prev1_encoded_sat));
+    memset(m_prev2_encoded_sat, 0, sizeof(m_prev2_encoded_sat));
+    memset(m_prev1_sat_valid, 0, sizeof(m_prev1_sat_valid));
+    memset(m_prev2_sat_valid, 0, sizeof(m_prev2_sat_valid));
+
+    memset(m_prev1_encoded_sub, 0, sizeof(m_prev1_encoded_sub));
+    memset(m_prev2_encoded_sub, 0, sizeof(m_prev2_encoded_sub));
+    memset(m_prev3_encoded_sub, 0, sizeof(m_prev3_encoded_sub));
+    m_prev1_sub_valid = false;
+    m_prev2_sub_valid = false;
+    m_prev3_sub_valid = false;
 
     // Initialize 6 SINK peer configurations
     const char* default_names[MAX_SINK_NODES] = {
@@ -729,19 +738,20 @@ void EspNowBroadcastEngine::onPacketReceived(const uint8_t* mac_addr, const uint
             return;
         }
 
-        if (type_id == VSAF_TYPE_AUDIO && data_len >= static_cast<int>(sizeof(vsaf_audio_packet_t))) {
-            const auto* pkt = reinterpret_cast<const vsaf_audio_packet_t*>(data);
+        if ((type_id == VSAF_TYPE_AUDIO_SATELLITE && data_len >= static_cast<int>(sizeof(vsaf_audio_packet_t))) ||
+            (type_id == VSAF_TYPE_AUDIO_SUBWOOFER && data_len >= static_cast<int>(sizeof(vsaf_sub_packet_t)))) {
             m_raw_audio_pkt_count++;
             m_channel_locked.store(true, std::memory_order_release);
             m_last_rx_audio_pkt_us.store(t_now_us, std::memory_order_release);
 
-            uint8_t rx_id = get_flags_rx_id(pkt->packet_flags);
+            uint8_t flags = data[2];
+            uint8_t rx_id = get_flags_rx_id(flags);
             m_last_seen_rx_id.store(rx_id, std::memory_order_relaxed);
             // Instant filter: Reject if not for our channel and not wildcard broadcast (7)
             if (rx_id != m_target_channel && rx_id != NODE_ID_BROADCAST) {
                 return;
             }
-            handleAudioPacket(pkt, rssi, t_now_us);
+            handleAudioPacket(data, data_len, rssi, t_now_us);
         }
         return;
     }
@@ -802,14 +812,21 @@ void EspNowBroadcastEngine::onPacketReceived(const uint8_t* mac_addr, const uint
 // SINK Internal Helpers
 // ---------------------------------------------------------------------------
 
-void EspNowBroadcastEngine::handleAudioPacket(const vsaf_audio_packet_t* pkt, int8_t rssi, int64_t t_rx1_us) {
+void EspNowBroadcastEngine::handleAudioPacket(const uint8_t* data, size_t data_len, int8_t rssi, int64_t t_rx1_us) {
+    uint16_t type_id = *reinterpret_cast<const uint16_t*>(data);
+    bool is_sub = (type_id == VSAF_TYPE_AUDIO_SUBWOOFER);
+
+    uint8_t flags = data[2];
+    uint8_t seq = data[3];
+    uint32_t t_tx1_us = *reinterpret_cast<const uint32_t*>(data + 4);
+
     m_channel_locked.store(true, std::memory_order_release);
     m_last_rssi = rssi;
-    m_last_master_time_us = pkt->t_tx1_us;
+    m_last_master_time_us = t_tx1_us;
     m_last_local_time_us = static_cast<uint32_t>(t_rx1_us);
 
     // Compute instantaneous clock offset between master and local SINK clock
-    int32_t instant_offset = static_cast<int32_t>(pkt->t_tx1_us - static_cast<uint32_t>(t_rx1_us));
+    int32_t instant_offset = static_cast<int32_t>(t_tx1_us - static_cast<uint32_t>(t_rx1_us));
     float offset_ms = instant_offset / 1000.0f;
     m_time_offset_buf.push(offset_ms);
     if (m_ema_time_offset_ms == 0.0f) {
@@ -818,22 +835,24 @@ void EspNowBroadcastEngine::handleAudioPacket(const vsaf_audio_packet_t* pkt, in
         m_ema_time_offset_ms = (m_ema_time_offset_ms * 0.95f) + (offset_ms * 0.05f);
     }
 
-    // Sequence tracking & redundancy recovery
-    int8_t seq_diff = static_cast<int8_t>(static_cast<uint8_t>(pkt->seq - m_last_rx_seq));
+    const vsaf_audio_packet_t* sat_pkt = reinterpret_cast<const vsaf_audio_packet_t*>(data);
+    const vsaf_sub_packet_t*   sub_pkt = reinterpret_cast<const vsaf_sub_packet_t*>(data);
+
+    // Sequence tracking & multi-tier redundancy recovery
+    int8_t seq_diff = static_cast<int8_t>(static_cast<uint8_t>(seq - m_last_rx_seq));
 
     if (!m_first_packet_received || seq_diff < -64 || seq_diff > 64) {
         // Initial synchronization or major sequence discontinuity
         m_first_packet_received = true;
-        m_last_rx_seq = pkt->seq;
+        m_last_rx_seq = seq;
 
-        // Push current frame t0
         portENTER_CRITICAL(&m_sink_fifo_lock);
         if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
-            m_sink_fifo[m_sink_fifo_head].seq = pkt->seq;
-            m_sink_fifo[m_sink_fifo_head].len = LC3_FRAME_OCTETS;
-            m_sink_fifo[m_sink_fifo_head].flags = pkt->packet_flags;
+            m_sink_fifo[m_sink_fifo_head].seq = seq;
+            m_sink_fifo[m_sink_fifo_head].len = is_sub ? LC3_FRAME_OCTETS_RED : LC3_FRAME_OCTETS_HQ;
+            m_sink_fifo[m_sink_fifo_head].flags = flags;
             m_sink_fifo[m_sink_fifo_head].is_redundant = false;
-            memcpy(m_sink_fifo[m_sink_fifo_head].data, pkt->data_t0, LC3_FRAME_OCTETS);
+            memcpy(m_sink_fifo[m_sink_fifo_head].data, is_sub ? sub_pkt->data_t0 : sat_pkt->data_t0, m_sink_fifo[m_sink_fifo_head].len);
             m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
             m_sink_fifo_count++;
         }
@@ -843,14 +862,14 @@ void EspNowBroadcastEngine::handleAudioPacket(const vsaf_audio_packet_t* pkt, in
         m_rx_packets_sec++;
     } else if (seq_diff == 1) {
         // Consecutive frame (normal flow): push t0
-        m_last_rx_seq = pkt->seq;
+        m_last_rx_seq = seq;
         portENTER_CRITICAL(&m_sink_fifo_lock);
         if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
-            m_sink_fifo[m_sink_fifo_head].seq = pkt->seq;
-            m_sink_fifo[m_sink_fifo_head].len = LC3_FRAME_OCTETS;
-            m_sink_fifo[m_sink_fifo_head].flags = pkt->packet_flags;
+            m_sink_fifo[m_sink_fifo_head].seq = seq;
+            m_sink_fifo[m_sink_fifo_head].len = is_sub ? LC3_FRAME_OCTETS_RED : LC3_FRAME_OCTETS_HQ;
+            m_sink_fifo[m_sink_fifo_head].flags = flags;
             m_sink_fifo[m_sink_fifo_head].is_redundant = false;
-            memcpy(m_sink_fifo[m_sink_fifo_head].data, pkt->data_t0, LC3_FRAME_OCTETS);
+            memcpy(m_sink_fifo[m_sink_fifo_head].data, is_sub ? sub_pkt->data_t0 : sat_pkt->data_t0, m_sink_fifo[m_sink_fifo_head].len);
             m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
             m_sink_fifo_count++;
         } else {
@@ -861,26 +880,26 @@ void EspNowBroadcastEngine::handleAudioPacket(const vsaf_audio_packet_t* pkt, in
         m_rx_packets_total++;
         m_rx_packets_sec++;
     } else if (seq_diff == 2) {
-        // EXACTLY 1 packet was dropped in RF! Recover t-1 from current packet!
-        m_last_rx_seq = pkt->seq;
+        // EXACTLY 1 packet dropped in RF: recover t-1 (60B), then push t0
+        m_last_rx_seq = seq;
         portENTER_CRITICAL(&m_sink_fifo_lock);
+        // Push t-1
         if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
-            // Push recovered previous frame (t-1)
-            m_sink_fifo[m_sink_fifo_head].seq = static_cast<uint8_t>(pkt->seq - 1);
-            m_sink_fifo[m_sink_fifo_head].len = LC3_FRAME_OCTETS;
-            m_sink_fifo[m_sink_fifo_head].flags = pkt->packet_flags;
+            m_sink_fifo[m_sink_fifo_head].seq = static_cast<uint8_t>(seq - 1);
+            m_sink_fifo[m_sink_fifo_head].len = LC3_FRAME_OCTETS_RED;
+            m_sink_fifo[m_sink_fifo_head].flags = flags;
             m_sink_fifo[m_sink_fifo_head].is_redundant = true;
-            memcpy(m_sink_fifo[m_sink_fifo_head].data, pkt->data_t_prev, LC3_FRAME_OCTETS);
+            memcpy(m_sink_fifo[m_sink_fifo_head].data, is_sub ? sub_pkt->data_t_prev1 : sat_pkt->data_t_prev1, LC3_FRAME_OCTETS_RED);
             m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
             m_sink_fifo_count++;
         }
-        // Push current frame (t0)
+        // Push t0
         if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
-            m_sink_fifo[m_sink_fifo_head].seq = pkt->seq;
-            m_sink_fifo[m_sink_fifo_head].len = LC3_FRAME_OCTETS;
-            m_sink_fifo[m_sink_fifo_head].flags = pkt->packet_flags;
+            m_sink_fifo[m_sink_fifo_head].seq = seq;
+            m_sink_fifo[m_sink_fifo_head].len = is_sub ? LC3_FRAME_OCTETS_RED : LC3_FRAME_OCTETS_HQ;
+            m_sink_fifo[m_sink_fifo_head].flags = flags;
             m_sink_fifo[m_sink_fifo_head].is_redundant = false;
-            memcpy(m_sink_fifo[m_sink_fifo_head].data, pkt->data_t0, LC3_FRAME_OCTETS);
+            memcpy(m_sink_fifo[m_sink_fifo_head].data, is_sub ? sub_pkt->data_t0 : sat_pkt->data_t0, m_sink_fifo[m_sink_fifo_head].len);
             m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
             m_sink_fifo_count++;
         } else {
@@ -890,25 +909,37 @@ void EspNowBroadcastEngine::handleAudioPacket(const vsaf_audio_packet_t* pkt, in
 
         m_rx_packets_total += 2;
         m_rx_packets_sec += 2;
-    } else if (seq_diff > 2) {
-        // Multiple dropped packets: recover t-1, then push t0 (earlier gaps handled cleanly by playback task)
-        m_last_rx_seq = pkt->seq;
+    } else if (seq_diff == 3) {
+        // BURST of 2 packets dropped in RF: recover t-2 (60B), then t-1 (60B), then push t0
+        m_last_rx_seq = seq;
         portENTER_CRITICAL(&m_sink_fifo_lock);
+        // Push t-2
         if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
-            m_sink_fifo[m_sink_fifo_head].seq = static_cast<uint8_t>(pkt->seq - 1);
-            m_sink_fifo[m_sink_fifo_head].len = LC3_FRAME_OCTETS;
-            m_sink_fifo[m_sink_fifo_head].flags = pkt->packet_flags;
+            m_sink_fifo[m_sink_fifo_head].seq = static_cast<uint8_t>(seq - 2);
+            m_sink_fifo[m_sink_fifo_head].len = LC3_FRAME_OCTETS_RED;
+            m_sink_fifo[m_sink_fifo_head].flags = flags;
             m_sink_fifo[m_sink_fifo_head].is_redundant = true;
-            memcpy(m_sink_fifo[m_sink_fifo_head].data, pkt->data_t_prev, LC3_FRAME_OCTETS);
+            memcpy(m_sink_fifo[m_sink_fifo_head].data, is_sub ? sub_pkt->data_t_prev2 : sat_pkt->data_t_prev2, LC3_FRAME_OCTETS_RED);
             m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
             m_sink_fifo_count++;
         }
+        // Push t-1
         if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
-            m_sink_fifo[m_sink_fifo_head].seq = pkt->seq;
-            m_sink_fifo[m_sink_fifo_head].len = LC3_FRAME_OCTETS;
-            m_sink_fifo[m_sink_fifo_head].flags = pkt->packet_flags;
+            m_sink_fifo[m_sink_fifo_head].seq = static_cast<uint8_t>(seq - 1);
+            m_sink_fifo[m_sink_fifo_head].len = LC3_FRAME_OCTETS_RED;
+            m_sink_fifo[m_sink_fifo_head].flags = flags;
+            m_sink_fifo[m_sink_fifo_head].is_redundant = true;
+            memcpy(m_sink_fifo[m_sink_fifo_head].data, is_sub ? sub_pkt->data_t_prev1 : sat_pkt->data_t_prev1, LC3_FRAME_OCTETS_RED);
+            m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
+            m_sink_fifo_count++;
+        }
+        // Push t0
+        if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
+            m_sink_fifo[m_sink_fifo_head].seq = seq;
+            m_sink_fifo[m_sink_fifo_head].len = is_sub ? LC3_FRAME_OCTETS_RED : LC3_FRAME_OCTETS_HQ;
+            m_sink_fifo[m_sink_fifo_head].flags = flags;
             m_sink_fifo[m_sink_fifo_head].is_redundant = false;
-            memcpy(m_sink_fifo[m_sink_fifo_head].data, pkt->data_t0, LC3_FRAME_OCTETS);
+            memcpy(m_sink_fifo[m_sink_fifo_head].data, is_sub ? sub_pkt->data_t0 : sat_pkt->data_t0, m_sink_fifo[m_sink_fifo_head].len);
             m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
             m_sink_fifo_count++;
         } else {
@@ -916,8 +947,60 @@ void EspNowBroadcastEngine::handleAudioPacket(const vsaf_audio_packet_t* pkt, in
         }
         portEXIT_CRITICAL(&m_sink_fifo_lock);
 
-        m_rx_packets_total += 2;
-        m_rx_packets_sec += 2;
+        m_rx_packets_total += 3;
+        m_rx_packets_sec += 3;
+    } else if (seq_diff >= 4) {
+        // BURST of 3+ packets dropped: recover available history (up to t-3 for sub, t-2 for sat)
+        m_last_rx_seq = seq;
+        portENTER_CRITICAL(&m_sink_fifo_lock);
+        if (is_sub) {
+            // Push t-3 for Subwoofer
+            if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
+                m_sink_fifo[m_sink_fifo_head].seq = static_cast<uint8_t>(seq - 3);
+                m_sink_fifo[m_sink_fifo_head].len = LC3_FRAME_OCTETS_RED;
+                m_sink_fifo[m_sink_fifo_head].flags = flags;
+                m_sink_fifo[m_sink_fifo_head].is_redundant = true;
+                memcpy(m_sink_fifo[m_sink_fifo_head].data, sub_pkt->data_t_prev3, LC3_FRAME_OCTETS_RED);
+                m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
+                m_sink_fifo_count++;
+            }
+        }
+        // Push t-2
+        if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
+            m_sink_fifo[m_sink_fifo_head].seq = static_cast<uint8_t>(seq - 2);
+            m_sink_fifo[m_sink_fifo_head].len = LC3_FRAME_OCTETS_RED;
+            m_sink_fifo[m_sink_fifo_head].flags = flags;
+            m_sink_fifo[m_sink_fifo_head].is_redundant = true;
+            memcpy(m_sink_fifo[m_sink_fifo_head].data, is_sub ? sub_pkt->data_t_prev2 : sat_pkt->data_t_prev2, LC3_FRAME_OCTETS_RED);
+            m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
+            m_sink_fifo_count++;
+        }
+        // Push t-1
+        if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
+            m_sink_fifo[m_sink_fifo_head].seq = static_cast<uint8_t>(seq - 1);
+            m_sink_fifo[m_sink_fifo_head].len = LC3_FRAME_OCTETS_RED;
+            m_sink_fifo[m_sink_fifo_head].flags = flags;
+            m_sink_fifo[m_sink_fifo_head].is_redundant = true;
+            memcpy(m_sink_fifo[m_sink_fifo_head].data, is_sub ? sub_pkt->data_t_prev1 : sat_pkt->data_t_prev1, LC3_FRAME_OCTETS_RED);
+            m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
+            m_sink_fifo_count++;
+        }
+        // Push t0
+        if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
+            m_sink_fifo[m_sink_fifo_head].seq = seq;
+            m_sink_fifo[m_sink_fifo_head].len = is_sub ? LC3_FRAME_OCTETS_RED : LC3_FRAME_OCTETS_HQ;
+            m_sink_fifo[m_sink_fifo_head].flags = flags;
+            m_sink_fifo[m_sink_fifo_head].is_redundant = false;
+            memcpy(m_sink_fifo[m_sink_fifo_head].data, is_sub ? sub_pkt->data_t0 : sat_pkt->data_t0, m_sink_fifo[m_sink_fifo_head].len);
+            m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
+            m_sink_fifo_count++;
+        } else {
+            m_fifo_overflows++;
+        }
+        portEXIT_CRITICAL(&m_sink_fifo_lock);
+
+        m_rx_packets_total += (is_sub ? 4 : 3);
+        m_rx_packets_sec += (is_sub ? 4 : 3);
     }
     // (If seq_diff <= 0, duplicate/stale frame: ignore)
 
@@ -928,8 +1011,8 @@ void EspNowBroadcastEngine::handleAudioPacket(const vsaf_audio_packet_t* pkt, in
 
     // SINK Reply on Command Only:
     // Only transmit telemetry reply if SOURCE explicitly requested it in packet_flags (bit 7)
-    if (get_flags_req_ack(pkt->packet_flags)) {
-        sendSinkTelemetry(pkt->seq, pkt->t_tx1_us, t_rx1_us, rssi);
+    if (get_flags_req_ack(flags)) {
+        sendSinkTelemetry(seq, t_tx1_us, t_rx1_us, rssi);
     }
 }
 
@@ -971,7 +1054,6 @@ void EspNowBroadcastEngine::audioDspTaskTrampoline(void* arg) {
 void EspNowBroadcastEngine::runAudioDspLoop() {
     ESP_LOGI(TAG, "SOURCE Audio Pipeline (DSP + Dual LC3 + Broadcast TX) started on Core 1 (Priority 6, Hardware FPU)");
 
-    static uint8_t encoded_channels[MAX_SINK_NODES][LC3_FRAME_OCTETS];
     static float s_stereo_in_f32[480 * 2];
     static float s_stereo_hp_f32[480 * 2];
     static float s_mono_in_f32[480];
@@ -1046,67 +1128,129 @@ void EspNowBroadcastEngine::runAudioDspLoop() {
         float dsp_ms = (dsp_t1 - frame_start_us) / 1000.0f;
         m_dsp_duration_buf.push(dsp_ms);
 
-        // 3. Encode LC3 Channels directly
-        // 3.1 Encode Ch 0 (Left 48k)
+        // 3. LC3 Multi-Rate Encoding Passes (5 Encoders Total, All with LTPF Disabled)
+        // -------------------------------------------------------------------------
+        // Channel topology:
+        // Ch 0: Left High-Pass (Satellite Left)
+        // Ch 1: Right High-Pass (Satellite Right)
+        // Ch 2: Center High-Pass (mapped from Left HP)
+        // Ch 3: Subwoofer (8 kHz Linkwitz-Riley LP polyphase decimated, Packet Type 0x1338)
+        // Ch 4: Left Surround (mapped from Left HP)
+        // Ch 5: Right Surround (mapped from Right HP)
+
+        static uint8_t encoded_sat_hq[2][LC3_FRAME_OCTETS_HQ];   // [0]: Left HQ, [1]: Right HQ (120B)
+        static uint8_t encoded_sat_red[2][LC3_FRAME_OCTETS_RED]; // [0]: Left Red, [1]: Right Red (60B)
+        static uint8_t encoded_sub_60[LC3_FRAME_OCTETS_RED];      // Subwoofer (60B)
+
+        // 3.1 Left Channel Dual-Pass: HQ (120B, Enc 0) + Redundancy (60B, Enc 2)
         int64_t enc1_t0 = esp_timer_get_time();
         size_t actual_bytes = 0;
-        m_lc3_codec.encodeFrame(m_pcm_left_hp, samples,
-                                encoded_channels[0], LC3_FRAME_OCTETS, &actual_bytes, 0, 1);
+        m_lc3_codec.encodeFrame(m_pcm_left_hp, samples, encoded_sat_hq[0], LC3_FRAME_OCTETS_HQ, &actual_bytes, 0, 1);
+        m_lc3_codec.encodeFrame(m_pcm_left_hp, samples, encoded_sat_red[0], LC3_FRAME_OCTETS_RED, &actual_bytes, 2, 1);
         int64_t enc1_t1 = esp_timer_get_time();
         float enc1_ms = (enc1_t1 - enc1_t0) / 1000.0f;
         m_enc1_duration_buf.push(enc1_ms);
 
-        // 3.2 Encode Ch 1 (Right 48k)
+        // 3.2 Right Channel Dual-Pass: HQ (120B, Enc 1) + Redundancy (60B, Enc 3)
         int64_t enc2_t0 = esp_timer_get_time();
         if (m_is_stereo || m_tone_test_mode) {
-            m_lc3_codec.encodeFrame(m_pcm_right_hp, samples,
-                                    encoded_channels[1], LC3_FRAME_OCTETS, &actual_bytes, 1, 1);
+            m_lc3_codec.encodeFrame(m_pcm_right_hp, samples, encoded_sat_hq[1], LC3_FRAME_OCTETS_HQ, &actual_bytes, 1, 1);
+            m_lc3_codec.encodeFrame(m_pcm_right_hp, samples, encoded_sat_red[1], LC3_FRAME_OCTETS_RED, &actual_bytes, 3, 1);
         } else {
-            // Mono mode: duplicate Left channel encode into Right
-            memcpy(encoded_channels[1], encoded_channels[0], LC3_FRAME_OCTETS);
+            // Mono mode: duplicate Left channel encodes
+            memcpy(encoded_sat_hq[1], encoded_sat_hq[0], LC3_FRAME_OCTETS_HQ);
+            memcpy(encoded_sat_red[1], encoded_sat_red[0], LC3_FRAME_OCTETS_RED);
         }
         int64_t enc2_t1 = esp_timer_get_time();
         float enc2_ms = (enc2_t1 - enc2_t0) / 1000.0f;
         m_enc2_duration_buf.push(enc2_ms);
 
-        // 3.3 Encode Ch 5 / Ch 3 Sub (Sub 8k)
+        // 3.3 Subwoofer Single-Pass (60B @ 8 kHz, Enc 4)
         int64_t enc3_t0 = esp_timer_get_time();
-        m_lc3_codec.encodeFrame(m_pcm_sub_8k, 80,
-                                encoded_channels[5], LC3_FRAME_OCTETS, &actual_bytes, 2, 1);
+        m_lc3_codec.encodeFrame(m_pcm_sub_8k, 80, encoded_sub_60, LC3_FRAME_OCTETS_RED, &actual_bytes, 4, 1);
         int64_t enc3_t1 = esp_timer_get_time();
         float enc3_ms = (enc3_t1 - enc3_t0) / 1000.0f;
         m_enc3_duration_buf.push(enc3_ms);
 
-        // Map auxiliary channels (Center, Surround Left, Surround Right)
-        memcpy(encoded_channels[2], encoded_channels[0], LC3_FRAME_OCTETS); // Ch 2 Center -> Left 48k
-        memcpy(encoded_channels[3], encoded_channels[5], LC3_FRAME_OCTETS); // Ch 3 Surround Left / Sub -> Sub 8k
-        memcpy(encoded_channels[4], encoded_channels[1], LC3_FRAME_OCTETS); // Ch 4 Surround Right -> Right 48k
+        // Map satellite channels:
+        // Ch 0 (Left), Ch 2 (Center), Ch 4 (Left Surround) -> Left
+        // Ch 1 (Right), Ch 5 (Right Surround) -> Right
+        const uint8_t* sat_hq_ptr[MAX_SINK_NODES] = {
+            encoded_sat_hq[0], encoded_sat_hq[1], encoded_sat_hq[0],
+            nullptr,           encoded_sat_hq[0], encoded_sat_hq[1]
+        };
+        const uint8_t* sat_red_ptr[MAX_SINK_NODES] = {
+            encoded_sat_red[0], encoded_sat_red[1], encoded_sat_red[0],
+            nullptr,            encoded_sat_red[0], encoded_sat_red[1]
+        };
 
-        // 4. Prepare Broadcast Packets for all 6 Audio Channels
+        // 4. Prepare Broadcast Packets for all 6 Channels
+        uint32_t t_now_tx_us = static_cast<uint32_t>(esp_timer_get_time());
+
+        // 4.1 Prepare Satellite Packets (Ch 0, 1, 2, 4, 5)
         for (size_t ch = 0; ch < MAX_SINK_NODES; ++ch) {
-            bool red_valid = m_prev_encoded_valid[ch];
-            uint32_t ch_sample_rate = (ch == 5 || ch == 3) ? 8000 : m_telemetry.sample_rate;
-            m_last_tx_pkt[ch].type_id = VSAF_TYPE_AUDIO;
-            m_last_tx_pkt[ch].packet_flags = make_packet_flags(ch, ch_sample_rate, m_frame_duration_us, false);
+            if (ch == 3) continue; // Ch 3 is Subwoofer
+            m_last_tx_pkt[ch].type_id = VSAF_TYPE_AUDIO_SATELLITE;
+            m_last_tx_pkt[ch].packet_flags = make_packet_flags(ch, m_telemetry.sample_rate, 10000, false);
             m_last_tx_pkt[ch].seq = m_seq;
-            m_last_tx_pkt[ch].t_tx1_us = static_cast<uint32_t>(esp_timer_get_time());
-            memcpy(m_last_tx_pkt[ch].data_t0, encoded_channels[ch], LC3_FRAME_OCTETS);
+            m_last_tx_pkt[ch].t_tx1_us = t_now_tx_us;
+            memcpy(m_last_tx_pkt[ch].data_t0, sat_hq_ptr[ch], LC3_FRAME_OCTETS_HQ);
 
-            if (red_valid) {
-                memcpy(m_last_tx_pkt[ch].data_t_prev, m_prev_encoded_channels[ch], LC3_FRAME_OCTETS);
+            if (m_prev1_sat_valid[ch]) {
+                memcpy(m_last_tx_pkt[ch].data_t_prev1, m_prev1_encoded_sat[ch], LC3_FRAME_OCTETS_RED);
             } else {
-                // If previous frame not yet available (first tick), provide current frame as valid fallback
-                memcpy(m_last_tx_pkt[ch].data_t_prev, encoded_channels[ch], LC3_FRAME_OCTETS);
+                memcpy(m_last_tx_pkt[ch].data_t_prev1, sat_red_ptr[ch], LC3_FRAME_OCTETS_RED);
+            }
+
+            if (m_prev2_sat_valid[ch]) {
+                memcpy(m_last_tx_pkt[ch].data_t_prev2, m_prev2_encoded_sat[ch], LC3_FRAME_OCTETS_RED);
+            } else {
+                memcpy(m_last_tx_pkt[ch].data_t_prev2, sat_red_ptr[ch], LC3_FRAME_OCTETS_RED);
             }
         }
 
-        // 4.1 Unconditionally update history buffer for next cycle (t-1) for all channels
-        for (size_t ch = 0; ch < MAX_SINK_NODES; ++ch) {
-            memcpy(m_prev_encoded_channels[ch], encoded_channels[ch], LC3_FRAME_OCTETS);
-            m_prev_encoded_valid[ch] = true;
+        // 4.2 Prepare Subwoofer Packet (Ch 3, Type 0x1338)
+        m_last_tx_sub_pkt.type_id = VSAF_TYPE_AUDIO_SUBWOOFER;
+        m_last_tx_sub_pkt.packet_flags = make_packet_flags(3, 8000, 10000, false);
+        m_last_tx_sub_pkt.seq = m_seq;
+        m_last_tx_sub_pkt.t_tx1_us = t_now_tx_us;
+        memcpy(m_last_tx_sub_pkt.data_t0, encoded_sub_60, LC3_FRAME_OCTETS_RED);
+
+        if (m_prev1_sub_valid) {
+            memcpy(m_last_tx_sub_pkt.data_t_prev1, m_prev1_encoded_sub, LC3_FRAME_OCTETS_RED);
+        } else {
+            memcpy(m_last_tx_sub_pkt.data_t_prev1, encoded_sub_60, LC3_FRAME_OCTETS_RED);
         }
 
-        // 4.2 Broadcast 6 Audio Channels over 802.11 ESP-NOW (Rotating sweep)
+        if (m_prev2_sub_valid) {
+            memcpy(m_last_tx_sub_pkt.data_t_prev2, m_prev2_encoded_sub, LC3_FRAME_OCTETS_RED);
+        } else {
+            memcpy(m_last_tx_sub_pkt.data_t_prev2, encoded_sub_60, LC3_FRAME_OCTETS_RED);
+        }
+
+        if (m_prev3_sub_valid) {
+            memcpy(m_last_tx_sub_pkt.data_t_prev3, m_prev3_encoded_sub, LC3_FRAME_OCTETS_RED);
+        } else {
+            memcpy(m_last_tx_sub_pkt.data_t_prev3, encoded_sub_60, LC3_FRAME_OCTETS_RED);
+        }
+
+        // 4.3 Unconditionally update history buffers for next cycle
+        for (size_t ch = 0; ch < MAX_SINK_NODES; ++ch) {
+            if (ch == 3) continue;
+            memcpy(m_prev2_encoded_sat[ch], m_prev1_encoded_sat[ch], LC3_FRAME_OCTETS_RED);
+            m_prev2_sat_valid[ch] = m_prev1_sat_valid[ch];
+            memcpy(m_prev1_encoded_sat[ch], sat_red_ptr[ch], LC3_FRAME_OCTETS_RED);
+            m_prev1_sat_valid[ch] = true;
+        }
+
+        memcpy(m_prev3_encoded_sub, m_prev2_encoded_sub, LC3_FRAME_OCTETS_RED);
+        m_prev3_sub_valid = m_prev2_sub_valid;
+        memcpy(m_prev2_encoded_sub, m_prev1_encoded_sub, LC3_FRAME_OCTETS_RED);
+        m_prev2_sub_valid = m_prev1_sub_valid;
+        memcpy(m_prev1_encoded_sub, encoded_sub_60, LC3_FRAME_OCTETS_RED);
+        m_prev1_sub_valid = true;
+
+        // 4.4 Broadcast 6 Audio Channels over 802.11 ESP-NOW (Rotating sweep)
         int64_t tx_t0 = esp_timer_get_time();
         size_t start_offset = m_seq % MAX_SINK_NODES;
         for (size_t i = 0; i < MAX_SINK_NODES; ++i) {
@@ -1120,15 +1264,24 @@ void EspNowBroadcastEngine::runAudioDspLoop() {
             }
 
             bool request_ack = (i == (MAX_SINK_NODES - 1));
-            if (request_ack) {
-                m_last_tx_pkt[ch].packet_flags |= 0x80; // Request ACK from last sink in sweep
+
+            const uint8_t* pkt_buf;
+            size_t pkt_len;
+            if (ch == 3) {
+                if (request_ack) m_last_tx_sub_pkt.packet_flags |= 0x80;
+                pkt_buf = reinterpret_cast<const uint8_t*>(&m_last_tx_sub_pkt);
+                pkt_len = sizeof(vsaf_sub_packet_t);
+            } else {
+                if (request_ack) m_last_tx_pkt[ch].packet_flags |= 0x80;
+                pkt_buf = reinterpret_cast<const uint8_t*>(&m_last_tx_pkt[ch]);
+                pkt_len = sizeof(vsaf_audio_packet_t);
             }
 
             if (s_tx_done_sem) {
                 xSemaphoreTake(s_tx_done_sem, 0);
             }
 
-            esp_err_t send_err = esp_now_send(s_broadcast_mac, reinterpret_cast<const uint8_t*>(&m_last_tx_pkt[ch]), sizeof(vsaf_audio_packet_t));
+            esp_err_t send_err = esp_now_send(s_broadcast_mac, pkt_buf, pkt_len);
 
             if (send_err == ESP_OK) {
                 if (s_tx_done_sem) {

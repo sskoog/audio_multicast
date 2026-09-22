@@ -83,8 +83,9 @@ public:
 private:
     void* m_enc_handle = nullptr;
     void* m_dec_handle = nullptr;
-    void* m_google_encoder[3] = {nullptr, nullptr, nullptr};
-    void* m_google_enc_mem[3] = {nullptr, nullptr, nullptr};
+    static constexpr size_t NUM_ENCODERS = 5;
+    void* m_google_encoder[NUM_ENCODERS] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+    void* m_google_enc_mem[NUM_ENCODERS] = {nullptr, nullptr, nullptr, nullptr, nullptr};
     void* m_google_decoder = nullptr;
     void* m_google_dec_mem = nullptr;
     uint32_t m_sample_rate = AUDIO_SAMPLE_RATE_HZ;
