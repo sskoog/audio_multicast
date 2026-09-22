@@ -387,9 +387,9 @@ Nodes emit formatted 1.0-second telemetry heartbeats over USB serial:
 ```text
 +=================================================================== ESP32-S3-SOURCE [SOURCE] ===================================================================+
 |    CPU      | STATE | NODES  |    WIFI     |  AUDIO dBFS  |     STAGE TIMINGS (ms)       |  SOURCE      PKTS  ACK%  FAIL   TOT  |             ROUND-TRIP NET (us)        |
-|  %   C  MHz |       | 012345 | GAIN Ch PHY |   RMS    Pk  |  DSP   Enc1  Enc2  Enc3   TX  |  INPUT        1/s     %   1/s  pkts   |              L_Net       R_Net         |
-| 36  64  240 | CAST  | OOOO1O | +3.0 10 HT0 | -33.3 -30.3 | 0.70  1.78  0.00  0.32  4.49|  TONE       597   90%     2     7K |                  -           -         |
-| 38  62  240 | CAST  | OOOO1O | +3.0 10 HT0 | -33.6 -30.3 | 0.70  1.78  0.00  0.32  4.81|  TONE       588   61%     6     5K |                  -           -         |
+|  %   C  MHz |       | 012345 | GAIN Ch PHY |   RMS    Pk  |  DSP   EncHQ  EncRed   TX    |  INPUT        1/s     %   1/s  pkts   |              L_Net       R_Net         |
+| 36  64  240 | CAST  | OOOO1O | +3.0 10 HT0 | -33.3 -30.3 |  0.70   1.78    0.00   4.49  |  TONE       597   90%     2     7K |                  -           -         |
+| 38  62  240 | CAST  | OOOO1O | +3.0 10 HT0 | -33.6 -30.3 |  0.70   1.78    0.00   4.81  |  TONE       588   61%     6     5K |                  -           -         |
 ```
 
 ### SINK Telemetry (Node 4 - COM4 - Surround Right)

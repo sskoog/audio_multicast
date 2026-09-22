@@ -110,9 +110,9 @@ void SystemDiagnostics::tick() {
         // Direct pipeline duration CPU load calculation (zero hooks, zero locks, zero scheduler suspension)
         int cpu_load_pct = 0;
         if (cfg->node_role == NODE_ROLE_SOURCE) {
-            float dsp_ms = 0.0f, enc1_ms = 0.0f, enc2_ms = 0.0f, enc3_ms = 0.0f, tx_ms = 0.0f;
-            m_unicast_engine.getStageDurationStats(dsp_ms, enc1_ms, enc2_ms, enc3_ms, tx_ms);
-            float total_active_ms = dsp_ms + enc1_ms + enc2_ms + enc3_ms + tx_ms;
+            float dsp_ms = 0.0f, enc_main_ms = 0.0f, enc_red_ms = 0.0f, tx_ms = 0.0f;
+            m_unicast_engine.getStageDurationStats(dsp_ms, enc_main_ms, enc_red_ms, tx_ms);
+            float total_active_ms = dsp_ms + enc_main_ms + enc_red_ms + tx_ms;
             float frame_ms = (stream.frame_duration_us > 0) ? (stream.frame_duration_us / 1000.0f) : 10.0f;
             cpu_load_pct = is_audio_active ? static_cast<int>(std::round((total_active_ms * 100.0f) / (frame_ms * 2.0f))) : 0;
         } else {
@@ -359,19 +359,18 @@ void SystemDiagnostics::tick() {
 
         char audio_block[64];
         if (cfg->node_role == NODE_ROLE_SOURCE) {
-            float dsp_ms = 0.0f, enc1_ms = 0.0f, enc2_ms = 0.0f, enc3_ms = 0.0f, tx_ms = 0.0f;
-            m_unicast_engine.getStageDurationStats(dsp_ms, enc1_ms, enc2_ms, enc3_ms, tx_ms);
+            float dsp_ms = 0.0f, enc_main_ms = 0.0f, enc_red_ms = 0.0f, tx_ms = 0.0f;
+            m_unicast_engine.getStageDurationStats(dsp_ms, enc_main_ms, enc_red_ms, tx_ms);
 
-            char dsp_str[8], e1_str[8], e2_str[8], e3_str[8], tx_str[8];
+            char dsp_str[8], em_str[8], er_str[8], tx_str[8];
             snprintf(dsp_str, sizeof(dsp_str), "%4.2f", dsp_ms);
-            snprintf(e1_str, sizeof(e1_str), "%4.2f", enc1_ms);
-            snprintf(e2_str, sizeof(e2_str), "%4.2f", enc2_ms);
-            snprintf(e3_str, sizeof(e3_str), "%4.2f", enc3_ms);
+            snprintf(em_str, sizeof(em_str), "%4.2f", enc_main_ms);
+            snprintf(er_str, sizeof(er_str), "%4.2f", enc_red_ms);
             snprintf(tx_str, sizeof(tx_str), "%4.2f", tx_ms);
 
             snprintf(audio_block, sizeof(audio_block),
-                     " %5.5s %5.5s | %4.4s  %4.4s  %4.4s  %4.4s  %4.4s",
-                     rms_str, peak_str, dsp_str, e1_str, e2_str, e3_str, tx_str);
+                     " %5.5s %5.5s |  %4.4s   %4.4s   %4.4s   %4.4s  ",
+                     rms_str, peak_str, dsp_str, em_str, er_str, tx_str);
         } else {
             snprintf(audio_block, sizeof(audio_block),
                      "  %-3.3s  %5.5s %5.5s  %4.4s  %3.3s %5.5s %5.5s ",
@@ -440,7 +439,7 @@ void SystemDiagnostics::tick() {
             print_console("%s\n", border_line);
             if (cfg->node_role == NODE_ROLE_SOURCE) {
                 print_console("|    CPU      | STATE | NODES  |    WIFI     |  AUDIO dBFS  |     STAGE TIMINGS (ms)       |  SOURCE      PKTS  ACK%%  FAIL   TOT  |             ROUND-TRIP NET (us)        |\n");
-                print_console("|  %%   C  MHz |       | 012345 | GAIN Ch PHY |   RMS    Pk  |  DSP   Enc1  Enc2  Enc3   TX  |  INPUT        1/s     %%   1/s  pkts   |              L_Net       R_Net         |\n");
+                print_console("|  %%   C  MHz |       | 012345 | GAIN Ch PHY |   RMS    Pk  |  DSP   EncHQ  EncRed   TX    |  INPUT        1/s     %%   1/s  pkts   |              L_Net       R_Net         |\n");
             } else {
                 print_console("|    CPU      | STATE |  CHAN  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | AMP dB   PKTS  RED PLC DMA OVF UDR   |         TIME & SYNCHRONIZATION (ms)    |\n");
                 print_console("|  %%   C  MHz |       |        | RSSI Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  SW  HW   1/s  rec tot UDR ovf udr   |  Local  Master  EMA_offs RB_med RB_rng |\n");

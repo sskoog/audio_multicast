@@ -311,13 +311,12 @@ public:
         m_codec_duration_buf.getStats(out_avg_ms, out_peak_ms, out_has_data);
     }
 
-    void getStageDurationStats(float& out_dsp, float& out_enc1, float& out_enc2, float& out_enc3, float& out_tx) const {
+    void getStageDurationStats(float& out_dsp, float& out_enc_main, float& out_enc_red, float& out_tx) const {
         float peak = 0.0f;
         bool has_data = false;
         m_dsp_duration_buf.getStats(out_dsp, peak, has_data);
-        m_enc1_duration_buf.getStats(out_enc1, peak, has_data);
-        m_enc2_duration_buf.getStats(out_enc2, peak, has_data);
-        m_enc3_duration_buf.getStats(out_enc3, peak, has_data);
+        m_enc_main_duration_buf.getStats(out_enc_main, peak, has_data);
+        m_enc_red_duration_buf.getStats(out_enc_red, peak, has_data);
         m_tx_duration_buf.getStats(out_tx, peak, has_data);
     }
 
@@ -426,9 +425,8 @@ private:
 
     mutable SpscDurationRingBuffer<float, 64> m_codec_duration_buf;
     mutable SpscDurationRingBuffer<float, 64> m_dsp_duration_buf;
-    mutable SpscDurationRingBuffer<float, 64> m_enc1_duration_buf;
-    mutable SpscDurationRingBuffer<float, 64> m_enc2_duration_buf;
-    mutable SpscDurationRingBuffer<float, 64> m_enc3_duration_buf;
+    mutable SpscDurationRingBuffer<float, 64> m_enc_main_duration_buf;
+    mutable SpscDurationRingBuffer<float, 64> m_enc_red_duration_buf;
     mutable SpscDurationRingBuffer<float, 64> m_tx_duration_buf;
     mutable TimeOffsetRingBuffer              m_time_offset_buf;
     float                                     m_ema_time_offset_ms;

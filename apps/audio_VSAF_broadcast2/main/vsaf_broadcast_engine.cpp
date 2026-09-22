@@ -1142,8 +1142,8 @@ void EspNowBroadcastEngine::runAudioDspLoop() {
         static uint8_t encoded_sat_red[2][LC3_FRAME_OCTETS_RED]; // [0]: Left Red, [1]: Right Red (60B)
         static uint8_t encoded_sub_60[LC3_FRAME_OCTETS_SUB];      // Subwoofer (60B)
 
-        // 3.1 Pass 1 (HQ): Left (120B, Enc 0) & Right (120B, Enc 1)
-        int64_t enc1_t0 = esp_timer_get_time();
+        // 3.1 Pass 1 (HQ / Main Codecs): Left HQ (120B, Enc 0), Right HQ (120B, Enc 1), Subwoofer (60B @ 8 kHz, Enc 4)
+        int64_t main_enc_t0 = esp_timer_get_time();
         size_t actual_bytes = 0;
         m_lc3_codec.encodeFrame(m_pcm_left_hp, samples, encoded_sat_hq[0], LC3_FRAME_OCTETS_HQ, &actual_bytes, 0, 1);
         if (m_is_stereo || m_tone_test_mode) {
@@ -1151,28 +1151,22 @@ void EspNowBroadcastEngine::runAudioDspLoop() {
         } else {
             memcpy(encoded_sat_hq[1], encoded_sat_hq[0], LC3_FRAME_OCTETS_HQ);
         }
-        int64_t enc1_t1 = esp_timer_get_time();
-        float enc1_ms = (enc1_t1 - enc1_t0) / 1000.0f;
-        m_enc1_duration_buf.push(enc1_ms);
-
-        // 3.2 Pass 2 (Subwoofer): Sub 8k (60B @ 8 kHz, Enc 4)
-        int64_t enc2_t0 = esp_timer_get_time();
         m_lc3_codec.encodeFrame(m_pcm_sub_8k, 80, encoded_sub_60, LC3_FRAME_OCTETS_SUB, &actual_bytes, 4, 1);
-        int64_t enc2_t1 = esp_timer_get_time();
-        float enc2_ms = (enc2_t1 - enc2_t0) / 1000.0f;
-        m_enc2_duration_buf.push(enc2_ms);
+        int64_t main_enc_t1 = esp_timer_get_time();
+        float enc_main_ms = (main_enc_t1 - main_enc_t0) / 1000.0f;
+        m_enc_main_duration_buf.push(enc_main_ms);
 
-        // 3.3 Pass 3 (Redundancy): Left Red (60B, Enc 2) & Right Red (60B, Enc 3)
-        int64_t enc3_t0 = esp_timer_get_time();
+        // 3.2 Pass 2 (Redundant Codecs): Left Red (60B, Enc 2) & Right Red (60B, Enc 3)
+        int64_t red_enc_t0 = esp_timer_get_time();
         m_lc3_codec.encodeFrame(m_pcm_left_hp, samples, encoded_sat_red[0], LC3_FRAME_OCTETS_RED, &actual_bytes, 2, 1);
         if (m_is_stereo || m_tone_test_mode) {
             m_lc3_codec.encodeFrame(m_pcm_right_hp, samples, encoded_sat_red[1], LC3_FRAME_OCTETS_RED, &actual_bytes, 3, 1);
         } else {
             memcpy(encoded_sat_red[1], encoded_sat_red[0], LC3_FRAME_OCTETS_RED);
         }
-        int64_t enc3_t1 = esp_timer_get_time();
-        float enc3_ms = (enc3_t1 - enc3_t0) / 1000.0f;
-        m_enc3_duration_buf.push(enc3_ms);
+        int64_t red_enc_t1 = esp_timer_get_time();
+        float enc_red_ms = (red_enc_t1 - red_enc_t0) / 1000.0f;
+        m_enc_red_duration_buf.push(enc_red_ms);
 
         // Map satellite channels (Ch 0..4):
         // Ch 0 (Left), Ch 2 (Center), Ch 3 (Left Surround) -> Left
