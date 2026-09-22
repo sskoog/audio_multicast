@@ -7,8 +7,8 @@ The **`audio_VSAF_broadcast2`** application implements an ultra-low-latency, mul
 ### Key Architectural Evolution in VSAF 3.0
 
 1. **VSAF 3.0 Multi-Tier Unequal Error Protection (UEP) Redundancy**:
-   - **Satellite Broadcast Packets (`0x1337`, Ch 0..4)**: Each 248-byte packet carries **3 temporal frames**: primary frame $t_0$ (120 bytes, HQ 96 kbps @ 48 kHz), redundant frame $t_{-1}$ (60 bytes, 48 kbps @ 48 kHz), and redundant frame $t_{-2}$ (60 bytes, 48 kbps @ 48 kHz).
-   - **Subwoofer Broadcast Packets (`0x1338`, Ch 5)**: Each 248-byte packet carries **4 temporal frames**: primary frame $t_0$ (60 bytes @ 8 kHz) and 3 historical frames $t_{-1}$, $t_{-2}$, $t_{-3}$ (60 bytes each).
+   - **Satellite Broadcast Packets (`0x1337`, Ch 0..4)**: Each 248-byte packet carries **3 temporal frames**: primary frame `t0` (120 bytes, HQ 96 kbps @ 48 kHz), redundant frame `t-1` (60 bytes, 48 kbps @ 48 kHz), and redundant frame `t-2` (60 bytes, 48 kbps @ 48 kHz).
+   - **Subwoofer Broadcast Packets (`0x1338`, Ch 5)**: Each 248-byte packet carries **4 temporal frames**: primary frame `t0` (60 bytes @ 8 kHz) and 3 historical frames `t-1`, `t-2`, `t-3` (60 bytes each).
    - If up to 2 consecutive RF packets are dropped for satellites (or 3 consecutive packets for subwoofer), the SINK recovers the missing audio frames instantly from subsequent packets, completely eliminating audio dropouts and Soft-ARQ repair windows.
 2. **5-Encoder Multi-Rate LC3 Pipeline (IRAM Fast Path)**:
    - 5 independent Google `liblc3` encoder instances hosted in fast IRAM with LTPF (Long-Term Pitch Filter) analysis disabled for microsecond-level execution.
@@ -58,10 +58,10 @@ The **`audio_VSAF_broadcast2`** application implements an ultra-low-latency, mul
         v                   v               v                   v                   v
 +---------------+   +---------------+   +---------------+   +---------------+   +---------------+
 | SINK 0 (Left) |   | SINK 1 (Right)|   | SINK 2 (Ctr)  |   | SINK 3..4     |   | SINK 5 (Sub)  |
-| ESP32-C6-Zero |   | ESP32-C6-Zero |   | ESP32-C6 Dev  |   | ESP32-S3 / C6 |   | ESP32-C6-LCD  |
-| (Node 23)     |   | (Node 24)     |   | (Node 21)     |   | (Node 4 / 25) |   | (Node 20)     |
-| MAX98357A DAC |   | MAX98357A DAC |   | MAX98357A DAC |   | PCM5102A DAC  |   | MAX98357A DAC |
-| 48kHz Stereo  |   | 48kHz Stereo  |   | 48kHz Stereo  |   | 48kHz Stereo  |   | Native 8kHz   |
+| XIAO S3 Plus  |   | XIAO S3 Plus  |   | ESP32-C6-Zero |   | Heemol C6     |   | ESP32-C6-Zero |
+| (Node 4)      |   | (Node 5)      |   | (Node 23)     |   | (Node 25 / 26)|   | (Node 24 / 20)|
+| PCM5102A DAC  |   | PCM5102A DAC  |   | MAX98357A DAC |   | MAX98357A DAC |   | MAX98357A DAC |
+| 48kHz 24-bit  |   | 48kHz 24-bit  |   | 48kHz 16-bit  |   | 48kHz 16-bit  |   | Native 8kHz   |
 | 3-Tier UEP    |   | 3-Tier UEP    |   | 3-Tier UEP    |   | 3-Tier UEP    |   | 4-Tier UEP    |
 | PTP Slave     |   | PTP Slave     |   | PTP Slave     |   | PTP Slave     |   | LR4 LP Filter |
 +---------------+   +---------------+   +---------------+   +---------------+   +---------------+
@@ -71,20 +71,20 @@ The **`audio_VSAF_broadcast2`** application implements an ultra-low-latency, mul
 
 ## 2. Hardware Topology & Node Registry
 
-| Node ID | Board / Form Factor | SoC Architecture | Flash / RAM | Factory MAC Address | Default COM Port | Network Role & Audio Routing |
+| Node ID | Board / Form Factor | SoC Architecture | Flash / RAM | Factory MAC Address | Default COM Port | Network Role, DAC & Aux Hardware Configuration |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Node 1**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa Dual-Core + FPU) | 8 MB / 8 MB PSRAM | TBD | **COM1** | Audio SINK (PCM5102A DAC + TPA3118 Mono Amp, GPIO 3 Mute control). |
-| **Node 2**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa Dual-Core + FPU) | 8 MB / 8 MB PSRAM | TBD | **COM2** | Audio SINK (PCM5102A DAC + TPA3118 Mono Amp, GPIO 3 Mute control). |
-| **Node 3**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa Dual-Core + FPU) | 8 MB / 8 MB PSRAM | TBD | **COM3** | Audio SINK (PCM5102A DAC + TPA3118 Mono Amp, GPIO 3 Mute control). |
-| **Node 4**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa Dual-Core + FPU) | 8 MB / 8 MB PSRAM | `E8:3D:C1:FB:E8:3C` | **COM4** | **Audio SINK (Ch 4: Surround Right)**: PCM5102A DAC + TPA3118 Mono Amp (GPIO 3 Mute control). |
-| **Node 5**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa Dual-Core + FPU) | 8 MB / 8 MB PSRAM | TBD | **COM5** | Audio SINK (PCM5102A DAC + TPA3118 Mono Amp, GPIO 3 Mute control). |
-| **Node 16** | Seeed Studio XIAO ESP32-S3 | ESP32-S3 (Xtensa Dual-Core + FPU) | 4 MB / 512 KB | `E0:72:A1:D8:4C:D0` | **COM16** (Bootloader)<br>**COM116** (Runtime App) | **Audio SOURCE**: UAC1 USB Audio Speaker, 5-instance LC3 encoder, 6-slot ISR broadcast sweeper, round-robin telemetry collector, PTP master. |
-| **Node 20** | Waveshare ESP32-C6-LCD-1.47 | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `AC:EB:E6:23:DC:24` | **COM20** | **Audio SINK / Subwoofer (Channel 5)**: 8 kHz LC3 decode, ST7789 LCD Console Display. |
-| **Node 21** | ESP32-C6-WROOM-1 DevKit | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `98:A3:16:9D:57:EC` | **COM21** (Flash)<br>**COM121** (App) | Audio SINK (Channel 2: Center) or USB Host Bridge. |
-| **Node 23** | Waveshare ESP32-C6-Zero | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `B0:A6:04:99:38:44` | **COM23** | **Audio SINK Left (Channel 0)**: MAX98357A I2S DAC, WS2812B RGB indicator. |
-| **Node 24** | Waveshare ESP32-C6-Zero | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `B0:A6:04:99:18:E4` | **COM24** | **Audio SINK Right (Channel 1)**: MAX98357A I2S DAC, WS2812B RGB indicator. |
-| **Node 25** | Heemol ESP32-C6 Mini | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `E8:3D:C1:FB:DC:C4` | **COM25** (or COM10) | Audio SINK (Channel 3: Surround Left) / Test Node. |
-| **Node 26** | Heemol ESP32-C6 Mini | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `98:A3:16:AC:13:38` | **COM26** (or COM22) | Audio SINK (Channel 4: Surround Right) / Test Node. |
+| **Node 1**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa Dual-Core + FPU) | 8 MB / 8 MB PSRAM | TBD | **COM1** | Audio SINK (Ch 0: Left / Spare): PCM5102A 24-bit I2S DAC, TPA3118 Mono Power Amp (GPIO 3 Mute control, -20.0 dB post-gain), User LED (GPIO 21), Wio-SX1262 B2B LoRa header. |
+| **Node 2**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa Dual-Core + FPU) | 8 MB / 8 MB PSRAM | TBD | **COM2** | Audio SINK (Ch 1: Right / Spare): PCM5102A 24-bit I2S DAC, TPA3118 Mono Power Amp (GPIO 3 Mute control, -20.0 dB post-gain), User LED (GPIO 21), Wio-SX1262 B2B LoRa header. |
+| **Node 3**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa Dual-Core + FPU) | 8 MB / 8 MB PSRAM | TBD | **COM3** | Audio SINK (Ch 2: Center / Spare): PCM5102A 24-bit I2S DAC, TPA3118 Mono Power Amp (GPIO 3 Mute control, -20.0 dB post-gain), User LED (GPIO 21), Wio-SX1262 B2B LoRa header. |
+| **Node 4**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa Dual-Core + FPU) | 8 MB / 8 MB PSRAM | `E8:3D:C1:FB:E8:3C` | **COM4** | **Audio SINK (Ch 0: Left)**: PCM5102A 24-bit I2S DAC, TPA3118 Mono Power Amp (GPIO 3 Mute control, -20.0 dB post-gain), User LED (GPIO 21), Wio-SX1262 B2B LoRa header. |
+| **Node 5**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa Dual-Core + FPU) | 8 MB / 8 MB PSRAM | `E8:3D:C1:FC:8B:50` | **COM5** | **Audio SINK (Ch 1: Right)**: PCM5102A 24-bit I2S DAC, TPA3118 Mono Power Amp (GPIO 3 Mute control, -20.0 dB post-gain), User LED (GPIO 21), Wio-SX1262 B2B LoRa header. |
+| **Node 16** | Seeed Studio XIAO ESP32-S3 | ESP32-S3 (Xtensa Dual-Core + FPU) | 4 MB / 512 KB | `E0:72:A1:D8:4C:D0` | **COM16** (Bootloader)<br>**COM116** (Runtime App) | **Audio SOURCE (Master Broadcaster)**: UAC1 USB Audio Speaker (48 kHz 16-bit Stereo), 5-instance LC3 encoder, 6-slot ISR broadcast sweeper, round-robin telemetry collector, PTP master clock, User LED (GPIO 21). |
+| **Node 20** | Waveshare ESP32-C6-LCD-1.47 | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `AC:EB:E6:23:DC:24` | **COM20** | **Audio SINK / Subwoofer (Ch 5)**: MAX98357A I2S Mono DAC (+3 dB gain), ST7789 1.47" LCD Console Display, WS2812B RGB LED (GPIO 8), 8 kHz decimated LC3 decoding. |
+| **Node 21** | ESP32-C6-WROOM-1 DevKit | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `98:A3:16:9D:57:EC` | **COM21** (Flash)<br>**COM121** (App) | Audio SINK (Ch 2: Center) / USB Host Bridge: MAX98357A I2S DAC (+3 dB gain), CP2102N UART bridge + Native USB. |
+| **Node 23** | Waveshare ESP32-C6-Zero | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `B0:A6:04:99:38:44` | **COM23** | **Audio SINK (Ch 2: Center)**: MAX98357A I2S Mono DAC (+3 dB hardware gain), WS2812B RGB LED (GPIO 8). |
+| **Node 24** | Waveshare ESP32-C6-Zero | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `B0:A6:04:99:18:E4` | **COM24** | **Audio SINK (Ch 5: Subwoofer)**: MAX98357A I2S Mono DAC (+3 dB hardware gain), WS2812B RGB LED (GPIO 8), 8 kHz polyphase decimated LC3 decoding. |
+| **Node 25** | Heemol ESP32-C6 Mini | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `E8:3D:C1:FB:DC:C4` | **COM25** (or COM10) | Audio SINK (Ch 3: Surround Left) / Test Node: MAX98357A I2S DAC (+3 dB gain), discrete User LED (GPIO 15). |
+| **Node 26** | Heemol ESP32-C6 Mini | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `98:A3:16:AC:13:38` | **COM26** (or COM22) | Audio SINK (Ch 4: Surround Right) / Test Node: MAX98357A I2S DAC (+3 dB gain), discrete User LED (GPIO 15). |
 
 ### 2.1 Channel Assignment & Routing Matrix
 
@@ -97,8 +97,9 @@ Channel 4: Surround Right Satellite (Ch 4, High-Pass @ 100 Hz LR4, 48 kHz, Packe
 Channel 5: Subwoofer (Ch 5, Polyphase Decimated LP @ 100 Hz LR4, 8 kHz, Packet Type 0x1338)
 ```
 
-### Pinout Reference
-- **Node 1, 2, 3, 4, 5 (SINK PCM5102A + TPA3118 Amp on XIAO S3 Plus)**:
+### 2.2 Pinout & Auxiliary Hardware Wiring Reference
+
+- **Node 1, 2, 3, 4, 5 (SINK PCM5102A DAC + TPA3118 Amp on XIAO S3 Plus)**:
   - BCK: D5 / GPIO 6
   - LCK (WS): D3 / GPIO 4
   - DIN (DOUT): D4 / GPIO 5
@@ -106,13 +107,31 @@ Channel 5: Subwoofer (Ch 5, Polyphase Decimated LP @ 100 Hz LR4, 8 kHz, Packet T
   - User Status LED: GPIO 21 (Active LOW discrete LED)
   - BOOT Button: GPIO 0
   - Wio-SX1262 LoRa B2B Pins: GPIO 38..42, 7..9 (Reserved)
-- **Node 23 & Node 24 (SINK DACs)**:
+- **Node 23 & Node 24 (SINK MAX98357A DACs on Waveshare ESP32-C6-Zero)**:
   - BCLK: GPIO 2
   - LRCLK (WS): GPIO 3
   - DIN (DOUT): GPIO 1
   - WS2812B Status LED: GPIO 8
   - BOOT Button: GPIO 9
-- **Node 16 (SOURCE)**:
+- **Node 20 (Waveshare ESP32-C6-LCD-1.47)**:
+  - BCLK: GPIO 2
+  - LRCLK (WS): GPIO 3
+  - DIN (DOUT): GPIO 1
+  - ST7789 LCD: SPI (MOSI: GPIO 7, SCLK: GPIO 6, CS: GPIO 14, DC: GPIO 15, RST: GPIO 21, BL: GPIO 22)
+  - WS2812B Status LED: GPIO 8
+  - BOOT Button: GPIO 9
+- **Node 21 (ESP32-C6-WROOM-1 DevKit)**:
+  - BCLK: GPIO 2
+  - LRCLK (WS): GPIO 3
+  - DIN (DOUT): GPIO 1
+  - BOOT Button: GPIO 9
+- **Node 25 & Node 26 (Heemol ESP32-C6 Mini)**:
+  - BCLK: GPIO 2
+  - LRCLK (WS): GPIO 3
+  - DIN (DOUT): GPIO 1
+  - User LED: GPIO 15
+  - BOOT Button: GPIO 9
+- **Node 16 (SOURCE Broadcaster on XIAO ESP32-S3)**:
   - Native USB D-: GPIO 19
   - Native USB D+: GPIO 20
   - User Status LED: GPIO 21 (Active LOW discrete LED)
@@ -312,11 +331,11 @@ The audio pipeline runs on **Core 1 (Priority 6)** with hardware FPU vectorizati
 ### 5.2 SINK Multi-Packet Burst Recovery & PLC Synthesis
 
 When packets arrive at the SINK:
-1. **In-Sequence ($\Delta\text{seq} = 1$)**: Primary frame $t_0$ pushed to FIFO.
-2. **Single Packet Drop ($\Delta\text{seq} = 2$)**: Recovers $t_{-1}$ (60B) from redundancy $\rightarrow$ pushes $t_0$ (120B).
-3. **Double Packet Drop ($\Delta\text{seq} = 3$)**: Recovers $t_{-2}$ (60B) $\rightarrow$ recovers $t_{-1}$ (60B) $\rightarrow$ pushes $t_0$ (120B).
-4. **Triple Packet Drop for Subwoofer ($\Delta\text{seq} = 4$)**: Recovers $t_{-3}$ (60B) $\rightarrow$ $t_{-2}$ (60B) $\rightarrow$ $t_{-1}$ (60B) $\rightarrow$ pushes $t_0$ (60B).
-5. **Irrecoverable Burst Drop ($\Delta\text{seq} > 3$)**: SINK synthesizes LC3 PLC frames for intermediate slots via `lc3_decode(..., NULL, pcm_out)`, preserving seamless phase and pitch overlap without "blurp" sound.
+1. **In-Sequence (`Delta_seq = 1`)**: Primary frame `t0` pushed to FIFO.
+2. **Single Packet Drop (`Delta_seq = 2`)**: Recovers `t-1` (60B) from redundancy -> pushes `t0` (120B).
+3. **Double Packet Drop (`Delta_seq = 3`)**: Recovers `t-2` (60B) -> recovers `t-1` (60B) -> pushes `t0` (120B).
+4. **Triple Packet Drop for Subwoofer (`Delta_seq = 4`)**: Recovers `t-3` (60B) -> `t-2` (60B) -> `t-1` (60B) -> pushes `t0` (60B).
+5. **Irrecoverable Burst Drop (`Delta_seq > 3`)**: SINK synthesizes LC3 PLC frames for intermediate slots via `lc3_decode(..., NULL, pcm_out)`, preserving seamless phase and pitch overlap without "blurp" sound.
 
 ---
 
@@ -356,7 +375,7 @@ When packets arrive at the SINK:
 
 ## 7. Interactive CLI Console Commands
 
-Accessible over USB serial on all nodes (**COM116** for SOURCE, **COM4** for SINK Surround Right, **COM23** for SINK Left, **COM24** for SINK Right) at 115,200 baud:
+Accessible over USB serial on all nodes (**COM116** for SOURCE, **COM4** for SINK Left, **COM5** for SINK Right, **COM23** for SINK Center, **COM24** for SINK Subwoofer) at 115,200 baud:
 
 | Command | Target | Description |
 | :--- | :--- | :--- |
@@ -383,34 +402,44 @@ Accessible over USB serial on all nodes (**COM116** for SOURCE, **COM4** for SIN
 
 Nodes emit formatted 1.0-second telemetry heartbeats over USB serial:
 
-### SOURCE Telemetry (Node 16 - COM116)
+### 8.1 SOURCE Master Telemetry (Node 16 - COM116)
 ```text
 +=================================================================== ESP32-S3-SOURCE [SOURCE] ===================================================================+
 |    CPU      | STATE | NODES  |    WIFI     |  AUDIO dBFS  |     STAGE TIMINGS (ms)       |  SOURCE      PKTS  ACK%  FAIL   TOT  |             ROUND-TRIP NET (us)        |
 |  %   C  MHz |       | 012345 | GAIN Ch PHY |   RMS    Pk  |  DSP   EncHQ  EncRed   TX    |  INPUT        1/s     %   1/s  pkts   |              L_Net       R_Net         |
-| 36  64  240 | CAST  | OOOO1O | +3.0 10 HT0 | -33.3 -30.3 |  0.70   1.78    0.00   4.49  |  TONE       597   90%     2     7K |                  -           -         |
-| 38  62  240 | CAST  | OOOO1O | +3.0 10 HT0 | -33.6 -30.3 |  0.70   1.78    0.00   4.81  |  TONE       588   61%     6     5K |                  -           -         |
+| 38  56  240 | CAST  | 111OO1 | +3.0 10 HT0 | -33.5 -30.3 |  0.70   1.78   0.31   4.81  |  TONE       592   91%     6    74K |               7379        5046         |
 ```
 
-### SINK Telemetry (Node 4 - COM4 - Surround Right)
+### 8.2 SINK Telemetry - Node 4 (COM4 - Left Channel, PCM5102A 24-bit, -20 dB Post-Gain)
 ```text
-+=================================================================== ESP32-S3-04-RSUR [SINK] ====================================================================+
++=================================================================== ESP32-S3-04-LEFT [SINK] ====================================================================+
 |    CPU      | STATE |  CHAN  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | AMP dB   PKTS  RED  PLC  DMA   FIFO    |         TIME & SYNCHRONIZATION (ms)    |
 |  %   C  MHz |       |        | RSSI Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  SW  HW   1/s  rec  tot  UDR   UDR     |  Local  Master  EMA_offs RB_med RB_rng |
-|  6  47  240 | STRM  | RSUR   |  -53 10 HT0 |  LC3  -33.9 -29.4    48   10  0.65  0.73 | -20   -    99   10    0    0     0    |   5992   14535   +8547   +8546   5.47  |
+|  6  47  240 | STRM  | LEFT   |  -50 10 HT0 |  LC3  -33.4 -28.0    48   10  0.62  1.33 | -20   -   100   20    0    0     0    |   7996  127283   +1192   +1192   5.66  |
 ```
 
-### SINK Telemetry (Node 23 / 24 - COM23 / COM24 - Left & Right)
+### 8.3 SINK Telemetry - Node 5 (COM5 - Right Channel, PCM5102A 24-bit, -20 dB Post-Gain)
 ```text
-+=================================================================== ESP32-C6-23-LEFT [SINK] ====================================================================+
++=================================================================== ESP32-S3-05-RGHT [SINK] ====================================================================+
 |    CPU      | STATE |  CHAN  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | AMP dB   PKTS  RED  PLC  DMA   FIFO    |         TIME & SYNCHRONIZATION (ms)    |
 |  %   C  MHz |       |        | RSSI Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  SW  HW   1/s  rec  tot  UDR   UDR     |  Local  Master  EMA_offs RB_med RB_rng |
-| 13  47  160 | STRM  | LEFT   |  -57 10 HT0 |  LC3  -33.8 -28.7    48   10  1.28  1.58 |   0  +3    99    8    0    0     0    |   6056   14615   +8568   +8568  10.48  |
+|  6  44  240 | STRM  | RGHT   |  -74 10 HT0 |  LC3  -33.4 -28.4    48   10  0.63  1.36 | -20   -    99   16    0    0     0    |   8004  127293   +1192   +1192   5.70  |
+```
 
-+=================================================================== ESP32-C6-24-RIGHT [SINK] ===================================================================+
+### 8.4 SINK Telemetry - Node 23 (COM23 - Center Channel, MAX98357A, +3 dB Gain)
+```text
++=================================================================== ESP32-C6-23-CNTR [SINK] ====================================================================+
 |    CPU      | STATE |  CHAN  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | AMP dB   PKTS  RED  PLC  DMA   FIFO    |         TIME & SYNCHRONIZATION (ms)    |
 |  %   C  MHz |       |        | RSSI Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  SW  HW   1/s  rec  tot  UDR   UDR     |  Local  Master  EMA_offs RB_med RB_rng |
-| 12  46  160 | STRM  | RGHT   |  -45 10 HT0 |  LC3  -34.0 -29.2    48   10  1.21  1.34 |   0  +3   100   19    3    0     0    |   6054   14625   +8570   +8571   5.96  |
+| 12  46  160 | STRM  | CNTR   |  -51 10 HT0 |  LC3  -33.5 -27.6    48   10  1.24  1.53 |   0  +3    99   12    0    0     0    |   8058  127373   +1193   +1193   6.07  |
+```
+
+### 8.5 SINK Telemetry - Node 24 (COM24 - Subwoofer Channel, MAX98357A, +3 dB Gain, 8 kHz Decimation)
+```text
++=================================================================== ESP32-C6-24-SUB [SINK] =====================================================================+
+|    CPU      | STATE |  CHAN  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | AMP dB   PKTS  RED  PLC  DMA   FIFO    |         TIME & SYNCHRONIZATION (ms)    |
+|  %   C  MHz |       |        | RSSI Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  SW  HW   1/s  rec  tot  UDR   UDR     |  Local  Master  EMA_offs RB_med RB_rng |
+|  0  45  160 | STRM  | SUB    |  -56 10 HT0 |  LC3    off   off    48   10  0.04  0.11 |   0  +3   100   17    0    0     0    |   8054  127383   +1193   +1193   7.28  |
 ```
 
 ---
@@ -424,7 +453,18 @@ Multi-target parallel compilation and concurrent multi-node flashing are execute
 $env:IDF_TOOLS_PATH = "C:\Users\stefa\.espressif"
 . "C:\Users\stefa\OneDrive\Documents\ESP\v6.0.2\esp-idf\export.ps1"
 
-# Fast automated build and flash for individual roles
+# Flash SOURCE (ESP32-S3 on COM16/COM116)
 powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\build_and_flash.ps1 -Role SOURCE -Port COM116
-powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\build_and_flash.ps1 -Role SINK -Port COM4
+
+# Flash SINK Left (Node 4: ESP32-S3 + PCM5102A on COM4)
+powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\build_and_flash.ps1 -Role SINK -Chip esp32s3 -NodeId 4 -Port COM4
+
+# Flash SINK Right (Node 5: ESP32-S3 + PCM5102A on COM5)
+powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\build_and_flash.ps1 -Role SINK -Chip esp32s3 -NodeId 5 -Port COM5
+
+# Flash SINK Center (Node 23: ESP32-C6 + MAX98357A on COM23)
+powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\build_and_flash.ps1 -Role SINK -Chip esp32c6 -NodeId 23 -Port COM23
+
+# Flash SINK Subwoofer (Node 24: ESP32-C6 + MAX98357A on COM24)
+powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\build_and_flash.ps1 -Role SINK -Chip esp32c6 -NodeId 24 -Port COM24
 ```
