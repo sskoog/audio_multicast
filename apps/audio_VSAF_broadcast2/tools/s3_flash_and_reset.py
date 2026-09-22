@@ -92,7 +92,19 @@ def trigger_app_to_bootloader(app_port):
     if "jtag" in p or "otg" in p or "com16" in p or "com3" in p:
         return True
 
-    # Try 2: CLI 'bootloader' command via pyserial
+    # Try 2: CLI 'bootloader' command via Win32 API direct write (immune to PySerial Error 31)
+    try:
+        import win32file
+        h = win32file.CreateFile(target_port, win32file.GENERIC_READ | win32file.GENERIC_WRITE, 0, None, win32file.OPEN_EXISTING, 0, None)
+        win32file.WriteFile(h, b"\r\nbootloader\r\n")
+        time.sleep(0.3)
+        win32file.CloseHandle(h)
+        print(f"[OK] Sent 'bootloader' command via Win32 to {app_port}.")
+        return True
+    except Exception as e:
+        print(f"[DEBUG] Win32 CLI write skipped: {e}")
+
+    # Try 3: CLI 'bootloader' command via pyserial
     try:
         s = serial.Serial(target_port, 115200, timeout=1, dsrdtr=False, rtscts=False)
         s.write(b"\r\nbootloader\r\n")
