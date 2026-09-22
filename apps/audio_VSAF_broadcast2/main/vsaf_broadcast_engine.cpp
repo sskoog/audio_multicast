@@ -246,9 +246,9 @@ esp_err_t EspNowBroadcastEngine::init(uint8_t role, uint8_t node_id, uint8_t wif
         setWifiPhyProfile(WifiPhyProfile::TERTIARY_HT20_MCS0); // Robust MCS0 for SINK Soft-ACK telemetry replies
     }
 
-    // 5. Initialize Codec (SOURCE: 3 encoders - Left 48k, Right 48k, Sub 8k)
+    // 5. Initialize Codec (SOURCE: 5 encoders - Left HQ 48k, Right HQ 48k, Left Red 48k, Right Red 48k, Sub 8k)
     if (m_node_role == NODE_ROLE_SOURCE) {
-        m_lc3_codec.initEncoder(m_telemetry.sample_rate, 3, m_frame_duration_us, m_octets_per_frame);
+        m_lc3_codec.initEncoder(m_telemetry.sample_rate, 5, m_frame_duration_us, m_octets_per_frame);
     } else {
         m_lc3_codec.initDecoder(m_telemetry.sample_rate, 1, m_frame_duration_us, m_octets_per_frame);
     }
@@ -1059,7 +1059,7 @@ void EspNowBroadcastEngine::runAudioDspLoop() {
     static float s_mono_in_f32[480];
     static float s_sub_8k_f32[80];
 
-    constexpr int64_t SWEEP_HARD_DEADLINE_US = 9400; // 9.4 ms: 10 ms minus CSMA/CA Backoff
+    constexpr int64_t SWEEP_HARD_DEADLINE_US = 9500; // 9.5 ms: tightened from 9.4 ms (us-precision polling gives headroom)
 
     while (m_running.load(std::memory_order_acquire)) {
         // Hardware timer event pacing: exact 10.0 ms / 7.5 ms wakeups from esp_timer task
@@ -1256,13 +1256,6 @@ void EspNowBroadcastEngine::runAudioDspLoop() {
         for (size_t i = 0; i < MAX_SINK_NODES; ++i) {
             size_t ch = (start_offset + i) % MAX_SINK_NODES;
 
-            // Check deadline
-            int64_t elapsed_us = esp_timer_get_time() - frame_start_us;
-            if (elapsed_us >= SWEEP_HARD_DEADLINE_US) {
-                m_tx_deadline_drops++;
-                break;
-            }
-
             bool request_ack = (i == (MAX_SINK_NODES - 1));
 
             const uint8_t* pkt_buf;
@@ -1285,7 +1278,17 @@ void EspNowBroadcastEngine::runAudioDspLoop() {
 
             if (send_err == ESP_OK) {
                 if (s_tx_done_sem) {
-                    if (xSemaphoreTake(s_tx_done_sem, pdMS_TO_TICKS(3)) == pdTRUE) {
+                    // Microsecond-precision polling: max 1000 us (normal broadcast TX completes in ~500-700 us)
+                    bool tx_completed = false;
+                    int64_t tx_poll_deadline = esp_timer_get_time() + 1000;
+                    while (esp_timer_get_time() < tx_poll_deadline) {
+                        if (xSemaphoreTake(s_tx_done_sem, 0) == pdTRUE) {
+                            tx_completed = true;
+                            break;
+                        }
+                        esp_rom_delay_us(50);
+                    }
+                    if (tx_completed) {
                         m_consecutive_tx_timeouts = 0;
                         if (s_last_tx_status.load(std::memory_order_relaxed) != ESP_NOW_SEND_SUCCESS) {
                             m_tx_fail_count++;
@@ -1306,6 +1309,13 @@ void EspNowBroadcastEngine::runAudioDspLoop() {
             m_tx_packets_this_sec++;
             m_tx_packets_total++;
             m_tx_packets_sec++;
+
+            // Check deadline AFTER send: only abort remaining channels if time is exhausted
+            int64_t elapsed_us = esp_timer_get_time() - frame_start_us;
+            if (elapsed_us >= SWEEP_HARD_DEADLINE_US) {
+                m_tx_deadline_drops += (MAX_SINK_NODES - 1 - i);
+                break;
+            }
         }
 
         int64_t tx_t1 = esp_timer_get_time();

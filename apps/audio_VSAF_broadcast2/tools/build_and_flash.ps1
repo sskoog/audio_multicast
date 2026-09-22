@@ -39,7 +39,7 @@ if ($Port -eq "") {
 }
 
 if ($Chip -eq "") {
-    if ($Role -eq "SOURCE" -or $targetPort -eq "COM16" -or $targetPort -eq "COM116" -or $targetPort -eq "COM4" -or $NodeId -eq 4) {
+    if ($Role -eq "SOURCE" -or $targetPort -eq "COM16" -or $targetPort -eq "COM116" -or $targetPort -eq "COM4" -or $targetPort -eq "COM5" -or $NodeId -eq 4 -or $NodeId -eq 5) {
         $Chip = "esp32s3"
     } else {
         $Chip = "esp32c6"
