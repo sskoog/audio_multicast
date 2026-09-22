@@ -377,16 +377,16 @@ private:
     uint8_t                    m_seq;
     uint16_t                   m_octets_per_frame;
     uint32_t                   m_frame_duration_us;
-    vsaf_audio_packet_t        m_last_tx_pkt[MAX_SINK_NODES];
-    vsaf_sub_packet_t          m_last_tx_sub_pkt;
-    uint8_t                    m_prev1_encoded_sat[MAX_SINK_NODES][LC3_FRAME_OCTETS_RED];
-    uint8_t                    m_prev2_encoded_sat[MAX_SINK_NODES][LC3_FRAME_OCTETS_RED];
-    bool                       m_prev1_sat_valid[MAX_SINK_NODES];
-    bool                       m_prev2_sat_valid[MAX_SINK_NODES];
+    vsaf_audio_packet_t        m_last_tx_pkt[NUM_SATELLITE_CHANNELS]; // Satellite packets (Ch 0..4: Left, Right, Center, LSurr, RSurr)
+    vsaf_sub_packet_t          m_last_tx_sub_pkt;                     // Subwoofer packet (Ch 5)
+    uint8_t                    m_prev1_encoded_sat[NUM_SATELLITE_CHANNELS][LC3_FRAME_OCTETS_RED];
+    uint8_t                    m_prev2_encoded_sat[NUM_SATELLITE_CHANNELS][LC3_FRAME_OCTETS_RED];
+    bool                       m_prev1_sat_valid[NUM_SATELLITE_CHANNELS];
+    bool                       m_prev2_sat_valid[NUM_SATELLITE_CHANNELS];
 
-    uint8_t                    m_prev1_encoded_sub[LC3_FRAME_OCTETS_RED];
-    uint8_t                    m_prev2_encoded_sub[LC3_FRAME_OCTETS_RED];
-    uint8_t                    m_prev3_encoded_sub[LC3_FRAME_OCTETS_RED];
+    uint8_t                    m_prev1_encoded_sub[LC3_FRAME_OCTETS_SUB];
+    uint8_t                    m_prev2_encoded_sub[LC3_FRAME_OCTETS_SUB];
+    uint8_t                    m_prev3_encoded_sub[LC3_FRAME_OCTETS_SUB];
     bool                       m_prev1_sub_valid;
     bool                       m_prev2_sub_valid;
     bool                       m_prev3_sub_valid;

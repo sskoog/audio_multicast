@@ -136,14 +136,14 @@ All network communication uses the **VSAF 3.0 (Variable-rate Synchronized Audio 
 ### 3.1 8-Byte Word-Aligned Header
 
 1. **`type_id` (`uint16_t`, 2 Bytes)**: Combination magic word and message discriminator:
-   - `0x1337`: `VSAF_TYPE_AUDIO_SATELLITE` (Satellite Audio Broadcast: Ch 0, 1, 2, 4, 5)
-   - `0x1338`: `VSAF_TYPE_AUDIO_SUBWOOFER` (Subwoofer Audio Broadcast: Ch 3, 4x60B frames)
+   - `0x1337`: `VSAF_TYPE_AUDIO_SATELLITE` (Satellite Audio Broadcast: Ch 0..4)
+   - `0x1338`: `VSAF_TYPE_AUDIO_SUBWOOFER` (Subwoofer Audio Broadcast: Ch 5, 4x60B frames)
    - `0x1350`: `VSAF_TYPE_CONTROL` (Control Frame from SOURCE)
    - `0x1360`: `VSAF_TYPE_SINK_TELEMETRY` (Reverse Telemetry Reply from SINK)
 2. **`packet_flags` (`uint8_t`, 1 Byte)**: Bit-packed stream configuration:
    - **Bit 0 (`FRAME_DUR`)**: Frame duration (`1` = 10.0 ms standard, 7.5 ms deprecated).
    - **Bits 1..3 (`SAMPLE_RATE`)**: Sample rate code (`0` = 8k, `1` = 16k, `2` = 24k, `3` = 32k, `4` = 48k).
-   - **Bits 4..6 (`RECEIVER_ID`)**: Target audio channel (`0` = Left, `1` = Right, `2` = Center, `3` = Sub, `4` = Surround L, `5` = Surround R, `7` = Wildcard Broadcast).
+   - **Bits 4..6 (`RECEIVER_ID`)**: Target audio channel (`0` = Left, `1` = Right, `2` = Center, `3` = Surround Left, `4` = Surround Right, `5` = Subwoofer, `7` = Wildcard Broadcast).
    - **Bit 7 (`REQ_ACK`)**: **Request for ACK / Telemetry Reply**:
      - `1`: Target SINK is explicitly commanded by SOURCE to send a telemetry reply in this 10 ms window.
      - `0`: SINK remains silent.

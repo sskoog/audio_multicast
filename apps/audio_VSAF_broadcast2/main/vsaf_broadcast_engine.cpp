@@ -1134,64 +1134,71 @@ void EspNowBroadcastEngine::runAudioDspLoop() {
         // Ch 0: Left High-Pass (Satellite Left)
         // Ch 1: Right High-Pass (Satellite Right)
         // Ch 2: Center High-Pass (mapped from Left HP)
-        // Ch 3: Subwoofer (8 kHz Linkwitz-Riley LP polyphase decimated, Packet Type 0x1338)
-        // Ch 4: Left Surround (mapped from Left HP)
-        // Ch 5: Right Surround (mapped from Right HP)
+        // Ch 3: Left Surround (mapped from Left HP)
+        // Ch 4: Right Surround (mapped from Right HP)
+        // Ch 5: Subwoofer (8 kHz Linkwitz-Riley LP polyphase decimated, Packet Type 0x1338)
 
         static uint8_t encoded_sat_hq[2][LC3_FRAME_OCTETS_HQ];   // [0]: Left HQ, [1]: Right HQ (120B)
         static uint8_t encoded_sat_red[2][LC3_FRAME_OCTETS_RED]; // [0]: Left Red, [1]: Right Red (60B)
-        static uint8_t encoded_sub_60[LC3_FRAME_OCTETS_RED];      // Subwoofer (60B)
+        static uint8_t encoded_sub_60[LC3_FRAME_OCTETS_SUB];      // Subwoofer (60B)
 
-        // 3.1 Left Channel Dual-Pass: HQ (120B, Enc 0) + Redundancy (60B, Enc 2)
+        // 3.1 Pass 1 (HQ): Left (120B, Enc 0) & Right (120B, Enc 1)
         int64_t enc1_t0 = esp_timer_get_time();
         size_t actual_bytes = 0;
         m_lc3_codec.encodeFrame(m_pcm_left_hp, samples, encoded_sat_hq[0], LC3_FRAME_OCTETS_HQ, &actual_bytes, 0, 1);
-        m_lc3_codec.encodeFrame(m_pcm_left_hp, samples, encoded_sat_red[0], LC3_FRAME_OCTETS_RED, &actual_bytes, 2, 1);
+        if (m_is_stereo || m_tone_test_mode) {
+            m_lc3_codec.encodeFrame(m_pcm_right_hp, samples, encoded_sat_hq[1], LC3_FRAME_OCTETS_HQ, &actual_bytes, 1, 1);
+        } else {
+            memcpy(encoded_sat_hq[1], encoded_sat_hq[0], LC3_FRAME_OCTETS_HQ);
+        }
         int64_t enc1_t1 = esp_timer_get_time();
         float enc1_ms = (enc1_t1 - enc1_t0) / 1000.0f;
         m_enc1_duration_buf.push(enc1_ms);
 
-        // 3.2 Right Channel Dual-Pass: HQ (120B, Enc 1) + Redundancy (60B, Enc 3)
+        // 3.2 Pass 2 (Subwoofer): Sub 8k (60B @ 8 kHz, Enc 4)
         int64_t enc2_t0 = esp_timer_get_time();
-        if (m_is_stereo || m_tone_test_mode) {
-            m_lc3_codec.encodeFrame(m_pcm_right_hp, samples, encoded_sat_hq[1], LC3_FRAME_OCTETS_HQ, &actual_bytes, 1, 1);
-            m_lc3_codec.encodeFrame(m_pcm_right_hp, samples, encoded_sat_red[1], LC3_FRAME_OCTETS_RED, &actual_bytes, 3, 1);
-        } else {
-            // Mono mode: duplicate Left channel encodes
-            memcpy(encoded_sat_hq[1], encoded_sat_hq[0], LC3_FRAME_OCTETS_HQ);
-            memcpy(encoded_sat_red[1], encoded_sat_red[0], LC3_FRAME_OCTETS_RED);
-        }
+        m_lc3_codec.encodeFrame(m_pcm_sub_8k, 80, encoded_sub_60, LC3_FRAME_OCTETS_SUB, &actual_bytes, 4, 1);
         int64_t enc2_t1 = esp_timer_get_time();
         float enc2_ms = (enc2_t1 - enc2_t0) / 1000.0f;
         m_enc2_duration_buf.push(enc2_ms);
 
-        // 3.3 Subwoofer Single-Pass (60B @ 8 kHz, Enc 4)
+        // 3.3 Pass 3 (Redundancy): Left Red (60B, Enc 2) & Right Red (60B, Enc 3)
         int64_t enc3_t0 = esp_timer_get_time();
-        m_lc3_codec.encodeFrame(m_pcm_sub_8k, 80, encoded_sub_60, LC3_FRAME_OCTETS_RED, &actual_bytes, 4, 1);
+        m_lc3_codec.encodeFrame(m_pcm_left_hp, samples, encoded_sat_red[0], LC3_FRAME_OCTETS_RED, &actual_bytes, 2, 1);
+        if (m_is_stereo || m_tone_test_mode) {
+            m_lc3_codec.encodeFrame(m_pcm_right_hp, samples, encoded_sat_red[1], LC3_FRAME_OCTETS_RED, &actual_bytes, 3, 1);
+        } else {
+            memcpy(encoded_sat_red[1], encoded_sat_red[0], LC3_FRAME_OCTETS_RED);
+        }
         int64_t enc3_t1 = esp_timer_get_time();
         float enc3_ms = (enc3_t1 - enc3_t0) / 1000.0f;
         m_enc3_duration_buf.push(enc3_ms);
 
-        // Map satellite channels:
-        // Ch 0 (Left), Ch 2 (Center), Ch 4 (Left Surround) -> Left
-        // Ch 1 (Right), Ch 5 (Right Surround) -> Right
-        const uint8_t* sat_hq_ptr[MAX_SINK_NODES] = {
-            encoded_sat_hq[0], encoded_sat_hq[1], encoded_sat_hq[0],
-            nullptr,           encoded_sat_hq[0], encoded_sat_hq[1]
+        // Map satellite channels (Ch 0..4):
+        // Ch 0 (Left), Ch 2 (Center), Ch 3 (Left Surround) -> Left
+        // Ch 1 (Right), Ch 4 (Right Surround) -> Right
+        const uint8_t* sat_hq_ptr[NUM_SATELLITE_CHANNELS] = {
+            encoded_sat_hq[0], // Ch 0: Left
+            encoded_sat_hq[1], // Ch 1: Right
+            encoded_sat_hq[0], // Ch 2: Center
+            encoded_sat_hq[0], // Ch 3: Left Surround
+            encoded_sat_hq[1]  // Ch 4: Right Surround
         };
-        const uint8_t* sat_red_ptr[MAX_SINK_NODES] = {
-            encoded_sat_red[0], encoded_sat_red[1], encoded_sat_red[0],
-            nullptr,            encoded_sat_red[0], encoded_sat_red[1]
+        const uint8_t* sat_red_ptr[NUM_SATELLITE_CHANNELS] = {
+            encoded_sat_red[0], // Ch 0: Left Red
+            encoded_sat_red[1], // Ch 1: Right Red
+            encoded_sat_red[0], // Ch 2: Center Red
+            encoded_sat_red[0], // Ch 3: Left Surround Red
+            encoded_sat_red[1]  // Ch 4: Right Surround Red
         };
 
         // 4. Prepare Broadcast Packets for all 6 Channels
         uint32_t t_now_tx_us = static_cast<uint32_t>(esp_timer_get_time());
 
-        // 4.1 Prepare Satellite Packets (Ch 0, 1, 2, 4, 5)
-        for (size_t ch = 0; ch < MAX_SINK_NODES; ++ch) {
-            if (ch == 3) continue; // Ch 3 is Subwoofer
+        // 4.1 Prepare Satellite Packets (Ch 0..4)
+        for (size_t ch = 0; ch < NUM_SATELLITE_CHANNELS; ++ch) {
             m_last_tx_pkt[ch].type_id = VSAF_TYPE_AUDIO_SATELLITE;
-            m_last_tx_pkt[ch].packet_flags = make_packet_flags(ch, m_telemetry.sample_rate, 10000, false);
+            m_last_tx_pkt[ch].packet_flags = make_packet_flags(static_cast<uint8_t>(ch), m_telemetry.sample_rate, 10000, false);
             m_last_tx_pkt[ch].seq = m_seq;
             m_last_tx_pkt[ch].t_tx1_us = t_now_tx_us;
             memcpy(m_last_tx_pkt[ch].data_t0, sat_hq_ptr[ch], LC3_FRAME_OCTETS_HQ);
@@ -1209,45 +1216,44 @@ void EspNowBroadcastEngine::runAudioDspLoop() {
             }
         }
 
-        // 4.2 Prepare Subwoofer Packet (Ch 3, Type 0x1338)
+        // 4.2 Prepare Subwoofer Packet (Ch 5, Type 0x1338)
         m_last_tx_sub_pkt.type_id = VSAF_TYPE_AUDIO_SUBWOOFER;
-        m_last_tx_sub_pkt.packet_flags = make_packet_flags(3, 8000, 10000, false);
+        m_last_tx_sub_pkt.packet_flags = make_packet_flags(SUBWOOFER_CHANNEL_ID, 8000, 10000, false);
         m_last_tx_sub_pkt.seq = m_seq;
         m_last_tx_sub_pkt.t_tx1_us = t_now_tx_us;
-        memcpy(m_last_tx_sub_pkt.data_t0, encoded_sub_60, LC3_FRAME_OCTETS_RED);
+        memcpy(m_last_tx_sub_pkt.data_t0, encoded_sub_60, LC3_FRAME_OCTETS_SUB);
 
         if (m_prev1_sub_valid) {
-            memcpy(m_last_tx_sub_pkt.data_t_prev1, m_prev1_encoded_sub, LC3_FRAME_OCTETS_RED);
+            memcpy(m_last_tx_sub_pkt.data_t_prev1, m_prev1_encoded_sub, LC3_FRAME_OCTETS_SUB);
         } else {
-            memcpy(m_last_tx_sub_pkt.data_t_prev1, encoded_sub_60, LC3_FRAME_OCTETS_RED);
+            memcpy(m_last_tx_sub_pkt.data_t_prev1, encoded_sub_60, LC3_FRAME_OCTETS_SUB);
         }
 
         if (m_prev2_sub_valid) {
-            memcpy(m_last_tx_sub_pkt.data_t_prev2, m_prev2_encoded_sub, LC3_FRAME_OCTETS_RED);
+            memcpy(m_last_tx_sub_pkt.data_t_prev2, m_prev2_encoded_sub, LC3_FRAME_OCTETS_SUB);
         } else {
-            memcpy(m_last_tx_sub_pkt.data_t_prev2, encoded_sub_60, LC3_FRAME_OCTETS_RED);
+            memcpy(m_last_tx_sub_pkt.data_t_prev2, encoded_sub_60, LC3_FRAME_OCTETS_SUB);
         }
 
         if (m_prev3_sub_valid) {
-            memcpy(m_last_tx_sub_pkt.data_t_prev3, m_prev3_encoded_sub, LC3_FRAME_OCTETS_RED);
+            memcpy(m_last_tx_sub_pkt.data_t_prev3, m_prev3_encoded_sub, LC3_FRAME_OCTETS_SUB);
         } else {
-            memcpy(m_last_tx_sub_pkt.data_t_prev3, encoded_sub_60, LC3_FRAME_OCTETS_RED);
+            memcpy(m_last_tx_sub_pkt.data_t_prev3, encoded_sub_60, LC3_FRAME_OCTETS_SUB);
         }
 
         // 4.3 Unconditionally update history buffers for next cycle
-        for (size_t ch = 0; ch < MAX_SINK_NODES; ++ch) {
-            if (ch == 3) continue;
+        for (size_t ch = 0; ch < NUM_SATELLITE_CHANNELS; ++ch) {
             memcpy(m_prev2_encoded_sat[ch], m_prev1_encoded_sat[ch], LC3_FRAME_OCTETS_RED);
             m_prev2_sat_valid[ch] = m_prev1_sat_valid[ch];
             memcpy(m_prev1_encoded_sat[ch], sat_red_ptr[ch], LC3_FRAME_OCTETS_RED);
             m_prev1_sat_valid[ch] = true;
         }
 
-        memcpy(m_prev3_encoded_sub, m_prev2_encoded_sub, LC3_FRAME_OCTETS_RED);
+        memcpy(m_prev3_encoded_sub, m_prev2_encoded_sub, LC3_FRAME_OCTETS_SUB);
         m_prev3_sub_valid = m_prev2_sub_valid;
-        memcpy(m_prev2_encoded_sub, m_prev1_encoded_sub, LC3_FRAME_OCTETS_RED);
+        memcpy(m_prev2_encoded_sub, m_prev1_encoded_sub, LC3_FRAME_OCTETS_SUB);
         m_prev2_sub_valid = m_prev1_sub_valid;
-        memcpy(m_prev1_encoded_sub, encoded_sub_60, LC3_FRAME_OCTETS_RED);
+        memcpy(m_prev1_encoded_sub, encoded_sub_60, LC3_FRAME_OCTETS_SUB);
         m_prev1_sub_valid = true;
 
         // 4.4 Broadcast 6 Audio Channels over 802.11 ESP-NOW (Rotating sweep)
@@ -1267,7 +1273,7 @@ void EspNowBroadcastEngine::runAudioDspLoop() {
 
             const uint8_t* pkt_buf;
             size_t pkt_len;
-            if (ch == 3) {
+            if (ch == SUBWOOFER_CHANNEL_ID) {
                 if (request_ack) m_last_tx_sub_pkt.packet_flags |= 0x80;
                 pkt_buf = reinterpret_cast<const uint8_t*>(&m_last_tx_sub_pkt);
                 pkt_len = sizeof(vsaf_sub_packet_t);
