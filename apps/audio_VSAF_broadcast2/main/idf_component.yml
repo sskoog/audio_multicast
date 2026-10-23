@@ -1,8 +1,6 @@
 dependencies:
-  espressif/esp_audio_codec: '*'
+  # Pinned (was '*') so builds are reproducible; bump deliberately.
+  espressif/esp_audio_codec: '2.6.2'
   idf:
     version: '>=4.1.0'
-  espressif/esp_tinyusb:
-    version: '*'
-    rules:
-      - if: "target in [esp32s2, esp32s3, esp32p4]"
+  # esp_tinyusb is vendored in ../components/esp_tinyusb (v3.0.0), not fetched from the registry.

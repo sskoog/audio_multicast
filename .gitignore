@@ -7,6 +7,7 @@ managed_components/
 **/managed_components/
 dependencies.lock
 **/dependencies.lock
+**/dependencies.lock.*
 
 # ESP-IDF SDK configuration (generated from sdkconfig.defaults)
 sdkconfig

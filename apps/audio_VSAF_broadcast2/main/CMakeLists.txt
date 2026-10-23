@@ -39,7 +39,12 @@ set(requires
 
 if(CONFIG_IDF_TARGET_ESP32S3)
     list(APPEND srcs "usb_audio.cpp")
-    list(APPEND requires espressif__esp_tinyusb)
+endif()
+
+# REQUIRES is evaluated before Kconfig (CONFIG_*) values exist, so gate it on the build target.
+idf_build_get_property(target IDF_TARGET)
+if(target STREQUAL "esp32s3")
+    list(APPEND requires esp_tinyusb)  # vendored: ../components/esp_tinyusb
 endif()
 
 set(ldfragments)

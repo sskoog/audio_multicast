@@ -129,25 +129,40 @@ def compile_target(app_dir, target, threads=6):
         f"$env:CMAKE_BUILD_PARALLEL_LEVEL = {threads}; "
         f"$env:NINJA_JOBS = {threads}; "
         f"Reset-StaleIdfBuildDir '{abs_build_dir}'; "
-        f"idf.py -C '{app_dir}' -B '{abs_build_dir}' -D IDF_TARGET={target} -D SDKCONFIG='{abs_sdkconfig}' build"
+        f"idf.py -C '{app_dir}' -B '{abs_build_dir}' -D IDF_TARGET={target} -D SDKCONFIG='{abs_sdkconfig}' build; "
+        f"exit $LASTEXITCODE"  # powershell -Command does not propagate a native command's exit code by itself
     )
 
     proc = subprocess.run(
         ["powershell", "-NoProfile", "-Command", cmd],
         cwd=app_dir,
         capture_output=True,
-        text=True
+        text=True,
+        errors="replace"
     )
 
     duration = time.time() - t0
+    # Full idf.py output per target, for diagnosing failures
+    log_path = os.path.join(abs_build_dir, "parallel_build.log")  # inside the (gitignored) build dir
+    os.makedirs(abs_build_dir, exist_ok=True)
+    with open(log_path, "w", encoding="utf-8") as f:
+        f.write(proc.stdout or "")
+        f.write(proc.stderr or "")
+
     app_bin = os.path.join(abs_build_dir, "audio_VSAF_broadcast2.bin")
     bootloader_bin = os.path.join(abs_build_dir, "bootloader", "bootloader.bin")
-    if proc.returncode == 0 and os.path.isfile(app_bin) and os.path.isfile(bootloader_bin):
+    # Success = idf.py exit code 0 AND its own completion banner. A leftover .bin from an earlier
+    # build must not count (that once hid a failed build), and an up-to-date build legitimately
+    # leaves the .bin untouched, so file timestamps are not a usable signal.
+    build_complete = "Project build complete" in (proc.stdout or "")
+    if proc.returncode == 0 and build_complete and os.path.isfile(app_bin) and os.path.isfile(bootloader_bin):
         print(f"[\033[92mBUILD SUCCESS\033[0m] {target.upper()} compiled successfully in {duration:.2f} s ({build_dir})")
         return True, target, duration, ""
     else:
-        err_msg = proc.stderr if proc.stderr else proc.stdout
-        print(f"[\033[91mBUILD FAILED\033[0m] {target.upper()} failed with code {proc.returncode} in {duration:.2f} s:\n{err_msg}")
+        err_lines = [l for l in (proc.stdout + proc.stderr).splitlines() if "error" in l.lower() or "FAILED" in l]
+        err_msg = "\n".join(err_lines[:15]) or (proc.stderr or proc.stdout)[-2000:]
+        print(f"[\033[91mBUILD FAILED\033[0m] {target.upper()} failed with code {proc.returncode} in {duration:.2f} s "
+              f"(full log: {log_path}):\n{err_msg}")
         return False, target, duration, err_msg
 
 
