@@ -15,7 +15,9 @@ Key Capabilities:
 """
 
 import os
+import re
 import sys
+import glob
 import time
 import argparse
 import subprocess
@@ -28,8 +30,8 @@ KNOWN_NODES = {
     1:  {"chip": "esp32s3", "role": "SINK",   "name": "Node 1 (XIAO S3 SINK Ch 0)",       "default_port": "COM1"},
     2:  {"chip": "esp32s3", "role": "SINK",   "name": "Node 2 (XIAO S3 SINK Ch 1)",       "default_port": "COM2"},
     3:  {"chip": "esp32s3", "role": "SINK",   "name": "Node 3 (XIAO S3 SINK Ch 2)",       "default_port": "COM3"},
-    4:  {"chip": "esp32s3", "role": "SINK",   "name": "Node 4 (XIAO S3 SINK Ch 4)",       "default_port": "COM4"},
-    5:  {"chip": "esp32s3", "role": "SINK",   "name": "Node 5 (XIAO S3 SINK Ch 5)",       "default_port": "COM5"},
+    4:  {"chip": "esp32s3", "role": "SINK",   "name": "Node 4 (XIAO S3 SINK Left Ch 0)",  "default_port": "COM4"},
+    5:  {"chip": "esp32s3", "role": "SINK",   "name": "Node 5 (XIAO S3 SINK Right Ch 1)", "default_port": "COM5"},
     16: {"chip": "esp32s3", "role": "SOURCE", "name": "Node 16 (XIAO ESP32-S3 SOURCE)", "default_port": "COM16", "app_port": "COM116"},
     20: {"chip": "esp32c6", "role": "SINK",   "name": "Node 20 (C6 LCD Console)",        "default_port": "COM20"},
     21: {"chip": "esp32c6", "role": "SINK",   "name": "Node 21 (C6 DevKit / Host)",       "default_port": "COM21", "app_port": "COM121"},
@@ -38,6 +40,35 @@ KNOWN_NODES = {
     25: {"chip": "esp32c6", "role": "SINK",   "name": "Node 25 (C6 Surround Left Ch 3)", "default_port": "COM25"},
     26: {"chip": "esp32c6", "role": "SINK",   "name": "Node 26 (C6 Surround Right Ch 4)","default_port": "COM26"},
 }
+
+
+# ESP-IDF environment: single source of truth is <repo>/tools/idf_env.ps1 ($DefaultIdfVersion)
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", ".."))
+IDF_ENV_PS1 = os.path.join(REPO_ROOT, "tools", "idf_env.ps1")
+IDF_TOOLS_PATH = r"C:\Users\stefa\.espressif"
+
+
+def idf_version() -> str:
+    """Return the ESP-IDF version to use: $AUDIO_MC_IDF_VERSION, else $DefaultIdfVersion from idf_env.ps1."""
+    if os.environ.get("AUDIO_MC_IDF_VERSION"):
+        return os.environ["AUDIO_MC_IDF_VERSION"]
+    with open(IDF_ENV_PS1, encoding="utf-8") as f:
+        m = re.search(r'^\$DefaultIdfVersion\s*=\s*"([^"]+)"', f.read(), re.MULTILINE)
+    return m.group(1) if m else "6.1"
+
+
+def find_idf_python() -> str:
+    """Return the newest idf<major.minor>_py*_env python.exe for the active IDF version (falls back to sys.executable)."""
+    major_minor = ".".join(idf_version().split(".")[:2])
+    envs = glob.glob(os.path.join(IDF_TOOLS_PATH, "python_env", f"idf{major_minor}_py*_env"))
+    def py_ver(path: str) -> tuple:
+        v = os.path.basename(path)[len(f"idf{major_minor}_py"):-len("_env")]
+        return tuple(int(x) for x in v.split(".") if x.isdigit())
+    for env in sorted(envs, key=py_ver, reverse=True):
+        exe = os.path.join(env, "Scripts", "python.exe")
+        if os.path.isfile(exe):
+            return exe
+    return sys.executable
 
 
 def print_banner(text, color="\033[96m"):
@@ -94,16 +125,10 @@ def compile_target(app_dir, target, threads=6):
     abs_sdkconfig = os.path.join(app_dir, sdkconfig_file)
 
     cmd = (
-        f"$env:IDF_TOOLS_PATH = 'C:\\Users\\stefa\\.espressif'; "
-        f"if (Test-Path 'C:\\Users\\stefa\\.espressif\\python_env\\idf6.0_py3.13_env') {{ "
-        f"  $env:IDF_PYTHON_ENV_PATH = 'C:\\Users\\stefa\\.espressif\\python_env\\idf6.0_py3.13_env' "
-        f"}} else {{ "
-        f"  $env:IDF_PYTHON_ENV_PATH = 'C:\\Users\\stefa\\.espressif\\python_env\\idf6.0_py3.11_env' "
-        f"}}; "
-        f"$env:PATH = '$env:IDF_PYTHON_ENV_PATH\\Scripts;' + $env:PATH; "
+        f". '{IDF_ENV_PS1}'; "
         f"$env:CMAKE_BUILD_PARALLEL_LEVEL = {threads}; "
         f"$env:NINJA_JOBS = {threads}; "
-        f". 'C:\\Users\\stefa\\OneDrive\\Documents\\ESP\\v6.0.2\\esp-idf\\export.ps1'; "
+        f"Reset-StaleIdfBuildDir '{abs_build_dir}'; "
         f"idf.py -C '{app_dir}' -B '{abs_build_dir}' -D IDF_TARGET={target} -D SDKCONFIG='{abs_sdkconfig}' build"
     )
 
@@ -137,11 +162,7 @@ def flash_single_node(app_dir, node_info, baud=921600):
 
     print(f"[\033[93mFLASH START\033[0m] Node {node_id} ({role}) on {port} [{chip}] at {baud} baud...")
 
-    idf_python = sys.executable
-    if os.path.isfile(r"C:\Users\stefa\.espressif\python_env\idf6.0_py3.13_env\Scripts\python.exe"):
-        idf_python = r"C:\Users\stefa\.espressif\python_env\idf6.0_py3.13_env\Scripts\python.exe"
-    elif os.path.isfile(r"C:\Users\stefa\.espressif\python_env\idf6.0_py3.11_env\Scripts\python.exe"):
-        idf_python = r"C:\Users\stefa\.espressif\python_env\idf6.0_py3.11_env\Scripts\python.exe"
+    idf_python = find_idf_python()
 
     if chip == "esp32s3":
         if node_id == 16 or port in ["COM16", "COM116"]:
@@ -211,7 +232,10 @@ def flash_single_node(app_dir, node_info, baud=921600):
 
 def main():
     parser = argparse.ArgumentParser(description="Parallel Build & Multi-Node Flash Coordinator")
-    parser.add_argument("--app-dir", default=r"C:\Git_ble_audio\apps\audio_VSAF_broadcast2", help="Application root directory")
+    # Default: <repo>/apps/audio_VSAF_broadcast2, resolved relative to this script (<repo>/.claude/skills/<skill>/scripts/)
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", ".."))
+    default_app_dir = os.path.join(repo_root, "apps", "audio_VSAF_broadcast2")
+    parser.add_argument("--app-dir", default=default_app_dir, help="Application root directory")
     parser.add_argument("--build-only", action="store_true", help="Only compile without flashing")
     parser.add_argument("--flash-only", action="store_true", help="Only flash without compiling")
     parser.add_argument("--targets", default="all", choices=["all", "s3", "c6"], help="Build target selection")

@@ -10,11 +10,11 @@ trigger: always_on
    - Prompt user if new version of ESP-IDF or ESP-ADF is available to download.
    - Local repository for all ESP-IDF versions: C:\Users\stefa\OneDrive\Documents\ESP\ .
    - ESP-IDF tools in C:\Users\stefa\.espressif .
-   - Activate the environment using:
+   - Current repo version: ESP-IDF v6.1. Activate the environment with the shared helper (the single place the version is set, `$DefaultIdfVersion`):
      ```powershell
-     $env:IDF_TOOLS_PATH = "C:\Users\stefa\.espressif"
-     . "[ESP-IDF-path]\esp-idf\export.ps1"
+     . C:\Git_audio_multicast\tools\idf_env.ps1            # or -IdfVersion 6.0.2 to override
      ```
+   - New build/flash scripts must dot-source `tools\idf_env.ps1` instead of hard-coding IDF or Python env paths.
 
 2. **COM-ports**
    - Embedded devices are normally connected to this PC via COM-port, where the COM-port number is assigned according to the node ID. Some nodes have two COM-ports, in which case 100 is added to the node number, e.g. node 16 has COM16 & COM116.

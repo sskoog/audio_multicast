@@ -14,7 +14,7 @@ import subprocess
 import serial
 import serial.tools.list_ports
 
-ESPTOOL_PATH = r"C:\Users\stefa\.espressif\python_env\idf6.0_py3.13_env\Scripts\esptool.exe"
+ESPTOOL_PATH = r"C:\Users\stefa\.espressif\python_env\idf6.1_py3.13_env\Scripts\esptool.exe"
 BOOTLOADER = r"apps\lc3_benchmark\build_s3\bootloader\bootloader.bin"
 PARTITIONS = r"apps\lc3_benchmark\build_s3\partition_table\partition-table.bin"
 APP_BIN    = r"apps\lc3_benchmark\build_s3\esp32_lc3_benchmark.bin"

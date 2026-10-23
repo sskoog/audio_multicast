@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(powershell -ExecutionPolicy Bypass -File apps\\audio_VSAF_broadcast2\\tools\\build_and_flash.ps1 *)",
+      "PowerShell(powershell -ExecutionPolicy Bypass -File apps\\audio_VSAF_broadcast2\\tools\\compile.ps1 *)",
+      "PowerShell(powershell -ExecutionPolicy Bypass -File apps\\audio_VSAF_broadcast2\\tools\\parallel_build_and_flash.ps1 *)",
+      "PowerShell(powershell -ExecutionPolicy Bypass -File apps\\audio_VSAF_broadcast2\\tools\\flash_s3.ps1 *)",
+      "PowerShell(powershell -ExecutionPolicy Bypass -File apps\\audio_VSAF_broadcast2\\tools\\serial_monitor_basic.ps1 *)",
+      "PowerShell(powershell -ExecutionPolicy Bypass -File .claude\\skills\\esp32-usb-serial-debug\\scripts\\list_esp_ports.ps1 *)",
+      "PowerShell(powershell -ExecutionPolicy Bypass -File .claude\\skills\\esp32-usb-serial-debug\\scripts\\read_serial.ps1 *)",
+      "PowerShell(powershell -ExecutionPolicy Bypass -File .claude\\skills\\esp32-usb-serial-debug\\scripts\\send_serial_cmd.ps1 *)",
+      "PowerShell(powershell -ExecutionPolicy Bypass -File .claude\\skills\\esp32-usb-serial-debug\\scripts\\reset_node.ps1 *)",
+      "PowerShell(python apps\\audio_VSAF_broadcast2\\tools\\test_broadcast_cluster.py *)",
+      "PowerShell(python apps\\audio_VSAF_broadcast2\\tools\\s3_flash_and_reset.py *)",
+      "PowerShell(python .claude\\skills\\parallel-compile-and-flash\\scripts\\parallel_build_and_flash.py *)",
+      "PowerShell(python -m esptool *)",
+      "PowerShell(idf.py *)",
+      "Bash(powershell -ExecutionPolicy Bypass -File apps/audio_VSAF_broadcast2/tools/build_and_flash.ps1 *)",
+      "Bash(powershell -ExecutionPolicy Bypass -File apps/audio_VSAF_broadcast2/tools/compile.ps1 *)",
+      "Bash(powershell -ExecutionPolicy Bypass -File apps/audio_VSAF_broadcast2/tools/parallel_build_and_flash.ps1 *)",
+      "Bash(.venv_audio_multicast/Scripts/python.exe apps/audio_VSAF_broadcast2/tools/test_broadcast_cluster.py *)"
+    ]
+  }
+}

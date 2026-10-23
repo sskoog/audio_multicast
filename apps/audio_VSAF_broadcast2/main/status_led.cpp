@@ -82,7 +82,6 @@ esp_err_t StatusLed::init(int gpio_num, int num_leds, bool active_low) {
         chan_cfg.gpio_num       = m_gpio_num;
         chan_cfg.speed_mode     = LEDC_LOW_SPEED_MODE;
         chan_cfg.channel        = LEDC_CHANNEL_0;
-        chan_cfg.intr_type      = LEDC_INTR_DISABLE;
         chan_cfg.timer_sel      = LEDC_TIMER_0;
         chan_cfg.duty           = m_active_low ? 255 : 0; // initially off
         chan_cfg.hpoint         = 0;

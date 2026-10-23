@@ -45,8 +45,10 @@ BOOTLOADER_BIN = os.path.join(BUILD_DIR, "bootloader", "bootloader.bin")
 PARTITION_BIN = os.path.join(BUILD_DIR, "partition_table", "partition-table.bin")
 APP_BIN = os.path.join(BUILD_DIR, "esp32_lc3_benchmark.bin")
 
-IDF_EXPORT_PS1 = r"C:\Users\stefa\OneDrive\Documents\ESP\v6.0.2\esp-idf\export.ps1"
-ESPTOOL_PY = r"C:\Users\stefa\.espressif\python_env\idf6.0_py3.13_env\Scripts\esptool.exe"
+# ESP-IDF version comes from the shared helper (<repo>/tools/idf_env.ps1, $DefaultIdfVersion)
+IDF_ENV_PS1 = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "tools", "idf_env.ps1"))
+IDF_VERSION = "6.1"
+ESPTOOL_PY = rf"C:\Users\stefa\.espressif\python_env\idf{IDF_VERSION}_py3.13_env\Scripts\esptool.exe"
 
 
 def ensure_dirs():
@@ -132,7 +134,7 @@ def execute_build(iram_enabled: bool) -> bool:
         with open(sdkconfig_path, "w", encoding="utf-8") as f:
             f.write(content)
 
-    build_cmd = f"$env:IDF_TOOLS_PATH='C:\\Users\\stefa\\.espressif'; . '{IDF_EXPORT_PS1}'; idf.py -C apps/lc3_benchmark -B apps/lc3_benchmark/build_s3 build"
+    build_cmd = f". '{IDF_ENV_PS1}' -IdfVersion {IDF_VERSION}; Reset-StaleIdfBuildDir apps/lc3_benchmark/build_s3; idf.py -C apps/lc3_benchmark -B apps/lc3_benchmark/build_s3 build"
     cmd = ["powershell", "-Command", build_cmd]
     print(f"Executing: idf.py build...")
     res = subprocess.run(cmd, capture_output=True, text=True)
@@ -480,7 +482,7 @@ def generate_markdown_report(records: list[dict]):
     report_lines.append("**Target Platform**: Seeed Studio XIAO ESP32-S3 (Node 16)  ")
     report_lines.append("**SoC Architecture**: Dual-Core 32-bit Xtensa LX7 @ 240 MHz + Single-Precision Hardware FPU + Vector Extensions  ")
     report_lines.append("**Host Compiler**: GCC 15.2.0 (`xtensa-esp32s3-elf-gcc`)  ")
-    report_lines.append("**ESP-IDF Version**: v6.0.2  ")
+    report_lines.append(f"**ESP-IDF Version**: v{IDF_VERSION}  ")
     report_lines.append("**Audio Material**: 16-bit Mono Dynamic PCM Music Clip (from *Alan Walker - Monster*, 4.0s dynamic excerpt)  ")
     report_lines.append("**RF / Wi-Fi State**: Disabled during benchmark to isolate pure CPU compute  ")
     report_lines.append("**Execution Core**: Benchmark pinned strictly to **Core 1** at high priority over 100 consecutive dynamic frames per pass.  ")

@@ -449,9 +449,8 @@ Nodes emit formatted 1.0-second telemetry heartbeats over USB serial:
 Multi-target parallel compilation and concurrent multi-node flashing are executed with strict CPU worker thread gating (`-j 6` per target) via PowerShell:
 
 ```powershell
-# Environment Activation (PowerShell)
-$env:IDF_TOOLS_PATH = "C:\Users\stefa\.espressif"
-. "C:\Users\stefa\OneDrive\Documents\ESP\v6.0.2\esp-idf\export.ps1"
+# Environment: the scripts below activate ESP-IDF v6.1 themselves via tools\idf_env.ps1 (repo root).
+# For manual idf.py use:  . .\tools\idf_env.ps1
 
 # Flash SOURCE (ESP32-S3 on COM16/COM116)
 powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\build_and_flash.ps1 -Role SOURCE -Port COM116

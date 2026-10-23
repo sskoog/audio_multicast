@@ -20,14 +20,13 @@ $ErrorActionPreference = "Stop"
 
 $toolsDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $appDir = Split-Path -Parent $toolsDir
-$scriptPath = "c:\Git_ble_audio\.agents\skills\parallel-compile-and-flash\scripts\parallel_build_and_flash.py"
+$repoRoot = Split-Path -Parent (Split-Path -Parent $appDir)
+$scriptPath = Join-Path $repoRoot ".claude\skills\parallel-compile-and-flash\scripts\parallel_build_and_flash.py"
 
-$pythonExe = "python"
-if (Test-Path "C:\Users\stefa\.espressif\python_env\idf6.0_py3.13_env\Scripts\python.exe") {
-    $pythonExe = "C:\Users\stefa\.espressif\python_env\idf6.0_py3.13_env\Scripts\python.exe"
-} elseif (Test-Path "C:\Users\stefa\.espressif\python_env\idf6.0_py3.11_env\Scripts\python.exe") {
-    $pythonExe = "C:\Users\stefa\.espressif\python_env\idf6.0_py3.11_env\Scripts\python.exe"
-}
+# Coordinator only needs pyserial; the repo venv has it. Each build subprocess activates
+# ESP-IDF itself via tools\idf_env.ps1.
+$pythonExe = Join-Path $repoRoot ".venv_audio_multicast\Scripts\python.exe"
+if (-not (Test-Path $pythonExe)) { $pythonExe = "python" }
 
 $cmdArgs = @(
     "-u",

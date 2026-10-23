@@ -99,22 +99,16 @@ Full cross-SoC encoder and decoder benchmarks comparing Xtensa LX7 (ESP32-S3), R
 
 ## Build and Flash Setup
 
-Builds use **ESP-IDF v6.0.2** with isolated target build folders (`build_s3/`, `build_c6/`):
+Builds use **ESP-IDF v6.1** with isolated target build folders (`build_s3/`, `build_c6/`). All scripts activate ESP-IDF via the shared helper `tools\idf_env.ps1`, where the repo-wide version is set:
 
 ```powershell
-# Environment Activation (PowerShell)
-$env:IDF_TOOLS_PATH = "C:\Users\stefa\.espressif"
-. "C:\Users\stefa\OneDrive\Documents\ESP\v6.0.2\esp-idf\export.ps1"
+# Environment Activation (PowerShell, only needed for manual idf.py use)
+. .\tools\idf_env.ps1
 
-# Flash Audio ESP-NOW Broadcast System:
-# SOURCE (ESP32-S3 on COM16)
-powershell -ExecutionPolicy Bypass -File apps\audio_ESP_NOW_broadcast\build_and_flash.ps1 -Role SOURCE -Port COM16
-
-# SINK Left (ESP32-C6 on COM23)
-powershell -ExecutionPolicy Bypass -File apps\audio_ESP_NOW_broadcast\build_and_flash.ps1 -Role SINK -Port COM23 -NodeId 23
-
-# SINK Right (ESP32-C6 on COM24)
-powershell -ExecutionPolicy Bypass -File apps\audio_ESP_NOW_broadcast\build_and_flash.ps1 -Role SINK -Port COM24 -NodeId 24
+# Main track: audio_VSAF_broadcast2
+powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\build_and_flash.ps1 -Role SOURCE                      # Node 16
+powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\build_and_flash.ps1 -Role SINK -Port COM4 -NodeId 4   # Left
+powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\parallel_build_and_flash.ps1                         # whole cluster
 ```
 
 ---

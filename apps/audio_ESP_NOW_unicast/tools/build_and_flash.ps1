@@ -66,21 +66,8 @@ Write-Host "==========================================================" -Foregro
 Write-Host " Audio Unicast: $Role (Chip: $Chip, Node $NodeId on $targetPort)" -ForegroundColor Cyan
 Write-Host "==========================================================" -ForegroundColor Cyan
 
-# 1. Environment Setup (ESP-IDF v6.0.2)
-$env:IDF_TOOLS_PATH = "C:\Users\stefa\.espressif"
-
-if (Test-Path "$env:IDF_TOOLS_PATH\python_env\idf6.0_py3.13_env") {
-    $env:IDF_PYTHON_ENV_PATH = "$env:IDF_TOOLS_PATH\python_env\idf6.0_py3.13_env"
-} else {
-    $env:IDF_PYTHON_ENV_PATH = "$env:IDF_TOOLS_PATH\python_env\idf6.0_py3.11_env"
-}
-$env:PATH = "$env:IDF_PYTHON_ENV_PATH\Scripts;" + $env:PATH
-
-if (Test-Path "C:\Users\stefa\OneDrive\Documents\ESP\v6.0.2\esp-idf\export.ps1") {
-    . "C:\Users\stefa\OneDrive\Documents\ESP\v6.0.2\esp-idf\export.ps1"
-} else {
-    . "C:\Users\stefa\OneDrive\Documents\ESP\v6.0.2\export.ps1"
-}
+# 1. Environment Setup (shared helper, default ESP-IDF version set in tools\idf_env.ps1)
+. "$(Split-Path -Parent (Split-Path -Parent $appDir))\tools\idf_env.ps1"
 
 # 1.5 Target sdkconfig isolation (Rule 01_esp32_specific.md)
 if ($Chip -eq "esp32s3") {

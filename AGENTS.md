@@ -61,64 +61,46 @@ Both Bluetooth 5.3+ Low Energy Audio and ESP-NOW (802.11) are used as layer-2 co
 ### Bluetooth 5.3+ Low Energy Audio (to be implemented)
 To be defined.
 
-### 802.11 (ESP-NOW) Packet Structure (VSAF 3.0)
-ESP-NOW audio packets use the VSAF 3.0 container format (strictly 248 bytes, 32-bit word aligned) with dual-frame (t0 + t-1) redundancy and round-robin SINK replies:
-- **8-Byte Word-Aligned Header**:
-  - `type_id` (2B): `0x1337` (Audio Broadcast), `0x1338` (Control), `0x1339` (SINK Telemetry Reply)
-  - `packet_flags` (1B): Bit 0: Frame duration (0=7.5ms, 1=10ms), Bits 1-3: Sample rate, Bits 4-6: Target channel/receiver ID, Bit 7: Request for ACK/reply flag
+### 802.11 (ESP-NOW) Packet Structure (VSAF 3.0, `apps/audio_VSAF_broadcast2`)
+Source of truth: `apps/audio_VSAF_broadcast2/main/vsaf_protocol.hpp`. Audio packets are strictly 248 bytes, 32-bit word aligned, little-endian, with multi-tier Unequal Error Protection (UEP) redundancy and round-robin SINK replies. Full spec: `apps/audio_VSAF_broadcast2/README_wifi_audio_broadcast2.md`.
+- **Packet types (`type_id`)**: `0x1337` Satellite audio (Ch 0-4), `0x1338` Subwoofer audio (Ch 5), `0x1350` Control (from SOURCE), `0x1360` SINK telemetry reply (16 bytes).
+- **8-Byte Word-Aligned Header** (both audio types):
+  - `type_id` (2B)
+  - `packet_flags` (1B): Bit 0: Frame duration (0=7.5 ms deprecated, 1=10 ms), Bits 1-3: Sample rate code (0=8k, 1=16k, 2=24k, 3=32k, 4=48k), Bits 4-6: Receiver channel ID (0-5, 7=broadcast), Bit 7: REQ_ACK (this SINK must reply with telemetry)
   - `seq` (1B): Monotonically incrementing 8-bit sequence number (0-255)
   - `t_tx1_us` (4B): SOURCE microsecond master presentation timestamp (`esp_timer_get_time()`)
-- **Payload (240 Bytes)**:
-  - Primary Frame (Frame t0, 120 bytes, 32-bit word-aligned at offset 8)
-  - Redundant Frame (Frame t-1, 120 bytes, 32-bit word-aligned at offset 128)
+- **Satellite payload (`0x1337`, 240 Bytes, 3-tier)**: t0 120 B (HQ, offset 8) + t-1 60 B (redundancy, offset 128) + t-2 60 B (redundancy, offset 188).
+- **Subwoofer payload (`0x1338`, 240 Bytes, 4-tier)**: t0 / t-1 / t-2 / t-3, 60 B each @ 8 kHz (offsets 8 / 68 / 128 / 188).
 
 ### Supported Audio Configurations
-- **Sample Rates**: [8, 16, 24, 32, 48] kHz
-- **Frame Cadence**: [7.5, 10] ms (10.0 ms Default)
-- **Bitrates / Frame Sizes**:
-  - 10.0 ms @ 120 octets = 96 kbps per channel
-  - 7.5 ms @ 120 octets = 128 kbps per channel
-- **Channel Modes**:
-  - **Mono Mode**: Single LC3 encode; packet duplicated into two VSAF packets for Ch 0 and Ch 1.
-  - **Stereo Mode**: Two distinct LC3 encodes; sent as independent VSAF packets for Ch 0 and Ch 1.
+- **Satellites (Ch 0-4)**: 48 kHz default (`CONFIG_ESPNOW_SAMPLE_RATE_HZ`, compile-time), 10 ms frames; HQ 120 octets = 96 kbps, redundancy 60 octets = 48 kbps. LR4 high-pass at 100 Hz.
+- **Subwoofer (Ch 5)**: 8 kHz (`CONFIG_ESPNOW_SUB_SAMPLE_RATE_HZ`), 60 octets = 48 kbps, LR4 low-pass at 100 Hz with polyphase decimation.
+- **Legacy apps** (`audio_ESP_NOW_broadcast` / `_unicast`) use the older dual-frame (t0 + t-1, 120 B each) layout with runtime-selectable 8-48 kHz, 7.5/10 ms and mono/stereo modes.
 
 ### Critical Timing Requirement
 Audio broadcasting MUST use absolute microsecond hardware timer pacing (`esp_timer_get_time()`) instead of relative delays (`vTaskDelayUntil` / `vTaskDelay`) to eliminate clock drift and frame creep.
 
 ---
 
-## Standard Build & Flash Commands (ESP-IDF v6.0.2)
+## Standard Build & Flash Commands (ESP-IDF v6.1)
 
-Builds use ESP-IDF v6.0.2 at `C:\Users\stefa\OneDrive\Documents\ESP\v6.0.2\esp-idf`:
+Builds use ESP-IDF v6.1 at `C:\Users\stefa\OneDrive\Documents\ESP\v6.1\esp-idf` with tools in `C:\Users\stefa\.espressif` (GCC 15.2.0, Python env `idf6.1_py3.13_env`).
+All build/flash scripts activate the environment through one shared helper, `tools\idf_env.ps1`. To change the IDF version for the whole repo, edit `$DefaultIdfVersion` there. For a single run, pass `-IdfVersion 6.0.2` to a build script or set `$env:AUDIO_MC_IDF_VERSION`. Build folders configured by a different IDF version are cleaned with `idf.py fullclean` automatically.
 
 ```powershell
-# Environment Activation (PowerShell)
-if (Test-Path "C:\Users\stefa\OneDrive\Documents\ESP\.esptools") {
-    $env:IDF_TOOLS_PATH="C:\Users\stefa\OneDrive\Documents\ESP\.esptools"
-} else {
-    $env:IDF_TOOLS_PATH="C:\Users\stefa\.espressif"
-}
+# Environment Activation (PowerShell, manual idf.py / esptool use)
+. C:\Git_audio_multicast\tools\idf_env.ps1
 
-if (Test-Path "$env:IDF_TOOLS_PATH\python_env\idf6.0_py3.13_env") {
-    $env:IDF_PYTHON_ENV_PATH="$env:IDF_TOOLS_PATH\python_env\idf6.0_py3.13_env"
-} else {
-    $env:IDF_PYTHON_ENV_PATH="$env:IDF_TOOLS_PATH\python_env\idf6.0_py3.11_env"
-}
-$env:PATH="$env:IDF_PYTHON_ENV_PATH\Scripts;" + $env:PATH
+# Automated Build and Flash for audio_VSAF_broadcast2 (main track):
+# Flash SOURCE (Node 16, ESP32-S3, hands-free reset)
+powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\build_and_flash.ps1 -Role SOURCE
 
-if (Test-Path "C:\Users\stefa\OneDrive\Documents\ESP\v6.0.2\esp-idf\export.ps1") {
-    . "C:\Users\stefa\OneDrive\Documents\ESP\v6.0.2\esp-idf\export.ps1"
-} else {
-    . "C:\Users\stefa\OneDrive\Documents\ESP\v6.0.2\export.ps1"
-}
+# Flash SINK Left (Node 4, ESP32-S3 PCM5102A on COM4)
+powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\build_and_flash.ps1 -Role SINK -Port COM4 -NodeId 4
 
-# Automated Build and Flash for audio_ESP_NOW_broadcast:
-# Flash SOURCE (ESP32-S3 on COM16)
-powershell -ExecutionPolicy Bypass -File apps\audio_ESP_NOW_broadcast\build_and_flash.ps1 -Role SOURCE -Port COM16
+# Flash SINK Center (Node 23, ESP32-C6 on COM23)
+powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\build_and_flash.ps1 -Role SINK -Port COM23 -NodeId 23
 
-# Flash SINK Left (ESP32-C6 on COM23)
-powershell -ExecutionPolicy Bypass -File apps\audio_ESP_NOW_broadcast\build_and_flash.ps1 -Role SINK -Port COM23 -NodeId 23
-
-# Flash SINK Right (ESP32-C6 on COM24)
-powershell -ExecutionPolicy Bypass -File apps\audio_ESP_NOW_broadcast\build_and_flash.ps1 -Role SINK -Port COM24 -NodeId 24
+# Build both targets in parallel and flash all detected nodes
+powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\parallel_build_and_flash.ps1
 ```

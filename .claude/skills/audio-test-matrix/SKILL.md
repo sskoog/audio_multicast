@@ -1,8 +1,10 @@
 ---
 name: audio-test-matrix
 description: >-
-  Automated test execution and validation of the 20 audio configuration combinations (Sample Rates x Frame Durations x Mono/Stereo) across SOURCE and SINK nodes over ESP-NOW.
+  LEGACY - only for apps/audio_ESP_NOW_broadcast (not audio_VSAF_broadcast2). Automated test execution and validation of the 20 audio configuration combinations (Sample Rates x Frame Durations x Mono/Stereo) across SOURCE and SINK nodes over ESP-NOW.
 ---
+
+> **Legacy:** `tools/test_audio_matrix.py` drives the `mono`/`stereo`/`dur`/`sr` console commands of `apps/audio_ESP_NOW_broadcast`. `audio_VSAF_broadcast2` has no such runtime commands (sample rate is a compile-time setting, `CONFIG_ESPNOW_SAMPLE_RATE_HZ` in `main/config.h`). For VSAF2 cluster validation use `apps/audio_VSAF_broadcast2/tools/test_broadcast_cluster.py`.
 
 # Audio Matrix Verification Skill
 

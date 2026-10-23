@@ -36,7 +36,7 @@ When compiling S3 and C6 targets simultaneously:
 ## 3. Automated Parallel Build & Flash Tool
 
 The repository provides an automated coordinator:
-- Python script: `c:\Git_ble_audio\.agents\skills\parallel-compile-and-flash\scripts\parallel_build_and_flash.py`
+- Python script: `.claude\skills\parallel-compile-and-flash\scripts\parallel_build_and_flash.py` (defaults `--app-dir` to `apps\audio_VSAF_broadcast2`)
 - PowerShell wrapper: `apps\audio_VSAF_broadcast2\tools\parallel_build_and_flash.ps1`
 
 ### CLI Usage & Workflow
