@@ -4,6 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Project overview, hardware registry (node IDs, MACs, COM ports, pinouts), post-gain calibration table and the ESP-IDF environment activation snippet live in AGENTS.md. Always-on rules live in `.agents/rules/`. Both are imported here so they are not duplicated:
 
+@GOALS.md
 @AGENTS.md
 @.agents/rules/01_esp32_specific.md
 @.agents/rules/02_audio_protocol_and_timing.md
@@ -11,11 +12,11 @@ Project overview, hardware registry (node IDs, MACs, COM ports, pinouts), post-g
 @.agents/rules/04_coding_style.md
 @.agents/rules/05_user_interaction.md
 
-The repo was previously developed with VSCode + Google Antigravity; `.agents/rules/` is left over from that and is imported above. Task playbooks are Claude Code skills in `.claude/skills/` (`node16-flash-and-reset`, `esp32-usb-serial-debug`, `parallel-compile-and-flash`, `lc3-codec-benchmark`, and the legacy `audio-test-matrix`).
+The repo was previously developed with VSCode + Google Antigravity; `.agents/rules/` is left over from that and is imported above. Task playbooks are Claude Code skills in `.claude/skills/` (`node16-flash-and-reset`, `esp32-usb-serial-debug`, `parallel-compile-and-flash`, `lc3-codec-benchmark`).
 
 ## Which app is active
 
-`apps/audio_VSAF_broadcast2` is the main track and the latest app. Default to it for all firmware work unless told otherwise. Its spec is [apps/audio_VSAF_broadcast2/README_wifi_audio_broadcast2.md](apps/audio_VSAF_broadcast2/README_wifi_audio_broadcast2.md). `audio_ESP_NOW_broadcast` and `audio_ESP_NOW_unicast` are earlier siblings with a near-identical file layout; `node2node`, `android2node`, `usb_ble_bumble` are legacy BLE experiments. Don't port changes between apps unless asked.
+`apps/audio_VSAF_broadcast2` is the main track and the latest app. Default to it for all firmware work unless told otherwise. Its spec is [apps/audio_VSAF_broadcast2/README_wifi_audio_broadcast2.md](apps/audio_VSAF_broadcast2/README_wifi_audio_broadcast2.md). Retired apps (old ESP-NOW broadcast/unicast, BLE experiments) are in [archive/](archive/README.md): read-only reference, don't build, fix or IDF-bump them, and don't port changes into them. Goals, numeric targets and the current priority (measure latency / skew / drift / dropouts, then spatial upmix) are in GOALS.md, imported above; judge changes against those targets.
 
 The wire format source of truth is [main/vsaf_protocol.hpp](apps/audio_VSAF_broadcast2/main/vsaf_protocol.hpp) (`static_assert`s pin packet sizes). If you change it, update the VSAF section in AGENTS.md and the app README too.
 
@@ -36,15 +37,15 @@ powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\build_
 
 - One firmware image per chip family. `build_s3/` + `sdkconfig.s3` and `build_c6/` + `sdkconfig.c6` are isolated. The script copies the target's `sdkconfig.<chip>` to `sdkconfig` before building and copies it back on success, so edit persistent Kconfig changes in `sdkconfig.<chip>` / `sdkconfig.defaults*`, not in `sdkconfig`.
 - Node 16 (SOURCE, native USB TinyUSB) is flashed via `tools/s3_flash_and_reset.py` (hands-free reset into ROM bootloader, COM116 app port -> COM16 boot port). Other nodes use plain `esptool write_flash`.
-- **Do not build S3 and C6 concurrently (known race, unresolved).** Both targets share `managed_components/` and `dependencies.lock`; a C6 configure deletes the S3-only `esp_tinyusb` while an S3 build reads it (WinError 32 / missing `tusb_config.h`). Build targets one after the other until this is fixed; one-at-a-time builds work because the shared lock forces a re-solve on each target switch.
-- Whole cluster at once (currently affected by the race above when dependencies re-solve; then all detected nodes flashed concurrently): `powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\parallel_build_and_flash.ps1 [-BuildOnly | -FlashOnly] [-Nodes "16,4,5"]`.
+- S3 and C6 can build concurrently: each target has its own lock (`dependencies.lock.<target>`, set in the app's top-level `CMakeLists.txt`), and the S3-only `esp_tinyusb` (v3.0.0) is vendored in `apps/audio_VSAF_broadcast2/components/esp_tinyusb` (see its `VENDORED.md`) instead of living in the shared `managed_components/`, where every C6 configure would delete it. Don't re-add esp_tinyusb as a registry dependency. In `main/CMakeLists.txt`, gate `REQUIRES` on `idf_build_get_property(target IDF_TARGET)`, never on `CONFIG_*` (Kconfig isn't evaluated yet when requirements are collected).
+- Whole cluster at once (S3 + C6 built in parallel, then all detected nodes flashed concurrently; per-target logs in `build_*/parallel_build.log`): `powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\parallel_build_and_flash.ps1 [-BuildOnly | -FlashOnly] [-Nodes "16,4,5"]`.
 - The build script kills lingering serial monitors / streamers before flashing; close any monitor you opened yourself first.
 
 ## Testing
 
 There are no unit tests. Validation is hardware-in-the-loop over serial telemetry:
 - `apps/audio_VSAF_broadcast2/tools/test_broadcast_cluster.py`: cluster test (cadence, multi-SINK streaming, RTT, drop-out/recovery) that parses 1 s heartbeat lines from SOURCE (COM116) and SINKs.
-- `tools/test_audio_matrix.py` / `audio-test-matrix` skill: legacy, targets `audio_ESP_NOW_broadcast` console commands only.
+- PC-side LC3 encoder (ctypes wrapper + `liblc3.dll`) for streamers: `tools/pc_lc3/`.
 - `scratch/*.py`: ad-hoc one-off probes; not maintained.
 - Python runs from `.venv_audio_multicast` (use `uv`). Serial scripts monkey-patch pyserial to survive Windows usbser.sys errors 13/22/31 on TinyUSB CDC ports, and must open ports with DTR/RTS false.
 
@@ -60,4 +61,4 @@ Same binary for SOURCE and SINK of a given chip; role and per-node hardware are 
 - `diagnostics.cpp`: fixed-width 1 s heartbeat telemetry; test scripts parse these columns, so changing the format can break them. `console.cpp`: serial CLI (commands listed in README section 7, e.g. `bootloader`).
 - `main/linker.lf` (C6 only) places hot paths in IRAM.
 
-Shared ESP-IDF components in `components/` (`liblc3`, `esp-dsp`, `fixp-dsp`, `audio_metering`, `stats`, `led_strip`) are pulled in via `EXTRA_COMPONENT_DIRS` in each app's top-level `CMakeLists.txt`; managed components come from `main/idf_component.yml`.
+Shared ESP-IDF components in `components/` (`liblc3`, `esp-dsp`, `fixp-dsp`, `audio_metering`, `stats`, `led_strip`) are pulled in via `EXTRA_COMPONENT_DIRS` in each app's top-level `CMakeLists.txt`; registry components come from `main/idf_component.yml` (versions pinned, e.g. `esp_audio_codec` 2.6.2; `'*'` once let esp_tinyusb jump a major version silently).

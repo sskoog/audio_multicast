@@ -265,9 +265,9 @@ When broadcasting audio via Bluetooth Low Energy Audio (Auracast / BAP / PBP), t
 ### LC3 Codec Implementation
 
 * **Library**: [Google `liblc3`](https://github.com/google/liblc3) (Google's official, high-performance C reference implementation of the **Bluetooth SIG Low Complexity Communication Codec** standard).
-* **Location in Repo**: [`apps/usb_ble_bumble/liblc3/`](../usb_ble_bumble/liblc3/).
-* **Native Shared Library**: [`apps/usb_ble_bumble/liblc3.dll`](../usb_ble_bumble/liblc3.dll) (compiled for 64-bit Windows with MinGW GCC).
-* **Python Binding**: [`apps/usb_ble_bumble/lc3_encoder.py`](../usb_ble_bumble/lc3_encoder.py) via Python `ctypes`.
+* **Location in Repo**: [`archive/usb_ble_bumble/liblc3/`](../../archive/usb_ble_bumble/liblc3/) (source used to build the DLL).
+* **Native Shared Library**: [`tools/pc_lc3/liblc3.dll`](../../tools/pc_lc3/liblc3.dll) (compiled for 64-bit Windows with MinGW GCC).
+* **Python Binding**: [`tools/pc_lc3/lc3_encoder.py`](../../tools/pc_lc3/lc3_encoder.py) via Python `ctypes`.
 * **Standard Audio Frame Format**:
   * Sampling Rate: **48,000 Hz** (or 44.1 kHz, 32 kHz, 24 kHz, 16 kHz)
   * Frame Duration: **10.0 ms** (480 PCM samples per frame per channel)

@@ -12,48 +12,47 @@ The project pivoted to **802.11 Layer 1 & 2 (ESP-NOW and raw Wi-Fi Action Frames
 
 ---
 
+## Project Goals
+
+Targets (latency, inter-speaker sync, reliability, scale), priorities and non-goals are in **[GOALS.md](GOALS.md)**.
+
+---
+
 ## Repository Layout
 
 ```
 .
 ├── apps/
-│   ├── audio_ESP_NOW_broadcast/   # 1-to-Many broadcast over Wi-Fi Action Frames (VSAF)
-│   ├── audio_ESP_NOW_unicast/     # 1-to-Many multi-unicast with ACK / retransmission
+│   ├── audio_VSAF_broadcast2/     # MAIN TRACK: VSAF 3.0 multi-channel broadcast (ESP32-S3 SOURCE, S3/C6 SINKs)
 │   ├── win11audio/                # Windows 11 WASAPI audio capture & C++ DSP pipeline
-│   ├── lc3_benchmark/             # Standalone cross-SoC LC3 performance benchmark
-│   ├── usb_ble_bumble/            # [Legacy/Research] ESP32-C6 HCI + Google Bumble Auracast
-│   ├── node2node/                 # [Legacy/Research] Early BLE broadcast prototype
-│   └── android2node/              # [Legacy/Research] Early BLE sink prototype
-├── components/                    # Shared ESP-IDF components (liblc3, drivers, etc.)
+│   └── lc3_benchmark/             # Standalone cross-SoC LC3 performance benchmark
+├── archive/                       # Retired apps (old ESP-NOW broadcast/unicast, BLE/Auracast experiments), unmaintained
+├── components/                    # Shared ESP-IDF components (liblc3, esp-dsp, drivers, etc.)
 ├── docs/                          # Technical specs, LC3 benchmarks, and hardware guides
 ├── images/                        # Hardware pinouts, board schematics, and photos
-└── tools/                         # Cross-platform benchmark runners, plotters, and migration tools
+└── tools/                         # idf_env.ps1 (ESP-IDF activation), pc_lc3/ (PC LC3 encoder), benchmark runners, plotters
 ```
 
 ---
 
 ## Primary Applications
 
-### 1. [Audio ESP-NOW Broadcast (`apps/audio_ESP_NOW_broadcast`)](apps/audio_ESP_NOW_broadcast/README_audioESP-NOW.md)
-* **Transport**: Connectionless 802.11 Action Frames using the Very Low Latency Synchronized Audio Frame (VSAF) container.
-* **Topology**: 1 Audio SOURCE (e.g., Node 16 ESP32-S3) broadcasting to unlimited SINK nodes (Node 23 Left, Node 24 Right, Node 20 LCD).
+### 1. [Audio VSAF Broadcast 2 (`apps/audio_VSAF_broadcast2`)](apps/audio_VSAF_broadcast2/README_wifi_audio_broadcast2.md)
+* **Transport**: Connectionless 802.11 broadcast (ESP-NOW) using the VSAF 3.0 container (248-byte packets).
+* **Topology**: 1 SOURCE (Node 16, ESP32-S3, UAC1 USB speaker input) broadcasting up to 6 channels (5 satellites + subwoofer) to S3 (PCM5102A) and C6 (MAX98357A) SINK nodes.
 * **Key Features**:
-  * Microsecond presentation timestamps (modulo 2^24 us) for synchronized multi-speaker playback.
-  * In-band redundancy (Dual-frame $N-1$ interleaving) providing zero-latency recovery from single-packet drops.
-  * Packet Loss Concealment (PLC) via Google `liblc3`.
-  * Real-time Windows audio streamer (`pc_audio_streamer.py`) supporting WASAPI loopback, MP3 playback, and 6-channel audio.
+  * Multi-tier unequal error protection: each packet carries t0 plus 2 (satellites) or 3 (subwoofer) older frames for burst-loss recovery, then LC3 PLC.
+  * Hardware-timer paced SOURCE, Wi-Fi TX-done ISR slot timing, microsecond presentation timestamps and dual-way PTP-style time sync.
+  * Round-robin SINK telemetry (one reply per 10 ms window) and 1 s fixed-width heartbeat telemetry on every node.
 
-### 2. [Audio ESP-NOW Unicast (`apps/audio_ESP_NOW_unicast`)](apps/audio_ESP_NOW_unicast/)
-* **Transport**: ESP-NOW peer-to-peer unicast with hardware MAC-layer ACKs and automatic retry pacing.
-* **Topology**: 1 SOURCE streaming dedicated channel streams to individual SINK endpoints with independent sequence tracking.
-* **Key Features**:
-  * Guaranteed packet delivery for challenging RF environments.
-  * Dedicated `tools/` folder containing automated multi-target build/flash tooling (`build_and_flash.ps1`) and PC streamer (`pc_unicast_streamer.py`).
-  * Live runtime serial telemetry reporting RSSI, buffer depth, CPU load, and playback statistics.
-
-### 3. [Windows 11 DSP & Audio Ingest (`apps/win11audio`)](apps/win11audio/README_win11audio.md)
+### 2. [Windows 11 DSP & Audio Ingest (`apps/win11audio`)](apps/win11audio/README_win11audio.md)
 * High-performance Windows 11 audio ingestion and processing engine.
 * Native C++ DSP extension module (`dsp_engine.cpp`) with Python pybind11 bindings for Hilbert transform spatial matrixing, biquad IIR filtering, and low-latency audio capture.
+
+### 3. [LC3 Benchmark (`apps/lc3_benchmark`)](apps/lc3_benchmark/)
+* On-device LC3 encode/decode timing across ESP32-S3, ESP32-C6 and ESP32-WROOM-32.
+
+Retired apps are described in [archive/README.md](archive/README.md).
 
 ---
 

@@ -205,7 +205,7 @@ def flash_and_reset_s3(flash_audio=False) -> bool:
     print("[FLASH OK] Flash programming verified!")
 
     # Execute hardware reset via watchdog or reset script
-    reset_script = os.path.join(ROOT_DIR, "apps", "audio_ESP_NOW_unicast", "tools", "s3_flash_and_reset.py")
+    reset_script = os.path.join(ROOT_DIR, "apps", "audio_VSAF_broadcast2", "tools", "s3_flash_and_reset.py")
     if os.path.exists(reset_script):
         print("[RESET] Triggering hardware reset via RTC Watchdog...")
         subprocess.run(["python", reset_script, "--only-reset", "--port", flash_port], capture_output=True)

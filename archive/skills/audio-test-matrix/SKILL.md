@@ -4,7 +4,7 @@ description: >-
   LEGACY - only for apps/audio_ESP_NOW_broadcast (not audio_VSAF_broadcast2). Automated test execution and validation of the 20 audio configuration combinations (Sample Rates x Frame Durations x Mono/Stereo) across SOURCE and SINK nodes over ESP-NOW.
 ---
 
-> **Legacy:** `tools/test_audio_matrix.py` drives the `mono`/`stereo`/`dur`/`sr` console commands of `apps/audio_ESP_NOW_broadcast`. `audio_VSAF_broadcast2` has no such runtime commands (sample rate is a compile-time setting, `CONFIG_ESPNOW_SAMPLE_RATE_HZ` in `main/config.h`). For VSAF2 cluster validation use `apps/audio_VSAF_broadcast2/tools/test_broadcast_cluster.py`.
+> **Archived:** `archive/tools/test_audio_matrix.py` drives the `mono`/`stereo`/`dur`/`sr` console commands of `archive/audio_ESP_NOW_broadcast`. `audio_VSAF_broadcast2` has an `sr` command but no `mono`/`stereo`/`dur`, and a different telemetry layout, so the matrix does not apply to it. For VSAF2 cluster validation use `apps/audio_VSAF_broadcast2/tools/test_broadcast_cluster.py`.
 
 # Audio Matrix Verification Skill
 
@@ -24,7 +24,7 @@ This skill executes automated end-to-end matrix tests over serial ports to verif
 
 ```powershell
 # Run full 20-combination matrix against SOURCE (COM16) and SINK (COM23)
-python tools\test_audio_matrix.py --source-port COM16 --sink-port COM23 --duration 10
+python archive\tools\test_audio_matrix.py --source-port COM16 --sink-port COM23 --duration 10
 ```
 
 ---

@@ -28,31 +28,16 @@ import random
 import subprocess
 import numpy as np
 
-# Add bumble app path for liblc3 wrapper
-BUMBLE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "usb_ble_bumble"))
-if BUMBLE_DIR not in sys.path:
-    sys.path.insert(0, BUMBLE_DIR)
+# PC-side liblc3 ctypes wrapper lives in <repo>/tools/pc_lc3 (lc3_encoder.py + liblc3.dll)
+PC_LC3_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "tools", "pc_lc3"))
+if PC_LC3_DIR not in sys.path:
+    sys.path.insert(0, PC_LC3_DIR)
 
 try:
     import lc3_encoder
 except ImportError:
-    alt_dirs = [
-        os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "usb_ble_bumble")),
-        os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "audio_ESP_NOW_broadcast")),
-    ]
-    imported = False
-    for ad in alt_dirs:
-        if os.path.exists(ad) and ad not in sys.path:
-            sys.path.insert(0, ad)
-            try:
-                import lc3_encoder
-                imported = True
-                break
-            except ImportError:
-                pass
-    if not imported:
-        print("[ERROR] Could not import lc3_encoder. Ensure liblc3.dll is present in apps/usb_ble_bumble.")
-        raise
+    print(f"[ERROR] Could not import lc3_encoder. Ensure lc3_encoder.py and liblc3.dll are present in {PC_LC3_DIR}.")
+    raise
 
 try:
     import sounddevice as sd

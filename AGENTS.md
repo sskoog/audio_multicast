@@ -73,9 +73,9 @@ Source of truth: `apps/audio_VSAF_broadcast2/main/vsaf_protocol.hpp`. Audio pack
 - **Subwoofer payload (`0x1338`, 240 Bytes, 4-tier)**: t0 / t-1 / t-2 / t-3, 60 B each @ 8 kHz (offsets 8 / 68 / 128 / 188).
 
 ### Supported Audio Configurations
-- **Satellites (Ch 0-4)**: 48 kHz default (`CONFIG_ESPNOW_SAMPLE_RATE_HZ`, compile-time), 10 ms frames; HQ 120 octets = 96 kbps, redundancy 60 octets = 48 kbps. LR4 high-pass at 100 Hz.
+- **Satellites (Ch 0-4)**: 48 kHz default (`CONFIG_ESPNOW_SAMPLE_RATE_HZ`; the SOURCE console `sr <8k|16k|24k|32k|48k>` switches it at runtime), 10 ms frames; HQ 120 octets = 96 kbps, redundancy 60 octets = 48 kbps. LR4 high-pass at 100 Hz.
 - **Subwoofer (Ch 5)**: 8 kHz (`CONFIG_ESPNOW_SUB_SAMPLE_RATE_HZ`), 60 octets = 48 kbps, LR4 low-pass at 100 Hz with polyphase decimation.
-- **Legacy apps** (`audio_ESP_NOW_broadcast` / `_unicast`) use the older dual-frame (t0 + t-1, 120 B each) layout with runtime-selectable 8-48 kHz, 7.5/10 ms and mono/stereo modes.
+- **Archived apps** (`archive/audio_ESP_NOW_broadcast` / `_unicast`) use the older dual-frame (t0 + t-1, 120 B each) layout with runtime-selectable 8-48 kHz, 7.5/10 ms and mono/stereo modes.
 
 ### Critical Timing Requirement
 Audio broadcasting MUST use absolute microsecond hardware timer pacing (`esp_timer_get_time()`) instead of relative delays (`vTaskDelayUntil` / `vTaskDelay`) to eliminate clock drift and frame creep.
