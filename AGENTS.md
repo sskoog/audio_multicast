@@ -43,6 +43,15 @@ Legacy / exploratory experiments in Bluetooth Low Energy Audio (Auracast) are al
   - User Status LED: GPIO 21 (Active LOW discrete LED)
   - BOOT Button: GPIO 0
 
+### Software Post-Gain Calibration (PCM5102A Nodes)
+Per-node software attenuation compensates for hardware gain and driver impedance differences across identically-specced PCM5102A + TPA3118 amplifier boards. Values are applied at runtime via MAC-address lookup in `main.cpp`.
+
+| Node ID | Channel | Software Post-Gain | Notes |
+| :--- | :--- | :--- | :--- |
+| Node 4 | Ch 0 (Left) | -20.0 dB | Baseline reference |
+| Node 5 | Ch 1 (Right) | -9.0 dB | +11 dB vs baseline (quieter hardware) |
+| Node 1, 2, 3 | TBD | -20.0 dB (default) | Not yet calibrated |
+
 ---
 
 ## Audio data payload

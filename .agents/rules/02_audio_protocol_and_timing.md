@@ -17,3 +17,9 @@ trigger: always_on
 3. **Packet Loss Concealment (PLC)**:
    - SINK nodes must track missing sequence numbers.
    - If LC3 packets are missing, invoke `lc3_decode(..., NULL, pcm_out)` for standard PLC interpolation.
+
+4. **Per-Node Audio Gain Calibration**:
+   - SINK nodes with the same DAC hardware may exhibit volume differences due to component tolerances (amplifier gain, driver impedance).
+   - Per-node software post-gain calibration is implemented in `main.cpp` via a `switch` on `matched_node->node_id` inside the `is_pcm5102a` block.
+   - When adding new SINK nodes, measure relative volume and add calibration entries to the switch statement.
+   - The boot log prints the applied post-gain value per node for verification.
