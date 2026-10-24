@@ -12,7 +12,7 @@ Project overview, hardware registry (node IDs, MACs, COM ports, pinouts), post-g
 @.agents/rules/04_coding_style.md
 @.agents/rules/05_user_interaction.md
 
-The repo was previously developed with VSCode + Google Antigravity; `.agents/rules/` is left over from that and is imported above. Task playbooks are Claude Code skills in `.claude/skills/` (`node16-flash-and-reset`, `esp32-usb-serial-debug`, `parallel-compile-and-flash`, `lc3-codec-benchmark`).
+The repo was previously developed with VSCode + Google Antigravity; `.agents/rules/` is left over from that and is imported above. Task playbooks are Claude Code skills in `.claude/skills/` (`node16-flash-and-reset`, `esp32-usb-serial-debug`, `parallel-compile-and-flash`, `vsaf2-soak-test`, `lc3-codec-benchmark`).
 
 ## Which app is active
 
@@ -35,7 +35,7 @@ powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\build_
 powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\build_and_flash.ps1 -Role SINK -Port COM23 -NodeId 23 -OnlyFlash
 ```
 
-- One firmware image per chip family. `build_s3/` + `sdkconfig.s3` and `build_c6/` + `sdkconfig.c6` are isolated. The script copies the target's `sdkconfig.<chip>` to `sdkconfig` before building and copies it back on success, so edit persistent Kconfig changes in `sdkconfig.<chip>` / `sdkconfig.defaults*`, not in `sdkconfig`.
+- One firmware image per chip family. `build_s3/` + `sdkconfig.s3` and `build_c6/` + `sdkconfig.c6` are isolated. The scripts pass `-D SDKCONFIG=sdkconfig.<chip>` to `idf.py`, so Kconfig changes land directly in `sdkconfig.<chip>` (tracked in git); shared defaults go in `sdkconfig.defaults*`. There is no shared `sdkconfig` file.
 - Node 16 (SOURCE, native USB TinyUSB) is flashed via `tools/s3_flash_and_reset.py` (hands-free reset into ROM bootloader, COM116 app port -> COM16 boot port). Other nodes use plain `esptool write_flash`.
 - S3 and C6 can build concurrently: each target has its own lock (`dependencies.lock.<target>`, set in the app's top-level `CMakeLists.txt`), and the S3-only `esp_tinyusb` (v3.0.0) is vendored in `apps/audio_VSAF_broadcast2/components/esp_tinyusb` (see its `VENDORED.md`) instead of living in the shared `managed_components/`, where every C6 configure would delete it. Don't re-add esp_tinyusb as a registry dependency. In `main/CMakeLists.txt`, gate `REQUIRES` on `idf_build_get_property(target IDF_TARGET)`, never on `CONFIG_*` (Kconfig isn't evaluated yet when requirements are collected).
 - Whole cluster at once (S3 + C6 built in parallel, then all detected nodes flashed concurrently; per-target logs in `build_*/parallel_build.log`): `powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\parallel_build_and_flash.ps1 [-BuildOnly | -FlashOnly] [-Nodes "16,4,5"]`.
@@ -45,6 +45,7 @@ powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\build_
 
 There are no unit tests. Validation is hardware-in-the-loop over serial telemetry:
 - `apps/audio_VSAF_broadcast2/tools/test_broadcast_cluster.py`: cluster test (cadence, multi-SINK streaming, RTT, drop-out/recovery) that parses 1 s heartbeat lines from SOURCE (COM116) and SINKs.
+- `apps/audio_VSAF_broadcast2/tools/soak_test.py` + `usb_audio_streamer.py`: reliability soak test (music into Node 16 over USB, per-SINK RED/PLC/underrun accounting, PASS = 0 PLC). See the `vsaf2-soak-test` skill for usage and how to read failures.
 - PC-side LC3 encoder (ctypes wrapper + `liblc3.dll`) for streamers: `tools/pc_lc3/`.
 - `scratch/*.py`: ad-hoc one-off probes; not maintained.
 - Python runs from `.venv_audio_multicast` (use `uv`). Serial scripts monkey-patch pyserial to survive Windows usbser.sys errors 13/22/31 on TinyUSB CDC ports, and must open ports with DTR/RTS false.
