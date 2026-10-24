@@ -471,6 +471,38 @@ Changes, in order, each measured on Node 16 while streaming music over USB:
 
 Tried and reverted: pinning the Wi-Fi task to core 1 (`esp_now_send()` slower, more deadline drops), and `CONFIG_ESP_WIFI_EXTRA_IRAM_OPT` on top of the 32 KB cache (no measurable change: Wi-Fi task 8.9 % vs 9.0 %, TX end 5.23 vs 5.25 ms, for 0.4 KB less heap).
 
+#### Radio CPU cost: how it was found and what fixed it
+
+After the pipeline and the dual-rate encoder, the radio path still cost about 1 ms of CPU per packet (~6 ms per frame for 6 packets), more than all LC3 encodes together. Three steps were planned to cut it, each measured with `timing`, `tasks` and `encbench` while streaming music.
+
+How the cause was narrowed down:
+
+| Observation | Measurement | Conclusion |
+| :--- | :--- | :--- |
+| Encodes take 1.6-1.7x longer in the pipeline than in `encbench` | HQ 1.6 ms vs 0.95 ms pure; same factor on both cores | Not the codec, something steals time |
+| Interrupts are not it | `encbench` with interrupts enabled vs masked, at prio 24: +2-6 % | Task preemption, not ISRs |
+| Two cores contending for SRAM are not it | `enccores 1` (core 0 alone) was even slower: 1.8 ms | Not dual-core memory contention |
+| The thieves | `tasks`: Wi-Fi task 34-38 % of core 0, `src_rf` 27-31 % of core 1 | The radio stack preempts the encoders |
+| Waking `src_rf` is cheap | TX-done -> `src_rf` running 43-55 us | Not FreeRTOS context switches (the 1 kHz tick only affects timeouts) |
+| `src_rf`'s own code is slow | Active ~2.2 ms per frame, of which `esp_now_send()` 1.5 ms, leaving ~60 us per wake for a few dozen lines of C | Points to cache misses, not to the amount of work |
+| Everything from flash slows down when USB audio streams | Wi-Fi task 20 % -> 34 %, `esp_now_send()` 170 -> 266 us, esp_timer 1.8 -> 4.9 %; LC3 in IRAM unaffected | The 16 KB instruction cache shared by both cores thrashes |
+
+The three steps and their results:
+
+| Step | Change | Result | Kept? |
+| :--- | :--- | :--- | :--- |
+| 1 | `src_rf` without polling: encoders notify it only while it waits for a packet (flag handshake, no lost wake-ups); the 1 ms poll is replaced by one timed wake for the held reply packet | Wakes ~20 -> ~13 per frame, but `src_rf` CPU unchanged (27 %) | Yes (cleaner, fewer wakes), but not the fix |
+| 2a | Instruction cache 16 KB -> 32 KB (`CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB`) | Wi-Fi task 38 % -> 8 %, `src_rf` 31 % -> 6 %, `esp_now_send()` 280 -> 50 us, wake 55 -> 14 us, HQ job 2.0 -> 1.3 ms, MQ job 0.7 -> 0.34 ms, TX end 8.6 -> 5.1 ms, deadline skips 3-4/s -> 0, idle per core 7-20 % -> ~50 %. Costs 16 KB RAM | Yes: the decisive fix |
+| 2b | `CONFIG_ESP_WIFI_EXTRA_IRAM_OPT` (more Wi-Fi code in IRAM) on top of 2a | No measurable change (Wi-Fi 8.9 % vs 9.0 %, TX end 5.23 vs 5.25 ms), -0.4 KB heap | No, reverted |
+| 3 | Unused Wi-Fi features compiled out: AMPDU TX/RX, SoftAP, WPA3 SAE/OWE, Enterprise (`sdkconfig.s3`) | +3.5 KB heap (26.6 -> 30.1 KB free, largest block 12 -> 16 KB), no timing change | Yes |
+
+Conclusions:
+- **On a dual-core ESP32-S3 without PSRAM, the 16 KB instruction cache is the bottleneck for flash-resident code.** Both cores share it, and the Wi-Fi blobs, ESP-NOW, TinyUSB and application code all compete for it. A miss stalls a core for a flash line fill (DIO flash at 80 MHz). The effect grows with every extra code path that runs, which is why it got worse when USB audio streamed.
+- **Keep the 32 KB cache.** Do not shrink it back to win RAM. Hot code that must not depend on the cache (LC3) stays in IRAM.
+- **Measure before optimizing the obvious suspect.** Wake latency, context switches and LC3 all looked plausible but were not the cause. Only comparing pure cost (`encbench`) against in-pipeline cost, then per-task CPU (`tasks`), then active time per wake, led to the cache.
+- **Not worth it:** submitting the next packet from inside the ESP-NOW send callback (saves under 0.1 ms per frame now that a wake takes 14 us), moving the Wi-Fi task to core 1, and more Wi-Fi IRAM.
+- **Not tried yet:** QIO flash mode (twice the line-fill bandwidth of DIO). Risky without checking the flash chip, because a board that cannot boot in QIO needs a manual BOOT-button reflash.
+
 | Metric (1 s windows, music over USB, ch 13, HT20 MCS3) | Serial loop / first dual-core build | Final |
 | :--- | :--- | :--- |
 | Last packet on air (TX end) | 7.8-9.1 ms | **5.1-5.3 ms** |
