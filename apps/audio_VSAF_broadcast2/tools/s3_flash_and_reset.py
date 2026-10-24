@@ -47,6 +47,11 @@ RTC_CNTL_OPTION1_REG = 0x6000812C
 RTC_CNTL_FORCE_DOWNLOAD_BOOT_MASK = 0x1
 
 
+# Node 16 factory MAC. USB-Serial/JTAG reports the chip MAC as the USB serial number, and every
+# other S3/C6 SINK enumerates with the same 303A:1001 VID:PID, so the MAC is the only safe identity.
+NODE16_MAC = "e0:72:a1:d8:4c:d0"
+
+
 def find_com_ports():
     """Return a dictionary of detected relevant COM ports for Node 16."""
     ports = {}
@@ -55,10 +60,15 @@ def find_com_ports():
         dev = p.device.upper()
         vid = getattr(p, "vid", None)
         pid = getattr(p, "pid", None)
-        # Explicitly skip known SINK ports
-        if dev in ["COM1", "COM2", "COM4", "COM5", "COM20", "COM21", "COM22", "COM23", "COM24", "COM25", "COM26", "COM121"]:
+        serial_no = (getattr(p, "serial_number", None) or "").lower()
+        # A 303A:1001 port is Node 16's ROM bootloader only if its serial number is Node 16's MAC
+        # (SINK nodes on COM4/COM5/COM23/... share that VID:PID).
+        if vid == 0x303A and pid == 0x1001:
+            if serial_no == NODE16_MAC:
+                ports["jtag"] = p.device
+                ports["com16"] = p.device
             continue
-        if dev == "COM16" or (vid == 0x303A and pid == 0x1001):
+        if dev == "COM16":
             ports["jtag"] = p.device      # Native USB-Serial/JTAG ROM bootloader (COM16)
             ports["com16"] = p.device
         elif dev == "COM3" or (vid == 0x303A and pid == 0x0009) or "0009" in hwid:
@@ -92,14 +102,42 @@ def trigger_app_to_bootloader(app_port):
     if "jtag" in p or "otg" in p or "com16" in p or "com3" in p:
         return True
 
-    # Try 2: CLI 'bootloader' command via Win32 API direct write (immune to PySerial Error 31)
+    # Try 2: CLI 'bootloader' command via a raw Win32 CreateFile/WriteFile (immune to PySerial Error 31).
+    # Uses ctypes (stdlib) instead of pywin32: pywin32 is not installed in every ESP-IDF Python env
+    # (it was in idf6.0_py3.13_env but not idf6.1_py3.13_env), and its absence silently broke this path.
     try:
-        import win32file
-        h = win32file.CreateFile(target_port, win32file.GENERIC_READ | win32file.GENERIC_WRITE, 0, None, win32file.OPEN_EXISTING, 0, None)
-        win32file.WriteFile(h, b"\r\nbootloader\r\n")
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateFileW.restype = wintypes.HANDLE
+        k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                                    wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        GENERIC_READ_WRITE = 0x80000000 | 0x40000000
+        OPEN_EXISTING = 3
+        INVALID_HANDLE = wintypes.HANDLE(-1).value
+        h = k32.CreateFileW(target_port, GENERIC_READ_WRITE, 0, None, OPEN_EXISTING, 0, None)
+        if h == INVALID_HANDLE or h is None:
+            raise OSError(f"CreateFileW failed, WinError {ctypes.get_last_error()}")
+
+        # Bound the write: if the firmware is hung and never drains its CDC endpoint, an untimed
+        # WriteFile blocks forever (seen 2026-10-24 on a stuck Node 16).
+        class COMMTIMEOUTS(ctypes.Structure):
+            _fields_ = [("ReadIntervalTimeout", wintypes.DWORD),
+                        ("ReadTotalTimeoutMultiplier", wintypes.DWORD),
+                        ("ReadTotalTimeoutConstant", wintypes.DWORD),
+                        ("WriteTotalTimeoutMultiplier", wintypes.DWORD),
+                        ("WriteTotalTimeoutConstant", wintypes.DWORD)]
+        k32.SetCommTimeouts(h, ctypes.byref(COMMTIMEOUTS(0, 0, 200, 0, 1000)))
+
+        payload = b"\r\nbootloader\r\n"
+        written = wintypes.DWORD(0)
+        ok = k32.WriteFile(h, payload, len(payload), ctypes.byref(written), None)
         time.sleep(0.3)
-        win32file.CloseHandle(h)
-        print(f"[OK] Sent 'bootloader' command via Win32 to {app_port}.")
+        k32.CloseHandle(h)
+        if not ok or written.value != len(payload):
+            raise OSError(f"WriteFile failed/timed out ({written.value}/{len(payload)} bytes), "
+                          f"WinError {ctypes.get_last_error()}")
+        print(f"[OK] Sent 'bootloader' command via Win32 to {app_port} ({written.value} bytes).")
         return True
     except Exception as e:
         print(f"[DEBUG] Win32 CLI write skipped: {e}")
@@ -238,6 +276,7 @@ def main():
     parser.add_argument("--baud", "-b", type=int, default=921600, help="Flashing baud rate (default: 921600)")
     parser.add_argument("--bin-dir", default=default_bin_dir, help="Path to build_s3 directory")
     parser.add_argument("--only-reset", action="store_true", help="Only perform hardware watchdog reset without flashing")
+    parser.add_argument("--any-mac", action="store_true", help="Skip the Node 16 MAC check (flash whatever S3 is found)")
     args = parser.parse_args()
 
     bootloader_bin = os.path.join(args.bin_dir, "bootloader", "bootloader.bin")
@@ -299,6 +338,10 @@ def main():
     chip_name = esp.CHIP_NAME
     mac = ":".join(f"{b:02x}" for b in esp.read_mac())
     print(f"[CHIP] Detected {chip_name} (MAC: {mac})")
+    if mac.lower() != NODE16_MAC and not args.any_mac:
+        print(f"[ERROR] {flash_port} is not Node 16 (expected MAC {NODE16_MAC}). Refusing to flash. "
+              f"Use --any-mac to override.")
+        sys.exit(1)
 
     print("[STUB] Uploading high-speed flasher stub...")
     esp = esptool.cmds.run_stub(esp)

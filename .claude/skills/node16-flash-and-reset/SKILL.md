@@ -135,6 +135,13 @@ OK     CM_PROB_NONE USB Composite Device       USB\VID_303A&PID_4002\...
 
 ---
 
+## 5b. When the Hands-Free Path Fails (field notes 2026-10-24)
+
+- **Identity check:** the script only treats a `303A:1001` port as Node 16's bootloader if its USB serial number is Node 16's MAC `E0:72:A1:D8:4C:D0` (SINKs share that VID:PID), and refuses to flash if the connected chip reports another MAC (`--any-mac` overrides).
+- **Reboot request order:** 1200-baud touch, then a raw Win32 write of `bootloader` (via `ctypes`, 1 s write timeout; pywin32 is *not* in the IDF 6.1 Python env), then a pyserial write.
+- **Firmware hung but enumerated:** COM116 and "USB Speaker" show `OK` in Windows, but the console sends nothing and writes time out. Only a physical **B + R** (or USB replug) recovers it. Start the flasher first so it is waiting, then press the buttons.
+- **Mid-write failure on COM3** (ROM USB-OTG): rerun with `--port COM16` once the USB-Serial/JTAG port appears; it is far more reliable.
+
 ## 6. Standalone Reset Command (Emergency / Debugging)
 
 If Node 16 is stuck in the ROM bootloader on `COM16` or `COM3` and you want to boot into flash without re-flashing or touching the hardware buttons:

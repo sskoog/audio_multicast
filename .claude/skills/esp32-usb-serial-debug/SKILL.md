@@ -89,6 +89,12 @@ Native USB CDC ports on ESP32-C6 / ESP32-S3 disconnect and re-enumerate upon res
 
 Open the port at 115200 baud with a safe timeout and ensure the port is closed cleanly in a `try...finally` block.
 
+Pitfalls seen on this cluster (2026-10-24):
+- **Opening a port resets the SINK** unless DTR/RTS are low *before* `open()`: create `serial.Serial()` unopened, set `port`, `dtr=False`, `rts=False`, then `open()` (see `apps/audio_VSAF_broadcast2/tools/soak_test.py:open_port`). Setting them after `Serial(port)` is too late; the uptime column restarting at ~1 s is the tell.
+- **COM116 (Node 16 TinyUSB CDC)** fails configure with usbser.sys error 31; patch `serial.serialwin32.Serial._reconfigure_port` to ignore that error (same patch in `soak_test.py`).
+- **Writes to S3 USB-Serial/JTAG with DTR low can time out** (`clear` to Node 4/5). Use a write timeout and retries, and don't make results depend on the write landing.
+- **PowerShell 5.1 strips double quotes** from arguments passed to native programs, so `python -c "...'31'..."` inline code breaks in surprising ways. Put probe code in a script file instead.
+
 ---
 
 ## 6. Helper Scripts (`scripts/` in this skill folder)
