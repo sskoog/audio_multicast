@@ -23,7 +23,7 @@ Targets (latency, inter-speaker sync, reliability, scale), priorities and non-go
 ```
 .
 ├── apps/
-│   ├── audio_VSAF_broadcast2/     # MAIN TRACK: VSAF 3.0 multi-channel broadcast (ESP32-S3 SOURCE, S3/C6 SINKs)
+│   ├── audio_VSAF/     # MAIN TRACK: VSAF 3.0 multi-channel broadcast (ESP32-S3 SOURCE, S3/C6 SINKs)
 │   ├── win11audio/                # Windows 11 WASAPI audio capture & C++ DSP pipeline
 │   └── lc3_benchmark/             # Standalone cross-SoC LC3 performance benchmark
 ├── archive/                       # Retired apps (old ESP-NOW broadcast/unicast, BLE/Auracast experiments), unmaintained
@@ -37,7 +37,7 @@ Targets (latency, inter-speaker sync, reliability, scale), priorities and non-go
 
 ## Primary Applications
 
-### 1. [Audio VSAF Broadcast 2 (`apps/audio_VSAF_broadcast2`)](apps/audio_VSAF_broadcast2/README_wifi_audio_broadcast2.md)
+### 1. [Audio VSAF Broadcast 2 (`apps/audio_VSAF`)](apps/audio_VSAF/README_audio_VSAF.md)
 * **Transport**: Connectionless 802.11 broadcast (ESP-NOW) using the VSAF 3.0 container (248-byte packets).
 * **Topology**: 1 SOURCE (Node 16, ESP32-S3, UAC1 USB speaker input) broadcasting up to 6 channels (5 satellites + subwoofer) to S3 (PCM5102A) and C6 (MAX98357A) SINK nodes.
 * **Key Features**:
@@ -104,10 +104,10 @@ Builds use **ESP-IDF v6.1** with isolated target build folders (`build_s3/`, `bu
 # Environment Activation (PowerShell, only needed for manual idf.py use)
 . .\tools\idf_env.ps1
 
-# Main track: audio_VSAF_broadcast2
-powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\build_and_flash.ps1 -Role SOURCE                      # Node 16
-powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\build_and_flash.ps1 -Role SINK -Port COM4 -NodeId 4   # Left
-powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\parallel_build_and_flash.ps1                         # whole cluster
+# Main track: audio_VSAF
+powershell -ExecutionPolicy Bypass -File apps\audio_VSAF\tools\build_and_flash.ps1 -Role SOURCE                      # Node 16
+powershell -ExecutionPolicy Bypass -File apps\audio_VSAF\tools\build_and_flash.ps1 -Role SINK -Port COM4 -NodeId 4   # Left
+powershell -ExecutionPolicy Bypass -File apps\audio_VSAF\tools\parallel_build_and_flash.ps1                         # whole cluster
 ```
 
 ---

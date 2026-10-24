@@ -149,7 +149,7 @@ def compile_target(app_dir, target, threads=6):
         f.write(proc.stdout or "")
         f.write(proc.stderr or "")
 
-    app_bin = os.path.join(abs_build_dir, "audio_VSAF_broadcast2.bin")
+    app_bin = os.path.join(abs_build_dir, "audio_VSAF.bin")
     bootloader_bin = os.path.join(abs_build_dir, "bootloader", "bootloader.bin")
     # Success = idf.py exit code 0 AND its own completion banner. A leftover .bin from an earlier
     # build must not count (that once hid a failed build), and an up-to-date build legitimately
@@ -190,7 +190,7 @@ def flash_single_node(app_dir, node_info, baud=921600):
             build_dir = os.path.join(app_dir, "build_s3")
             bootloader = os.path.join(build_dir, "bootloader", "bootloader.bin")
             partition = os.path.join(build_dir, "partition_table", "partition-table.bin")
-            app_bin = os.path.join(build_dir, "audio_VSAF_broadcast2.bin")
+            app_bin = os.path.join(build_dir, "audio_VSAF.bin")
             cmd = [
                 idf_python, "-m", "esptool",
                 "--chip", "esp32s3",
@@ -213,7 +213,7 @@ def flash_single_node(app_dir, node_info, baud=921600):
         build_dir = os.path.join(app_dir, "build_c6")
         bootloader = os.path.join(build_dir, "bootloader", "bootloader.bin")
         partition = os.path.join(build_dir, "partition_table", "partition-table.bin")
-        app_bin = os.path.join(build_dir, "audio_VSAF_broadcast2.bin")
+        app_bin = os.path.join(build_dir, "audio_VSAF.bin")
         if not os.path.isfile(app_bin):
             app_bin = os.path.join(build_dir, "audio_ESP_NOW_unicast.bin")
 
@@ -247,9 +247,9 @@ def flash_single_node(app_dir, node_info, baud=921600):
 
 def main():
     parser = argparse.ArgumentParser(description="Parallel Build & Multi-Node Flash Coordinator")
-    # Default: <repo>/apps/audio_VSAF_broadcast2, resolved relative to this script (<repo>/.claude/skills/<skill>/scripts/)
+    # Default: <repo>/apps/audio_VSAF, resolved relative to this script (<repo>/.claude/skills/<skill>/scripts/)
     repo_root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", ".."))
-    default_app_dir = os.path.join(repo_root, "apps", "audio_VSAF_broadcast2")
+    default_app_dir = os.path.join(repo_root, "apps", "audio_VSAF")
     parser.add_argument("--app-dir", default=default_app_dir, help="Application root directory")
     parser.add_argument("--build-only", action="store_true", help="Only compile without flashing")
     parser.add_argument("--flash-only", action="store_true", help="Only flash without compiling")

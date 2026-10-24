@@ -4,12 +4,12 @@ description: >-
   Run and interpret the VSAF2 reliability soak test: stream music from the PC into the SOURCE (Node 16)
   over TinyUSB UAC1, log every SINK's 1 s heartbeat, and check the GOALS.md target of zero PLC
   (concealed frames) per SINK. Use for any dropout / PLC / packet-loss / RF-channel / Wi-Fi PHY-rate
-  investigation on audio_VSAF_broadcast2.
+  investigation on audio_VSAF.
 ---
 
 # VSAF2 Soak Test (zero-PLC check)
 
-## Tools (apps/audio_VSAF_broadcast2/tools/)
+## Tools (apps/audio_VSAF/tools/)
 - `usb_audio_streamer.py`: plays a 48 kHz file (MP3/WAV/FLAC, looped) or built-in synthetic music to the
   "Node16 audio (USB Speaker)" WASAPI endpoint (48 kHz, so Windows does not resample). Reports PC-side
   underflows (must be 0, otherwise the PC starved the SOURCE).
@@ -18,7 +18,7 @@ description: >-
   `streamer.log`, `summary.json`) and exits 0 only on PASS.
 
 ```powershell
-cd apps\audio_VSAF_broadcast2\tools
+cd apps\audio_VSAF\tools
 ..\..\..\.venv_audio_multicast\Scripts\python.exe -u soak_test.py --duration 60     # smoke run first
 ..\..\..\.venv_audio_multicast\Scripts\python.exe -u soak_test.py --duration 900    # 15-minute run
 # options: --sinks 4,5,23,24   --file <48k file> ('' = synthetic)   --no-stream (audio from elsewhere)
@@ -46,17 +46,22 @@ SINK heartbeat middle block: `SW HW PKTS RED PLC DMA OVF UDR`.
 - High decode time on a SINK (audio block `ms Avg Pk`) approaching 10 ms: CPU-bound (C6 decoding 48 kHz satellites
   takes ~1.2 ms, so this has not been the cause so far).
 
-## Radio knobs (SOURCE console, runtime only, lost on reboot; boot default = auto-picked channel, MCS3)
+## Radio knobs (SOURCE console, runtime only, lost on reboot; boot default = ch 13, MCS3)
+Boot channel: `CONFIG_VSAF_PREFERRED_WIFI_CHANNEL` (13) in `main/config.h`. The boot RF survey is off
+(`CONFIG_VSAF_BOOT_CHANNEL_SCAN 0`) because its decoded-frame score preferred ch 1, which measured worse for TX.
 - `wifich <1..13>`: SINKs re-scan and follow. Check neighbours first: `netsh wlan show networks mode=bssid`.
 - `phy mcs3 | mcs1 | mcs0 | 12m | ...`: broadcast PHY rate.
   **Do not use MCS0 with the current firmware**: TX stage grows from ~3.6 to ~5.2 ms, the frame (DSP + 2 encode
   passes + TX, all serial on core 1) reaches ~9.3-9.5 ms of the 10 ms budget and the SOURCE skips frames in about
   a quarter of all seconds (seen as `seconds < 590 pkt/s` in the report). MCS3 keeps the frame at ~7.8 ms.
-- **Known firmware bug:** a sequence of runtime `wifich` + `phy` changes (seen: ch 13 -> ch 1 -> ch 13 + `phy mcs3`)
-  can leave the SOURCE silently not transmitting: still `CAST`, PKTS ~600, "Sent" counters rising, but the TX stage
-  drops to ~0.1 ms, NODES shows `OOOOOO` and every SINK stays in `SCAN`. Repeating `wifich`/`phy` does not help;
-  `reset` on the SOURCE console does. After any radio change, check the SOURCE row before starting a run (TX stage
-  > 2 ms and NODES `1` for every SINK). `soak_test.py` aborts if SINKs do not reach STRM.
+- **Fixed 2026-10-24 (commit 472e8a0): SOURCE "sending" but silent.** Cause: ESP-NOW TX buffers exhausted
+  (`ESP_ERR_ESPNOW_NO_MEM`) after frequent TX-done timeouts; old firmware could stay stuck there. Now `wifich`/`phy`
+  apply at a frame boundary and the TX loop rebuilds ESP-NOW by itself (send-error run, no TX-done for 0.5 s, or
+  impossibly fast sweeps). Check with `txstat` (`recoveries`, `send_err`, `no_mem`, `tx_done_timeouts`);
+  `txfault` injects a fault (verified: 30 failed sends = 50 ms, then recovery, SINKs stay in STRM).
+- **Channel choice:** the `tx_done_timeouts` rate in `txstat` is the most direct "how hard is it to transmit here"
+  measure. 2026-10-24: ch 13 ~35-70/s, ch 1 ~150-300/s at MCS3, although the decoded-frame boot survey ranked ch 1
+  cleaner. `soak_test.py` aborts if SINKs do not reach STRM.
 - SINK jitter cushion: `CONFIG_ESPNOW_PREFILL_THRESHOLD_FRAMES` (config.h, 5 = 50 ms: 2 DMA + 3 FIFO). Each extra
   frame adds 10 ms latency (GOALS.md soft target < 50 ms end to end).
 

@@ -20,3 +20,10 @@ idf_component_register(
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE -O3 -ffast-math)
+
+# LC3plus / LC3plus HR off unless enabled in Kconfig (PUBLIC: lc3.h sizes structs with these macros)
+if(CONFIG_LC3_ENABLE_PLUS_MODES)
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC LC3_PLUS=1 LC3_PLUS_HR=1)
+else()
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC LC3_PLUS=0 LC3_PLUS_HR=0)
+endif()

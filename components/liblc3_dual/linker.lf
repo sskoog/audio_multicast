@@ -1,0 +1,7 @@
+[mapping:liblc3_dual]
+archive: libliblc3_dual.a
+entries:
+    if LC3_CODE_IN_IRAM = y:
+        * (noflash)
+    else:
+        * (default)

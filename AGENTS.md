@@ -61,8 +61,8 @@ Both Bluetooth 5.3+ Low Energy Audio and ESP-NOW (802.11) are used as layer-2 co
 ### Bluetooth 5.3+ Low Energy Audio (to be implemented)
 To be defined.
 
-### 802.11 (ESP-NOW) Packet Structure (VSAF 3.0, `apps/audio_VSAF_broadcast2`)
-Source of truth: `apps/audio_VSAF_broadcast2/main/vsaf_protocol.hpp`. Audio packets are strictly 248 bytes, 32-bit word aligned, little-endian, with multi-tier Unequal Error Protection (UEP) redundancy and round-robin SINK replies. Full spec: `apps/audio_VSAF_broadcast2/README_wifi_audio_broadcast2.md`.
+### 802.11 (ESP-NOW) Packet Structure (VSAF 3.0, `apps/audio_VSAF`)
+Source of truth: `apps/audio_VSAF/main/vsaf_protocol.hpp`. Audio packets are strictly 248 bytes, 32-bit word aligned, little-endian, with multi-tier Unequal Error Protection (UEP) redundancy and round-robin SINK replies. Full spec: `apps/audio_VSAF/README_audio_VSAF.md`.
 - **Packet types (`type_id`)**: `0x1337` Satellite audio (Ch 0-4), `0x1338` Subwoofer audio (Ch 5), `0x1350` Control (from SOURCE), `0x1360` SINK telemetry reply (16 bytes).
 - **8-Byte Word-Aligned Header** (both audio types):
   - `type_id` (2B)
@@ -91,16 +91,16 @@ All build/flash scripts activate the environment through one shared helper, `too
 # Environment Activation (PowerShell, manual idf.py / esptool use)
 . C:\Git_audio_multicast\tools\idf_env.ps1
 
-# Automated Build and Flash for audio_VSAF_broadcast2 (main track):
+# Automated Build and Flash for audio_VSAF (main track):
 # Flash SOURCE (Node 16, ESP32-S3, hands-free reset)
-powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\build_and_flash.ps1 -Role SOURCE
+powershell -ExecutionPolicy Bypass -File apps\audio_VSAF\tools\build_and_flash.ps1 -Role SOURCE
 
 # Flash SINK Left (Node 4, ESP32-S3 PCM5102A on COM4)
-powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\build_and_flash.ps1 -Role SINK -Port COM4 -NodeId 4
+powershell -ExecutionPolicy Bypass -File apps\audio_VSAF\tools\build_and_flash.ps1 -Role SINK -Port COM4 -NodeId 4
 
 # Flash SINK Center (Node 23, ESP32-C6 on COM23)
-powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\build_and_flash.ps1 -Role SINK -Port COM23 -NodeId 23
+powershell -ExecutionPolicy Bypass -File apps\audio_VSAF\tools\build_and_flash.ps1 -Role SINK -Port COM23 -NodeId 23
 
 # Build both targets in parallel and flash all detected nodes
-powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\parallel_build_and_flash.ps1
+powershell -ExecutionPolicy Bypass -File apps\audio_VSAF\tools\parallel_build_and_flash.ps1
 ```

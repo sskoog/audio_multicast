@@ -38,7 +38,7 @@ On the **Seeed Studio XIAO ESP32-S3**:
 Instead of relying on nonexistent physical RTS-to-EN hardware, the flashing sequence utilizes the **ESP32-S3 Internal RTC Watchdog Timer (WDT)** via the running flasher stub:
 
 1. **Upload Stub Flasher**: Establish communication with the ROM bootloader and upload the high-speed flasher stub (921,600 baud).
-2. **Write & Verify Binaries**: Flash and verify `bootloader.bin` (at `0x0`), `partition-table.bin` (at `0x8000`), and `audio_VSAF_broadcast2.bin` (at `0x10000`).
+2. **Write & Verify Binaries**: Flash and verify `bootloader.bin` (at `0x0`), `partition-table.bin` (at `0x8000`), and `audio_VSAF.bin` (at `0x10000`).
 3. **Clear Boot Strap Flag**: Write `0` to Bit 0 of `RTC_CNTL_OPTION1_REG` (`0x6000812C`) to clear the `RTC_CNTL_FORCE_DOWNLOAD_BOOT` flag, ensuring the chip will not reboot back into download mode.
 4. **Arm RTC Watchdog Timer**: Configure the RTC WDT registers directly via the stub:
    - Unlock: Write `0x50D83AA1` to `RTC_CNTL_WDTWPROTECT_REG` (`0x600080B0`).
@@ -54,7 +54,7 @@ Instead of relying on nonexistent physical RTS-to-EN hardware, the flashing sequ
 
 ## 4. Scripting Tools in Repository
 
-### A. Python Flashing Engine (`apps/audio_VSAF_broadcast2/tools/s3_flash_and_reset.py`)
+### A. Python Flashing Engine (`apps/audio_VSAF/tools/s3_flash_and_reset.py`)
 Direct Python utility executing chip detection, stub upload, high-speed flash programming, and the atomic RTC watchdog reset sequence.
 
 Key reset implementation:
@@ -72,7 +72,7 @@ def execute_watchdog_reset(esp):
     esp.hard_reset(using_usb=False)
 ```
 
-### B. PowerShell Automation Wrapper (`apps/audio_VSAF_broadcast2/tools/flash_s3.ps1`)
+### B. PowerShell Automation Wrapper (`apps/audio_VSAF/tools/flash_s3.ps1`)
 Terminates lingering monitor processes holding COM handles, activates ESP-IDF through the shared helper `tools\idf_env.ps1` (default v6.1, override with `-IdfVersion`), and invokes `s3_flash_and_reset.py --port <Port> --baud <Baud>`. Parameters: `-Port` (default `AUTO`), `-Baud` (default 921600).
 
 ---
@@ -85,11 +85,11 @@ Close any active serial monitors (e.g., Serial Studio Pro, PuTTY, `idf.py monito
 ### Step 2: Initiate Flashing Tool
 Run the script from the repository root in PowerShell:
 ```powershell
-powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\flash_s3.ps1
+powershell -ExecutionPolicy Bypass -File apps\audio_VSAF\tools\flash_s3.ps1
 ```
 Or use the unified builder/flasher:
 ```powershell
-powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\build_and_flash.ps1 -Role SOURCE
+powershell -ExecutionPolicy Bypass -File apps\audio_VSAF\tools\build_and_flash.ps1 -Role SOURCE
 ```
 
 ### Step 3: Enter Bootloader Mode (If in Application Mode)
@@ -140,6 +140,7 @@ OK     CM_PROB_NONE USB Composite Device       USB\VID_303A&PID_4002\...
 - **Identity check:** the script only treats a `303A:1001` port as Node 16's bootloader if its USB serial number is Node 16's MAC `E0:72:A1:D8:4C:D0` (SINKs share that VID:PID), and refuses to flash if the connected chip reports another MAC (`--any-mac` overrides).
 - **Reboot request order:** 1200-baud touch, then a raw Win32 write of `bootloader` (via `ctypes`, 1 s write timeout; pywin32 is *not* in the IDF 6.1 Python env), then a pyserial write.
 - **Firmware hung but enumerated:** COM116 and "USB Speaker" show `OK` in Windows, but the console sends nothing and writes time out. Only a physical **B + R** (or USB replug) recovers it. Start the flasher first so it is waiting, then press the buttons.
+  Cause found and fixed 2026-10-24 (commit 472e8a0): the 1200-baud touch called `esp_restart()` from inside the TinyUSB task; its shutdown handlers stopped Wi-Fi and then intermittently hung (SOURCE silent, SINKs in SCAN). Both download-mode paths now set the force-download flag and use `esp_rom_software_reset_system()`. Verified: 3/3 hands-free reflashes in ~19 s. Boards still running older firmware can show the hang once more.
 - **Mid-write failure on COM3** (ROM USB-OTG): rerun with `--port COM16` once the USB-Serial/JTAG port appears; it is far more reliable.
 
 ## 6. Standalone Reset Command (Emergency / Debugging)
@@ -147,6 +148,6 @@ OK     CM_PROB_NONE USB Composite Device       USB\VID_303A&PID_4002\...
 If Node 16 is stuck in the ROM bootloader on `COM16` or `COM3` and you want to boot into flash without re-flashing or touching the hardware buttons:
 
 ```powershell
-python apps\audio_VSAF_broadcast2\tools\s3_flash_and_reset.py --only-reset
+python apps\audio_VSAF\tools\s3_flash_and_reset.py --only-reset
 ```
 This connects to the existing bootloader stub, clears the strapping register, and triggers the hardware watchdog reboot.

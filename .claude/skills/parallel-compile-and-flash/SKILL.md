@@ -36,29 +36,29 @@ When compiling S3 and C6 targets simultaneously:
 ## 3. Automated Parallel Build & Flash Tool
 
 The repository provides an automated coordinator:
-- Python script: `.claude\skills\parallel-compile-and-flash\scripts\parallel_build_and_flash.py` (defaults `--app-dir` to `apps\audio_VSAF_broadcast2`)
-- PowerShell wrapper: `apps\audio_VSAF_broadcast2\tools\parallel_build_and_flash.ps1`
+- Python script: `.claude\skills\parallel-compile-and-flash\scripts\parallel_build_and_flash.py` (defaults `--app-dir` to `apps\audio_VSAF`)
+- PowerShell wrapper: `apps\audio_VSAF\tools\parallel_build_and_flash.ps1`
 
 ### CLI Usage & Workflow
 
 #### A. Full Cluster Parallel Build & Flash (Default: All Targets + All Detected Nodes)
 ```powershell
-powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\parallel_build_and_flash.ps1
+powershell -ExecutionPolicy Bypass -File apps\audio_VSAF\tools\parallel_build_and_flash.ps1
 ```
 
 #### B. Parallel Build Only (No Flashing)
 ```powershell
-powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\parallel_build_and_flash.ps1 -BuildOnly
+powershell -ExecutionPolicy Bypass -File apps\audio_VSAF\tools\parallel_build_and_flash.ps1 -BuildOnly
 ```
 
 #### C. Parallel Flash Only (Fast Re-Flash of Existing Binaries)
 ```powershell
-powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\parallel_build_and_flash.ps1 -FlashOnly
+powershell -ExecutionPolicy Bypass -File apps\audio_VSAF\tools\parallel_build_and_flash.ps1 -FlashOnly
 ```
 
 #### D. Selective Nodes Flashing
 ```powershell
-powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\parallel_build_and_flash.ps1 -Nodes "16,23,24"
+powershell -ExecutionPolicy Bypass -File apps\audio_VSAF\tools\parallel_build_and_flash.ps1 -Nodes "16,23,24"
 ```
 
 ---

@@ -1,0 +1,19 @@
+menu "liblc3 Codec Configuration (liblc3_dual fork)"
+
+    config LC3_ENABLE_PLUS_MODES
+        bool "Build LC3plus modes (2.5/5 ms frames, 96 kHz high resolution)"
+        default n
+        help
+            liblc3 builds LC3plus (LC3_PLUS) and LC3plus High Resolution (LC3_PLUS_HR) by default. Their
+            lookup tables are large and, with LC3_CODE_IN_IRAM, all land in internal SRAM. VSAF2 only uses
+            standard LC3 (10 ms, 8-48 kHz); leaving this off saves tens of KB of internal RAM, which the
+            PSRAM-less SOURCE (Node 16) needs for its 11 encoder instances and pipeline tasks.
+
+    config LC3_CODE_IN_IRAM
+        bool "Place liblc3 codec routines and tables in IRAM"
+        default y
+        help
+            When enabled, liblc3 encoder and decoder code and lookup tables are mapped
+            into internal SRAM (IRAM/DRAM) to eliminate SPI flash cache miss latency.
+
+endmenu

@@ -52,25 +52,25 @@ When the onboard USB Serial JTAG / USB CDC controller resets during flashing, Wi
 
 ## 3. Firmware Flashing Procedure
 
-### Method A: Automated Build and Flash (audio_VSAF_broadcast2)
+### Method A: Automated Build and Flash (audio_VSAF)
 ```powershell
 # Flash SOURCE (Node 16 / S3) - hands-free reset, see node16-flash-and-reset skill
-powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\build_and_flash.ps1 -Role SOURCE
+powershell -ExecutionPolicy Bypass -File apps\audio_VSAF\tools\build_and_flash.ps1 -Role SOURCE
 
 # Flash an S3 PCM5102A SINK (Node 4 Left / Node 5 Right)
-powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\build_and_flash.ps1 -Role SINK -Port COM4 -NodeId 4
+powershell -ExecutionPolicy Bypass -File apps\audio_VSAF\tools\build_and_flash.ps1 -Role SINK -Port COM4 -NodeId 4
 
 # Flash a C6 SINK (Node 23 / 24 / 20 / 25 / 26)
-powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\build_and_flash.ps1 -Role SINK -Port COM23 -NodeId 23
+powershell -ExecutionPolicy Bypass -File apps\audio_VSAF\tools\build_and_flash.ps1 -Role SINK -Port COM23 -NodeId 23
 
 # Re-flash existing binaries without rebuilding
-powershell -ExecutionPolicy Bypass -File apps\audio_VSAF_broadcast2\tools\build_and_flash.ps1 -Role SINK -Port COM24 -NodeId 24 -OnlyFlash
+powershell -ExecutionPolicy Bypass -File apps\audio_VSAF\tools\build_and_flash.ps1 -Role SINK -Port COM24 -NodeId 24 -OnlyFlash
 ```
 For several nodes at once, use the `parallel-compile-and-flash` skill.
 
 ### Method B: Direct esptool (C6 SINK, after a build into build_c6)
 ```powershell
-python -m esptool --chip esp32c6 -p COM23 -b 921600 --connect-attempts 10 --before default_reset --after hard_reset write_flash --flash_mode dio --flash_size 8MB --flash_freq 80m 0x0 apps\audio_VSAF_broadcast2\build_c6\bootloader\bootloader.bin 0x8000 apps\audio_VSAF_broadcast2\build_c6\partition_table\partition-table.bin 0x10000 apps\audio_VSAF_broadcast2\build_c6\audio_VSAF_broadcast2.bin
+python -m esptool --chip esp32c6 -p COM23 -b 921600 --connect-attempts 10 --before default_reset --after hard_reset write_flash --flash_mode dio --flash_size 8MB --flash_freq 80m 0x0 apps\audio_VSAF\build_c6\bootloader\bootloader.bin 0x8000 apps\audio_VSAF\build_c6\partition_table\partition-table.bin 0x10000 apps\audio_VSAF\build_c6\audio_VSAF.bin
 ```
 S3 SINKs (Node 4/5) use `build_s3` and `--chip esp32s3 --flash_size 4MB`. Node 16 must use `s3_flash_and_reset.py` (no physical reset line).
 
@@ -90,7 +90,7 @@ Native USB CDC ports on ESP32-C6 / ESP32-S3 disconnect and re-enumerate upon res
 Open the port at 115200 baud with a safe timeout and ensure the port is closed cleanly in a `try...finally` block.
 
 Pitfalls seen on this cluster (2026-10-24):
-- **Opening a port resets the SINK** unless DTR/RTS are low *before* `open()`: create `serial.Serial()` unopened, set `port`, `dtr=False`, `rts=False`, then `open()` (see `apps/audio_VSAF_broadcast2/tools/soak_test.py:open_port`). Setting them after `Serial(port)` is too late; the uptime column restarting at ~1 s is the tell.
+- **Opening a port resets the SINK** unless DTR/RTS are low *before* `open()`: create `serial.Serial()` unopened, set `port`, `dtr=False`, `rts=False`, then `open()` (see `apps/audio_VSAF/tools/soak_test.py:open_port`). Setting them after `Serial(port)` is too late; the uptime column restarting at ~1 s is the tell.
 - **COM116 (Node 16 TinyUSB CDC)** fails configure with usbser.sys error 31; patch `serial.serialwin32.Serial._reconfigure_port` to ignore that error (same patch in `soak_test.py`).
 - **Writes to S3 USB-Serial/JTAG with DTR low can time out** (`clear` to Node 4/5). Use a write timeout and retries, and don't make results depend on the write landing.
 - **PowerShell 5.1 strips double quotes** from arguments passed to native programs, so `python -c "...'31'..."` inline code breaks in surprising ways. Put probe code in a script file instead.

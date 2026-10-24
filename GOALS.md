@@ -3,7 +3,7 @@
 Semi-professional hobby project: a low-latency, multi-channel wireless speaker system over 802.11 (ESP-NOW) with LC3 coding.
 Home use first (stereo up to 5.1); small PA / event / outdoor use is the later target.
 
-Main track: `apps/audio_VSAF_broadcast2` (VSAF 3.0 broadcast). Everything else is either a support tool or archived.
+Main track: `apps/audio_VSAF` (VSAF 3.0 broadcast). Everything else is either a support tool or archived.
 
 ## Targets
 
