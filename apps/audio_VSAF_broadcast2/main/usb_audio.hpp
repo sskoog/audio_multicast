@@ -23,6 +23,10 @@ bool usb_audio_is_streaming(void);
 // Clears the internal audio stream buffer
 void usb_audio_clear_buffer(void);
 
+// Reboot straight into the ROM download bootloader (COM16) via a ROM system reset (no esp_restart()
+// shutdown handlers, which intermittently hung). Does not return.
+void usb_reboot_to_rom_download(void);
+
 #else
 // Non-S3 targets (e.g. ESP32-C6 SINK) do not have USB-OTG / TinyUSB
 static inline void usb_audio_init(void) {}

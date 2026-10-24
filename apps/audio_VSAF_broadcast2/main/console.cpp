@@ -1,10 +1,12 @@
 #include "console.hpp"
 #include "config.h"
 #include "vsaf_broadcast_engine.hpp"
+#include "usb_audio.hpp"
 // #include "lc3_benchmark.hpp" (Disabled)
 #include "driver/uart.h"
 #include "driver/usb_serial_jtag.h"
 #include "esp_wifi.h"
+#include "esp_log.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -94,8 +96,54 @@ void print_console(const char* format, ...) {
  *
  * @param unicast_engine Pointer to active EspNowUnicastEngine instance (input)
  */
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+static vprintf_like_t s_orig_log_vprintf = nullptr;
+
+/**
+ * @brief ESP_LOG sink that mirrors log lines to the TinyUSB CDC console (COM116).
+ *
+ * On Node 16 the IDF console is NONE + secondary USB-Serial/JTAG, which is unreachable while TinyUSB owns
+ * the USB PHY, so ESP_LOGx output (Wi-Fi driver warnings, "TX hang detected", ...) was silently lost.
+ * Never blocks: if the console mutex is busy or the CDC FIFO is not ready, the line is dropped from CDC
+ * (it still goes to the original sink). Safe to call from the real-time TX task.
+ *
+ * @param fmt  printf-style format (input)
+ * @param args format arguments (input)
+ * @return Result of the original vprintf sink (characters written), as required by vprintf_like_t.
+ */
+static int cdc_log_vprintf(const char* fmt, va_list args) {
+    char line[256];
+    va_list copy;
+    va_copy(copy, args);
+    int n = vsnprintf(line, sizeof(line), fmt, copy);
+    va_end(copy);
+    if (n > 0 && s_console_mutex && tud_cdc_ready() &&
+        xSemaphoreTake(s_console_mutex, 0) == pdTRUE) {
+        uint32_t len = static_cast<uint32_t>(n < static_cast<int>(sizeof(line)) ? n : sizeof(line) - 1);
+        if (tud_cdc_write_available() >= len + 1) {
+            bool lf_end = (len > 0 && line[len - 1] == '\n');
+            tud_cdc_write(line, lf_end ? len - 1 : len);
+            if (lf_end) {
+                tud_cdc_write_str("\r\n");  // ESP_LOG ends lines with '\n'; terminals expect CRLF
+            }
+            tud_cdc_write_flush();
+        }
+        xSemaphoreGive(s_console_mutex);
+    }
+    return s_orig_log_vprintf ? s_orig_log_vprintf(fmt, args) : n;
+}
+#endif
+
 void console_init(AudioNet::EspNowUnicastEngine* unicast_engine) {
     s_unicast_engine = unicast_engine;
+    if (!s_console_mutex) {
+        s_console_mutex = xSemaphoreCreateMutexStatic(&s_console_mutex_buf);
+    }
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+    if (!s_orig_log_vprintf) {
+        s_orig_log_vprintf = esp_log_set_vprintf(cdc_log_vprintf);
+    }
+#endif
 }
 
 /**
@@ -304,13 +352,18 @@ void handle_ascii_command(const char* raw_line) {
         }
 
         if (s_unicast_engine) {
-            s_unicast_engine->setWifiPhyRate(mode, rate);
-            print_console("[OK] Switched Wi-Fi PHY Rate to %s (%s)\n",
-                          s_unicast_engine->getWifiPhyRateString(),
+            s_unicast_engine->requestWifiPhyRate(mode, rate); // applied at the next frame boundary
+            print_console("[OK] Switching Wi-Fi PHY Rate (%s) at the next frame boundary\n",
                           (mode == WIFI_PHY_MODE_HT20) ? "802.11n HT20" : "802.11g OFDM");
         }
     } else if (strncasecmp(line, "scan", 4) == 0 || strncasecmp(line, "survey", 6) == 0) {
-        if (s_unicast_engine) {
+        const system_config_t* scan_cfg = get_system_config();
+        if (s_unicast_engine && scan_cfg && scan_cfg->node_role == NODE_ROLE_SOURCE &&
+            s_unicast_engine->getState() == AudioNet::NetworkState::CAST) {
+            // The survey hops the radio across ch 1..13 for seconds; the TX task would keep broadcasting
+            // on whatever channel the sniffer is visiting.
+            print_console("[ERROR] scan would interrupt the broadcast: run 'stop' first, then 'scan', then 'start'\n");
+        } else if (s_unicast_engine) {
             bool auto_apply = (strcasestr(line, "auto") != nullptr || strcasestr(line, "apply") != nullptr || strcasestr(line, "set") != nullptr);
             uint32_t dwell_ms = 300;
             int val = 0;
@@ -322,7 +375,7 @@ void handle_ascii_command(const char* raw_line) {
     } else if (strncasecmp(line, "wifich ", 7) == 0 || strncasecmp(line, "channel ", 8) == 0) {
         int ch = 0;
         if ((sscanf(line, "%*s %d", &ch) == 1) && ch >= 1 && ch <= 13 && s_unicast_engine) {
-            s_unicast_engine->setWifiChannel(static_cast<uint8_t>(ch));
+            s_unicast_engine->requestWifiChannel(static_cast<uint8_t>(ch)); // applied at the next frame boundary
             s_unicast_engine->lockChannel(true);
             print_console("[OK] Wi-Fi channel set and locked to %d\n", ch);
         } else {
@@ -385,6 +438,33 @@ void handle_ascii_command(const char* raw_line) {
             s_unicast_engine->resetStreamingCounters();
             s_unicast_engine->resetErrorCounters();
             print_console("[OK] Counters and error metrics cleared\n");
+        }
+    } else if (strcasecmp(line, "txfault") == 0) {
+        // Test hook: deinit ESP-NOW at the next frame boundary; the TX health check must recover within ~1 s
+        if (s_unicast_engine) {
+            s_unicast_engine->requestTxFaultInjection();
+            print_console("[OK] TX fault injected at next frame boundary; expect automatic ESP-NOW recovery\n");
+        }
+    } else if (strcasecmp(line, "txstat") == 0) {
+        // TX path health: distinguishes "sent and completed" from "esp_now_send() failing instantly"
+        if (s_unicast_engine) {
+            uint8_t primary = 0;
+            wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
+            esp_wifi_get_channel(&primary, &second);
+            int8_t pwr = 0;
+            esp_wifi_get_max_tx_power(&pwr);
+            int32_t last_err = s_unicast_engine->getLastTxError();
+            print_console("[TXSTAT] ch set=%u radio=%u | phy=%s | txpwr=%.2f dBm\n",
+                          s_unicast_engine->getWifiChannel(), primary,
+                          s_unicast_engine->getWifiPhyRateString(), pwr * 0.25f);
+            print_console("[TXSTAT] recoveries=%lu\n", (unsigned long)s_unicast_engine->getTxRecoveryCount());
+            print_console("[TXSTAT] send_err=%lu (no_mem=%lu, last=%s) tx_done_timeouts=%lu tx_status_fail=%lu deadline_drops=%lu\n",
+                          (unsigned long)s_unicast_engine->getTxMacErrorCount(),
+                          (unsigned long)s_unicast_engine->getTxNoMemCount(),
+                          last_err ? esp_err_to_name(static_cast<esp_err_t>(last_err)) : "none",
+                          (unsigned long)s_unicast_engine->getTxTimeoutCount(),
+                          (unsigned long)s_unicast_engine->getTxFailCount(),
+                          (unsigned long)s_unicast_engine->getTxDeadlineDropsCount());
         }
     } else if (strcasecmp(line, "bench") == 0) {
         print_console("[INFO] LC3 benchmark suite is disabled in this firmware build.\n");
@@ -471,10 +551,10 @@ void handle_ascii_command(const char* raw_line) {
         print_console("[SYS] Rebooting into ROM download bootloader (COM16)...\n");
         vTaskDelay(pdMS_TO_TICKS(100));
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
-        // Set bit 0 of RTC_CNTL_OPTION1_REG (0x6000812C) to force ROM bootloader (COM16)
-        *((volatile uint32_t*)0x6000812C) = 1;
-#endif
+        usb_reboot_to_rom_download(); // force-download flag + ROM system reset; never esp_restart()
+#else
         esp_restart();
+#endif
     } else {
         print_console("[UNKNOWN CMD] '%s'. Type 'help' for command list.\n", line);
     }

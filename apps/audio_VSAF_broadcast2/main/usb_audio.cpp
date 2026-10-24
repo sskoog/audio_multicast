@@ -1,6 +1,7 @@
 #include "usb_audio.hpp"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_rom_sys.h"
 #include "tinyusb.h"
 #include "tusb.h"
 #include "soc/rtc_cntl_reg.h"
@@ -366,6 +367,19 @@ void usb_audio_clear_buffer(void) {
 }
 
 
+/**
+ * @brief Reboot straight into the ROM download bootloader (COM16), without esp_restart().
+ *
+ * esp_restart() runs every shutdown handler first. Called from the TinyUSB task (1200-baud touch), that
+ * sequence intermittently hung forever after Wi-Fi had already stopped: the SOURCE went silent, USB stayed
+ * enumerated but dead, and only a B+R button press recovered it (seen 3x on 2026-10-24). Setting
+ * RTC_CNTL_FORCE_DOWNLOAD_BOOT and doing a ROM-level full system reset cannot block on any task.
+ */
+void usb_reboot_to_rom_download(void) {
+    *((volatile uint32_t*)0x6000812C) = 1; // RTC_CNTL_OPTION1_REG bit 0: RTC_CNTL_FORCE_DOWNLOAD_BOOT
+    esp_rom_software_reset_system();
+}
+
 static bool s_touch_1200_armed = false;
 static bool s_last_dtr = false;
 
@@ -384,9 +398,8 @@ extern "C" void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts) {
     if (itf == 0) {
         if (s_last_dtr && !dtr && s_touch_1200_armed) {
             s_touch_1200_armed = false;
-            ESP_LOGI(TAG, "Touch 1200bps detected! Rebooting into ROM download bootloader...");
-            *((volatile uint32_t*)0x6000812C) = 1; // RTC_CNTL_FORCE_DOWNLOAD_BOOT
-            esp_restart();
+            // No logging here: we are inside the TinyUSB task, and the reset follows immediately.
+            usb_reboot_to_rom_download();
         }
         s_last_dtr = dtr;
     }

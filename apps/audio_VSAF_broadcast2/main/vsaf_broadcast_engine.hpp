@@ -204,11 +204,19 @@ public:
         int8_t   max_rssi;
         int8_t   avg_rssi;
         bool     has_40mhz;
-        uint32_t score; // Lower is cleaner
+        uint32_t score;     // Activity decoded on this channel only. Lower is cleaner
+        uint32_t adj_score; // score + overlap-weighted scores of channels within +/-4 (20 MHz overlap)
     };
 
-    uint8_t scanAndSelectBestChannel(uint32_t dwell_ms_per_ch = 120, bool auto_apply = true, bool print_results = true);
+    // preferred_ch: 0 = pure "cleanest wins"; 1..13 = keep this channel unless its adj_score > CONFIG_VSAF_CHANNEL_BUSY_SCORE
+    uint8_t scanAndSelectBestChannel(uint32_t dwell_ms_per_ch = 120, bool auto_apply = true, bool print_results = true,
+                                     uint8_t preferred_ch = 0);
     esp_err_t setWifiChannel(uint8_t channel);
+    // Console-facing radio changes: deferred to a frame boundary on a running SOURCE (see .cpp)
+    esp_err_t requestWifiChannel(uint8_t channel);
+    esp_err_t requestWifiPhyRate(wifi_phy_mode_t phymode, wifi_phy_rate_t rate);
+    uint32_t  getTxRecoveryCount() const { return m_tx_recoveries.load(std::memory_order_relaxed); }
+    void      requestTxFaultInjection() { m_debug_break_tx.store(true, std::memory_order_release); } // test only
     uint8_t getWifiChannel() const { return m_wifi_channel; }
     bool isChannelLocked() const { return m_channel_locked.load(std::memory_order_acquire); }
     void lockChannel(bool locked) { m_channel_locked.store(locked, std::memory_order_release); }
@@ -332,6 +340,8 @@ public:
     uint32_t getTxTimeoutCount() const { return m_tx_timeout_count.load(std::memory_order_relaxed); }
     uint32_t getTxFailCount() const { return m_tx_fail_count.load(std::memory_order_relaxed); }
     uint32_t getTxMacErrorCount() const { return m_tx_mac_error_count.load(std::memory_order_relaxed); }
+    int32_t  getLastTxError() const { return m_last_tx_err.load(std::memory_order_relaxed); }
+    uint32_t getTxNoMemCount() const { return m_tx_err_no_mem.load(std::memory_order_relaxed); }
     uint32_t getTxDeadlineDropsCount() const { return m_tx_deadline_drops.load(std::memory_order_relaxed); }
     uint32_t getAndResetTxDeadlineDropsCount() { return m_tx_deadline_drops.exchange(0, std::memory_order_relaxed); }
 
@@ -403,8 +413,30 @@ private:
     std::atomic<uint32_t>      m_tx_timeout_count{0};
     std::atomic<uint32_t>      m_tx_fail_count{0};
     std::atomic<uint32_t>      m_tx_mac_error_count{0};
+    std::atomic<int32_t>       m_last_tx_err{0};      // last esp_now_send() error (esp_err_t), 0 = none yet
+    std::atomic<uint32_t>      m_tx_err_no_mem{0};    // esp_now_send() == ESP_ERR_ESPNOW_NO_MEM (driver TX queue full)
     std::atomic<uint32_t>      m_tx_deadline_drops{0};
     uint32_t                   m_consecutive_tx_timeouts{0};
+
+    // TX path health / recovery (SOURCE TX task only, except the atomics)
+    static constexpr uint32_t  TX_HEALTH_WINDOW_FRAMES   = 50; // 0.5 s: zero successful TX-done in a window -> wedged
+    static constexpr uint32_t  TX_MAX_CONSECUTIVE_ERRORS = 30; // 5 frames of esp_now_send() errors -> wedged
+    static constexpr float     TX_MIN_PLAUSIBLE_SWEEP_MS = 0.5f; // 6 broadcasts cannot finish faster on air
+    uint32_t                   m_tx_fast_frames{0};
+    uint32_t                   m_consecutive_send_errors{0};
+    uint32_t                   m_tx_ok_in_window{0};
+    uint32_t                   m_tx_window_frames{0};
+    std::atomic<uint32_t>      m_tx_recoveries{0};
+    esp_err_t initEspNowLayer();
+    void recoverEspNowTx(const char* why);
+    void applyPendingRadioChanges();
+
+    // Deferred radio change requests (console task -> SOURCE TX task)
+    std::atomic<uint8_t>       m_pending_channel{0};   // 0 = none
+    std::atomic<bool>          m_debug_break_tx{false};
+    std::atomic<bool>          m_pending_phy{false};
+    wifi_phy_mode_t            m_pending_phy_mode{WIFI_PHY_MODE_HT20};
+    wifi_phy_rate_t            m_pending_phy_rate{WIFI_PHY_RATE_MCS3_LGI};
 
     void handleTxSubsystemHang();
 

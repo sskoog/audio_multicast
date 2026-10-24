@@ -31,6 +31,22 @@ extern "C" {
 #define CONFIG_ESPNOW_PREFILL_THRESHOLD_FRAMES 5 // Number of 10ms LC3 frames needed before leaving SCANNING to PREFILL (5 = 50ms cushion: 2 in DMA, 3 in FIFO)
 #endif
 
+#ifndef CONFIG_VSAF_PREFERRED_WIFI_CHANNEL
+// SOURCE boot channel. Kept unless the boot RF survey finds it busy (see CONFIG_VSAF_CHANNEL_BUSY_SCORE).
+// 13 is legal in the EU and does not overlap channel 6, where most neighbouring APs sit here (2026-10-24 survey).
+#define CONFIG_VSAF_PREFERRED_WIFI_CHANNEL 13
+#endif
+
+#ifndef CONFIG_VSAF_CHANNEL_BUSY_SCORE
+// Adjacency-weighted survey score above which the preferred channel is abandoned for the cleanest one.
+// Same scale as the survey table: < 50 EXCELLENT, < 150 GOOD, < 350 MODERATE, else CONGESTED.
+#define CONFIG_VSAF_CHANNEL_BUSY_SCORE 150
+#endif
+
+#ifndef CONFIG_VSAF_BOOT_SCAN_DWELL_MS
+#define CONFIG_VSAF_BOOT_SCAN_DWELL_MS 210 // Per-channel dwell of the boot survey (>= 2 beacon intervals of 102.4 ms)
+#endif
+
 #ifndef CONFIG_ESPNOW_WATCHDOG_TIMEOUT_FRAMES
 #define CONFIG_ESPNOW_WATCHDOG_TIMEOUT_FRAMES 6 // Consecutive missing frames / PLC before falling back from STREAM to SCANNING (6 = 60ms)
 #endif

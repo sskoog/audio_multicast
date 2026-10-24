@@ -307,25 +307,27 @@ void SystemDiagnostics::tick() {
                 snprintf(pkts_str, sizeof(pkts_str), "%4lu", (unsigned long)rx_pkts_sec);
             }
 
+            // Running totals are printed modulo 1000 so the 3-char columns never truncate (a 4-digit
+            // value used to print its first 3 digits). Readers (tools/soak_test.py) unwrap the wrap-around.
             char plc_str[8];
-            snprintf(plc_str, sizeof(plc_str), "%3lu", (unsigned long)plc_count);
+            snprintf(plc_str, sizeof(plc_str), "%3lu", (unsigned long)(plc_count % 1000U));
 
             char dma_udr_str[8];
             if (!m_unicast_engine.hasLocalAudioOutput()) {
                 snprintf(dma_udr_str, sizeof(dma_udr_str), " - ");
             } else {
-                snprintf(dma_udr_str, sizeof(dma_udr_str), "%3lu", (unsigned long)dma_udr);
+                snprintf(dma_udr_str, sizeof(dma_udr_str), "%3lu", (unsigned long)(dma_udr % 1000U));
             }
 
             uint32_t red_rec = m_unicast_engine.getRedundancyRecoveredCount();
             char red_str[8];
-            snprintf(red_str, sizeof(red_str), "%3lu", (unsigned long)red_rec);
+            snprintf(red_str, sizeof(red_str), "%3lu", (unsigned long)(red_rec % 1000U));
 
             char fifo_ovf_str[8];
-            snprintf(fifo_ovf_str, sizeof(fifo_ovf_str), "%3lu", (unsigned long)fifo_ovf);
+            snprintf(fifo_ovf_str, sizeof(fifo_ovf_str), "%3lu", (unsigned long)(fifo_ovf % 1000U));
 
             char fifo_udr_str[8];
-            snprintf(fifo_udr_str, sizeof(fifo_udr_str), "%3lu", (unsigned long)fifo_ud);
+            snprintf(fifo_udr_str, sizeof(fifo_udr_str), "%3lu", (unsigned long)(fifo_ud % 1000U));
 
             snprintf(mid_block, sizeof(mid_block),
                      " %3.3s %3.3s  %4.4s  %3.3s %3.3s %3.3s %3.3s %3.3s  ",

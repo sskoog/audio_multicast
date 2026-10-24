@@ -217,26 +217,15 @@ esp_err_t EspNowBroadcastEngine::init(uint8_t role, uint8_t node_id, uint8_t wif
 
     ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(12)); // +3.00 dBm (12 * 0.25 dBm)
 
-    // 2. Wi-Fi RF Sniffer Scan on SOURCE Node (Auto-select cleanest channel at bootup)
+    // 2. Wi-Fi RF Sniffer Scan on SOURCE Node: keep the preferred channel unless the survey finds it busy
     if (m_node_role == NODE_ROLE_SOURCE) {
-        m_wifi_channel = scanAndSelectBestChannel(120, true, true);
+        m_wifi_channel = scanAndSelectBestChannel(CONFIG_VSAF_BOOT_SCAN_DWELL_MS, true, true,
+                                                  CONFIG_VSAF_PREFERRED_WIFI_CHANNEL);
     }
 
-    // 3. Initialize ESP-NOW
-    ESP_ERROR_CHECK(esp_now_init());
-    ESP_ERROR_CHECK(esp_now_register_send_cb(onEspNowSendCb));
-    ESP_ERROR_CHECK(esp_now_register_recv_cb(onEspNowRecvCb));
-
-    // 4. Register Single Broadcast Peer (FF:FF:FF:FF:FF:FF) with Primary Default PHY
-    esp_now_peer_info_t peer_info = {};
-    memcpy(peer_info.peer_addr, s_broadcast_mac, 6);
-    peer_info.channel = 0; // 0 = follow current STA interface channel
-    peer_info.ifidx = WIFI_IF_STA;
-    peer_info.encrypt = false;
-
-    esp_err_t ret = esp_now_add_peer(&peer_info);
-    if (ret != ESP_OK && ret != ESP_ERR_ESPNOW_EXIST) {
-        ESP_LOGE(TAG, "Failed to register broadcast peer: %s", esp_err_to_name(ret));
+    // 3. Initialize ESP-NOW + 4. register the single broadcast peer (FF:FF:FF:FF:FF:FF)
+    esp_err_t ret = initEspNowLayer();
+    if (ret != ESP_OK) {
         return ret;
     }
 
@@ -257,6 +246,130 @@ esp_err_t EspNowBroadcastEngine::init(uint8_t role, uint8_t node_id, uint8_t wif
     ESP_LOGI(TAG, "EspNowBroadcastEngine initialized successfully (Role: %s, Node ID: %d, Ch: %d, Rate: %s)",
              (m_node_role == NODE_ROLE_SOURCE) ? "SOURCE" : "SINK", m_node_id, m_wifi_channel, getWifiPhyRateString());
     return ESP_OK;
+}
+
+/**
+ * @brief Initialize ESP-NOW, register send/recv callbacks and the broadcast peer.
+ *
+ * Used at boot and by recoverEspNowTx(). The peer follows the current STA channel (channel = 0).
+ *
+ * @return ESP_OK, or the first failing esp_now_* error.
+ */
+esp_err_t EspNowBroadcastEngine::initEspNowLayer() {
+    esp_err_t err = esp_now_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_now_init failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    ESP_ERROR_CHECK(esp_now_register_send_cb(onEspNowSendCb));
+    ESP_ERROR_CHECK(esp_now_register_recv_cb(onEspNowRecvCb));
+
+    esp_now_peer_info_t peer_info = {};
+    memcpy(peer_info.peer_addr, s_broadcast_mac, 6);
+    peer_info.channel = 0; // 0 = follow current STA interface channel
+    peer_info.ifidx = WIFI_IF_STA;
+    peer_info.encrypt = false;
+    err = esp_now_add_peer(&peer_info);
+    if (err != ESP_OK && err != ESP_ERR_ESPNOW_EXIST) {
+        ESP_LOGE(TAG, "Failed to register broadcast peer: %s", esp_err_to_name(err));
+        return err;
+    }
+    return ESP_OK;
+}
+
+/**
+ * @brief Rebuild the ESP-NOW TX path after a detected wedge (SOURCE TX task context).
+ *
+ * Wedge = CAST but no successful TX completion for a whole check window, or a run of esp_now_send()
+ * errors. Seen 2026-10-24 after runtime channel/PHY changes: the SOURCE kept "sending" (TX stage ~0.1 ms,
+ * counters rising) while nothing went on air until a reboot. Deinit + init ESP-NOW, re-add the peer,
+ * re-apply PHY rate and channel. Costs one overrun frame; SINKs recover via redundancy/PLC.
+ *
+ * @param why Reason string for the log (input).
+ */
+void EspNowBroadcastEngine::recoverEspNowTx(const char* why) {
+    m_tx_recoveries++;
+    ESP_LOGE(TAG, "ESP-NOW TX path wedged (%s): re-initializing ESP-NOW (recovery #%lu)",
+             why, (unsigned long)m_tx_recoveries.load(std::memory_order_relaxed));
+    esp_now_deinit();
+    if (initEspNowLayer() == ESP_OK) {
+        setWifiPhyRate(m_tx_phy_mode, m_tx_phy_rate);
+        esp_wifi_set_channel(m_wifi_channel, WIFI_SECOND_CHAN_NONE);
+    }
+    if (s_tx_done_sem) {
+        xSemaphoreTake(s_tx_done_sem, 0);
+        xSemaphoreGive(s_tx_done_sem);
+    }
+    m_consecutive_tx_timeouts = 0;
+    m_consecutive_send_errors = 0;
+    m_tx_ok_in_window = 0;
+    m_tx_window_frames = 0;
+    m_tx_fast_frames = 0;
+}
+
+/**
+ * @brief Request a Wi-Fi channel change. On a streaming SOURCE it is applied by the TX task at the next
+ * frame boundary (never while a broadcast burst is in flight); otherwise immediately.
+ *
+ * @param channel 1..13
+ * @return ESP_OK, or ESP_ERR_INVALID_ARG.
+ */
+esp_err_t EspNowBroadcastEngine::requestWifiChannel(uint8_t channel) {
+    if (channel < 1 || channel > 13) return ESP_ERR_INVALID_ARG;
+    if (m_node_role == NODE_ROLE_SOURCE && m_running.load(std::memory_order_acquire)) {
+        m_pending_channel.store(channel, std::memory_order_release);
+        return ESP_OK;
+    }
+    esp_err_t err = setWifiChannel(channel);
+    if (err == ESP_OK) {
+        setWifiPhyRate(m_tx_phy_mode, m_tx_phy_rate); // keep the broadcast rate across channel changes
+    }
+    return err;
+}
+
+/**
+ * @brief Request a broadcast PHY rate change (same deferral rules as requestWifiChannel()).
+ */
+esp_err_t EspNowBroadcastEngine::requestWifiPhyRate(wifi_phy_mode_t phymode, wifi_phy_rate_t rate) {
+    if (m_node_role == NODE_ROLE_SOURCE && m_running.load(std::memory_order_acquire)) {
+        m_pending_phy_mode = phymode;
+        m_pending_phy_rate = rate;
+        m_pending_phy.store(true, std::memory_order_release);
+        return ESP_OK;
+    }
+    return setWifiPhyRate(phymode, rate);
+}
+
+/**
+ * @brief Apply deferred channel / PHY requests at a frame boundary (SOURCE TX task only).
+ *
+ * Waits (max 5 ms) for the last broadcast of the previous frame to complete so the radio is idle,
+ * then switches. A channel change always re-applies the current PHY rate.
+ */
+void EspNowBroadcastEngine::applyPendingRadioChanges() {
+    if (m_debug_break_tx.exchange(false, std::memory_order_acq_rel)) {
+        // Test hook (console 'txfault'): break the TX path to exercise wedge detection + recovery
+        ESP_LOGW(TAG, "txfault: esp_now_deinit() to simulate a wedged TX path");
+        esp_now_deinit();
+    }
+    uint8_t ch = m_pending_channel.exchange(0, std::memory_order_acq_rel);
+    bool phy = m_pending_phy.exchange(false, std::memory_order_acq_rel);
+    if (ch == 0 && !phy) {
+        return;
+    }
+    if (s_tx_done_sem) {
+        xSemaphoreTake(s_tx_done_sem, pdMS_TO_TICKS(5)); // drain: last TX-done of the previous burst
+        xSemaphoreGive(s_tx_done_sem);
+    }
+    if (ch != 0) {
+        setWifiChannel(ch);
+    }
+    if (phy) {
+        setWifiPhyRate(m_pending_phy_mode, m_pending_phy_rate);
+    } else {
+        setWifiPhyRate(m_tx_phy_mode, m_tx_phy_rate);
+    }
+    ESP_LOGI(TAG, "Radio change applied at frame boundary: ch %u, %s", m_wifi_channel, getWifiPhyRateString());
 }
 
 esp_err_t EspNowBroadcastEngine::start() {
@@ -559,10 +672,24 @@ int8_t EspNowBroadcastEngine::getWifiTxPower() const {
     return 78;
 }
 
-uint8_t EspNowBroadcastEngine::scanAndSelectBestChannel(uint32_t dwell_ms_per_ch, bool auto_apply, bool print_results) {
-    WifiChannelScanResult results[14]; // Index 1..13
-    uint8_t best_ch = 1;
-    uint32_t lowest_score = 0xFFFFFFFF;
+/**
+ * Passive 802.11 survey of channels 1..13 and channel selection.
+ *
+ * Per channel: `score` from frames decoded on that channel (count, bytes, strength, 40 MHz use).
+ * Then `adj_score` = score + overlap-weighted scores of channels within +/-4, because a 20 MHz
+ * channel also suffers from neighbours whose frames are not decodable on it (e.g. APs on ch 6
+ * still raise the noise floor on ch 9-10 while ch 10 itself decodes nothing).
+ *
+ * @param dwell_ms_per_ch  Listen time per channel (ms); >= 205 ms covers two beacon intervals.
+ * @param auto_apply       Switch the radio to the selected channel (else restore m_wifi_channel).
+ * @param print_results    Print the survey table to the console.
+ * @param preferred_ch     0: select the lowest adj_score. 1..13: keep this channel unless its
+ *                         adj_score > CONFIG_VSAF_CHANNEL_BUSY_SCORE, then fall back to the lowest.
+ * @return Selected channel (1..13).
+ */
+uint8_t EspNowBroadcastEngine::scanAndSelectBestChannel(uint32_t dwell_ms_per_ch, bool auto_apply, bool print_results,
+                                                        uint8_t preferred_ch) {
+    WifiChannelScanResult results[14] = {}; // Index 1..13
 
     wifi_promiscuous_filter_t filter = { .filter_mask = WIFI_PROMIS_FILTER_MASK_ALL };
     esp_wifi_set_promiscuous_filter(&filter);
@@ -603,38 +730,60 @@ uint8_t EspNowBroadcastEngine::scanAndSelectBestChannel(uint32_t dwell_ms_per_ch
         if (results[ch].has_40mhz) {
             score += 150;
         }
-        // Non-overlapping channel bonus (1, 6, 11)
-        if ((ch == 1 || ch == 6 || ch == 11) && score > 5) {
-            score -= 5;
-        }
         results[ch].score = score;
-
-        if (score < lowest_score) {
-            lowest_score = score;
-            best_ch = ch;
-        }
     }
 
     esp_wifi_set_promiscuous(false);
     esp_wifi_set_promiscuous_rx_cb(nullptr);
 
+    // Overlap weighting: channels are 5 MHz apart, 20 MHz wide -> neighbours up to +/-4 overlap.
+    static constexpr uint32_t kOverlapPct[5] = {100, 60, 35, 15, 5};
+    uint8_t best_ch = 1;
+    uint32_t lowest_score = 0xFFFFFFFF;
+    for (int ch = 1; ch <= 13; ++ch) {
+        uint32_t adj = 0;
+        for (int d = -4; d <= 4; ++d) {
+            int n = ch + d;
+            if (n >= 1 && n <= 13) {
+                adj += (results[n].score * kOverlapPct[d < 0 ? -d : d]) / 100;
+            }
+        }
+        results[ch].adj_score = adj;
+        if (adj < lowest_score) {
+            lowest_score = adj;
+            best_ch = static_cast<uint8_t>(ch);
+        }
+    }
+
+    const char* reason = "cleanest channel";
+    if (preferred_ch >= 1 && preferred_ch <= 13) {
+        if (results[preferred_ch].adj_score <= CONFIG_VSAF_CHANNEL_BUSY_SCORE) {
+            best_ch = preferred_ch;
+            lowest_score = results[preferred_ch].adj_score;
+            reason = "preferred channel, not busy";
+        } else {
+            reason = "preferred channel busy -> cleanest channel";
+        }
+    }
+
     if (print_results) {
         print_console("\n================================= 802.11 RF SPECTRUM SURVEY =================================\n");
-        print_console(" Ch | Packets |   Bytes | Max RSSI | Avg RSSI | 40MHz | Score | Cleanliness Rating\n");
-        print_console("----+---------+---------+----------+----------+-------+-------+------------------------------\n");
+        print_console(" Ch | Packets |   Bytes | Max RSSI | Avg RSSI | 40MHz | Score |   Adj | Rating (by Adj)\n");
+        print_console("----+---------+---------+----------+----------+-------+-------+-------+-----------------------\n");
         for (uint8_t ch = 1; ch <= 13; ++ch) {
             const char* rating = "CLEAN";
-            if (results[ch].score == 0) rating = "PERFECT (Silent)";
-            else if (results[ch].score < 50) rating = "EXCELLENT";
-            else if (results[ch].score < 150) rating = "GOOD";
-            else if (results[ch].score < 350) rating = "MODERATE NOISE";
+            const uint32_t adj = results[ch].adj_score;
+            if (adj == 0) rating = "PERFECT (Silent)";
+            else if (adj < 50) rating = "EXCELLENT";
+            else if (adj < 150) rating = "GOOD";
+            else if (adj < 350) rating = "MODERATE NOISE";
             else rating = "CONGESTED";
 
             char sel_mark[20] = "";
             if (ch == best_ch) {
                 snprintf(sel_mark, sizeof(sel_mark), " <-- SELECTED");
             }
-            print_console(" %2u | %7lu | %6luB |  %4d dBm |  %4d dBm |  %3s  | %5lu | %-16s%s\n",
+            print_console(" %2u | %7lu | %6luB |  %4d dBm |  %4d dBm |  %3s  | %5lu | %5lu | %-16s%s\n",
                           ch,
                           (unsigned long)results[ch].packet_count,
                           (unsigned long)results[ch].byte_count,
@@ -642,12 +791,13 @@ uint8_t EspNowBroadcastEngine::scanAndSelectBestChannel(uint32_t dwell_ms_per_ch
                           results[ch].avg_rssi,
                           results[ch].has_40mhz ? "YES" : "No",
                           (unsigned long)results[ch].score,
+                          (unsigned long)adj,
                           rating,
                           sel_mark);
         }
         print_console("==============================================================================================\n");
-        print_console("[RF SNIFFER] Cleanest Wi-Fi channel: Channel %u (Score: %lu)\n\n",
-                      best_ch, (unsigned long)lowest_score);
+        print_console("[RF SNIFFER] Selected Wi-Fi channel: %u (Adj score %lu, %s; busy threshold %d)\n\n",
+                      best_ch, (unsigned long)lowest_score, reason, CONFIG_VSAF_CHANNEL_BUSY_SCORE);
     }
 
     if (auto_apply) {
@@ -1067,6 +1217,9 @@ void EspNowBroadcastEngine::runAudioDspLoop() {
             continue;
         }
 
+        // Console channel/PHY requests are applied here, between bursts, never mid-burst
+        applyPendingRadioChanges();
+
         if (m_state.load(std::memory_order_acquire) != NetworkState::CAST) {
             continue;
         }
@@ -1292,6 +1445,8 @@ void EspNowBroadcastEngine::runAudioDspLoop() {
                         m_consecutive_tx_timeouts = 0;
                         if (s_last_tx_status.load(std::memory_order_relaxed) != ESP_NOW_SEND_SUCCESS) {
                             m_tx_fail_count++;
+                        } else {
+                            m_tx_ok_in_window++;
                         }
                     } else {
                         m_tx_timeout_count++;
@@ -1303,12 +1458,21 @@ void EspNowBroadcastEngine::runAudioDspLoop() {
                 }
             } else {
                 m_tx_mac_error_count++;
+                m_consecutive_send_errors++;
+                m_last_tx_err.store(static_cast<int32_t>(send_err), std::memory_order_relaxed);
+                if (send_err == ESP_ERR_ESPNOW_NO_MEM) {
+                    m_tx_err_no_mem++;
+                }
             }
 
-            m_peers[ch].packets_sent++;
-            m_tx_packets_this_sec++;
-            m_tx_packets_total++;
-            m_tx_packets_sec++;
+            if (send_err == ESP_OK) {
+                // Count only packets the driver accepted (a failed send used to count as "sent")
+                m_consecutive_send_errors = 0;
+                m_peers[ch].packets_sent++;
+                m_tx_packets_this_sec++;
+                m_tx_packets_total++;
+                m_tx_packets_sec++;
+            }
 
             // Check deadline AFTER send: only abort remaining channels if time is exhausted
             int64_t elapsed_us = esp_timer_get_time() - frame_start_us;
@@ -1322,6 +1486,25 @@ void EspNowBroadcastEngine::runAudioDspLoop() {
         float tx_ms = (tx_t1 - tx_t0) / 1000.0f;
         m_tx_duration_buf.push(tx_ms);
 
+        // TX path health: a healthy CAST completes hundreds of broadcasts per window; zero means wedged.
+        // Also physically impossible sweeps: 6 x 248 B broadcasts need >= ~0.9 ms of airtime even at MCS3,
+        // so a whole window of sub-0.5 ms sweeps means nothing reached the air (the 2026-10-24 wedge: ~0.12 ms).
+        if (tx_ms < TX_MIN_PLAUSIBLE_SWEEP_MS) {
+            m_tx_fast_frames++;
+        }
+        if (m_consecutive_send_errors >= TX_MAX_CONSECUTIVE_ERRORS) {
+            recoverEspNowTx("consecutive esp_now_send() errors");
+        } else if (++m_tx_window_frames >= TX_HEALTH_WINDOW_FRAMES) {
+            if (m_tx_ok_in_window == 0) {
+                recoverEspNowTx("no successful TX completion in 0.5 s");
+            } else if (m_tx_fast_frames >= TX_HEALTH_WINDOW_FRAMES) {
+                recoverEspNowTx("implausibly fast TX sweeps (< 0.5 ms) for 0.5 s");
+            }
+            m_tx_ok_in_window = 0;
+            m_tx_window_frames = 0;
+            m_tx_fast_frames = 0;
+        }
+
         float total_core1_ms = (tx_t1 - frame_start_us) / 1000.0f;
         m_codec_duration_buf.push(total_core1_ms);
         m_audio_meter.pushFramePcm(m_pcm_left_hp, samples, 1);
@@ -1332,8 +1515,19 @@ void EspNowBroadcastEngine::runAudioDspLoop() {
 }
 
 void EspNowBroadcastEngine::handleTxSubsystemHang() {
-    ESP_LOGE(TAG, "Wi-Fi Baseband TX hang detected (%lu consecutive frame timeouts)! Resetting MAC state...",
-             (unsigned long)m_consecutive_tx_timeouts);
+    // Runs inside the real-time TX loop and can trigger many times per second on a busy channel:
+    // log at most once per second (formatting + CDC output per event used to cost frame budget).
+    static int64_t s_last_log_us = 0;
+    static uint32_t s_suppressed = 0;
+    int64_t now_us = esp_timer_get_time();
+    if (now_us - s_last_log_us >= 1000000) {
+        ESP_LOGW(TAG, "TX-done not received for %lu consecutive packets (%lu more such events in the last second)",
+                 (unsigned long)m_consecutive_tx_timeouts, (unsigned long)s_suppressed);
+        s_last_log_us = now_us;
+        s_suppressed = 0;
+    } else {
+        s_suppressed++;
+    }
     // Deterministic placeholder recovery: Purge semaphore and replenish token
     if (s_tx_done_sem) {
         xSemaphoreTake(s_tx_done_sem, 0);
