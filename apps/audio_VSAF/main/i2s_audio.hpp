@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <atomic>
+#include "esp_timer.h"
 
 namespace Hardware {
 
@@ -71,6 +72,32 @@ public:
     // Called from DMA on_sent ISR
     void notifyDmaSlotFreeFromISR(BaseType_t* high_task_wakeup);
 
+    // Called from DMA on_sent ISR: one DMA descriptor (one frame of samples) finished playing
+    inline void IRAM_ATTR onDescriptorSentFromISR() {
+        portENTER_CRITICAL_ISR(&m_sent_mux);
+        m_desc_sent++;
+        m_last_sent_us = static_cast<uint32_t>(esp_timer_get_time());
+        portEXIT_CRITICAL_ISR(&m_sent_mux);
+    }
+
+    /**
+     * @brief Samples played by the I2S hardware since start() (per channel).
+     *
+     * Completed DMA descriptors x descriptor size, plus the part of the current descriptor played since the
+     * last completion (interpolated with esp_timer, at most one descriptor). Re-anchored on every completion,
+     * so no sample-rate assumption accumulates. Includes zero-filled descriptors played during a DMA underrun.
+     */
+    int64_t getPlayedSamples() {
+        portENTER_CRITICAL(&m_sent_mux);
+        uint32_t sent = m_desc_sent;
+        uint32_t last_us = m_last_sent_us;
+        portEXIT_CRITICAL(&m_sent_mux);
+        uint32_t elapsed_us = static_cast<uint32_t>(esp_timer_get_time()) - last_us;  // 32-bit modular, wrap safe
+        int64_t frac = (static_cast<int64_t>(elapsed_us) * m_sample_rate) / 1000000;
+        if (frac > m_dma_frame_samples) frac = m_dma_frame_samples;
+        return static_cast<int64_t>(sent) * m_dma_frame_samples + frac;
+    }
+
     bool isRunning() const { return m_is_running; }
     bool isInitialized() const { return m_tx_handle != nullptr; }
 
@@ -97,6 +124,11 @@ private:
     i2s_data_bit_width_t m_bits_per_sample = I2S_DATA_BIT_WIDTH_16BIT;
     i2s_slot_mode_t m_slot_mode = I2S_SLOT_MODE_STEREO;
     std::atomic<uint32_t> m_underrun_count{0};
+    // DMA descriptor completions since start() (ISR writes, SINK task reads under m_sent_mux)
+    portMUX_TYPE m_sent_mux = portMUX_INITIALIZER_UNLOCKED;
+    uint32_t m_desc_sent = 0;
+    uint32_t m_last_sent_us = 0;
+    uint32_t m_dma_frame_samples = 480;
 };
 
 } // namespace Hardware

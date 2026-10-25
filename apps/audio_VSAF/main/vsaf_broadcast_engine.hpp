@@ -281,7 +281,7 @@ public:
     bool isChannelLocked() const { return m_channel_locked.load(std::memory_order_acquire); }
     void lockChannel(bool locked) { m_channel_locked.store(locked, std::memory_order_release); }
     esp_err_t setWifiTxPower(int8_t power_0_25dbm);
-    int8_t getWifiTxPower() const;
+    int8_t getWifiTxPower() const;  // TX power readback (0.25 dBm units, = requested), cached at the last change
 
     // Multi-Channel Target Selection (SINK node: 0: Left, 1: Right, 5: Subwoofer)
     void setTargetChannel(uint8_t channel_id);
@@ -333,6 +333,38 @@ public:
 
     uint32_t getFifoOverflowCount() const { return m_fifo_overflows.load(std::memory_order_relaxed); }
     uint32_t getFifoUnderrunCount() const { return m_fifo_underflows.load(std::memory_order_relaxed); }
+
+    // SINK clock-drift compensation (single-sample insert / drop, see runSinkLoop)
+    struct SinkDriftStats {
+        uint32_t depth_avg_x10;   // buffered audio (FIFO + I2S DMA queue) after pop, window average (frames x 10)
+        uint32_t depth_min;       // minimum FIFO depth (FIFO only) in the window (frames)
+        uint32_t depth_n;         // frames in the window (0 = not streaming)
+        int32_t  adj_window;      // net corrections in the window (+ inserted, - dropped samples)
+        int32_t  adj_total;       // net corrections since STREAM start
+        uint32_t frames_played;   // frames played since STREAM start
+        int32_t  target_x10;      // learned target depth (frames x 10), -1 until learned
+        bool     enabled;
+    };
+    /**
+     * @brief Snapshot and reset the per-window SINK FIFO / drift statistics (called by the 1 s heartbeat).
+     */
+    void takeSinkDriftStats(SinkDriftStats& out) {
+        uint32_t sum = m_fifo_depth_sum.exchange(0, std::memory_order_relaxed);
+        out.depth_n = m_fifo_depth_n.exchange(0, std::memory_order_relaxed);
+        out.depth_min = m_fifo_depth_min.exchange(UINT32_MAX, std::memory_order_relaxed);
+        out.depth_avg_x10 = out.depth_n ? (sum + out.depth_n * 5) / (out.depth_n * 10) : 0;  // sum in frames x 100
+        int32_t total = m_drift_adj_total.load(std::memory_order_relaxed);
+        out.adj_window = total - m_drift_adj_reported;
+        m_drift_adj_reported = total;
+        out.adj_total = total;
+        out.frames_played = m_frames_played.load(std::memory_order_relaxed);
+        out.target_x10 = m_drift_target_x10.load(std::memory_order_relaxed);
+        out.enabled = m_drift_corr_enabled.load(std::memory_order_relaxed);
+    }
+    template <typename T> static size_t driftInsertSample(T* x, size_t n);
+    template <typename T> static size_t driftDropSample(T* x, size_t n);
+    void setDriftCorrection(bool on) { m_drift_corr_enabled.store(on, std::memory_order_relaxed); }
+    bool getDriftCorrection() const { return m_drift_corr_enabled.load(std::memory_order_relaxed); }
     uint32_t getAndResetFifoOverflowCount() { return m_fifo_overflows.exchange(0, std::memory_order_relaxed); }
     uint32_t getAndResetFifoUnderrunCount() { return m_fifo_underflows.exchange(0, std::memory_order_relaxed); }
 
@@ -619,6 +651,15 @@ private:
 
     std::atomic<uint32_t>      m_plc_count;
     std::atomic<uint32_t>      m_fifo_underflows;
+    // SINK drift compensation state / telemetry (written by the SINK task, read by the heartbeat)
+    std::atomic<uint32_t>      m_fifo_depth_sum{0}, m_fifo_depth_n{0}, m_fifo_depth_min{UINT32_MAX};
+    std::atomic<int32_t>       m_drift_adj_total{0};      // + inserted / - dropped samples since STREAM start
+    int32_t                    m_drift_adj_reported = 0;  // heartbeat-side copy for the per-window delta
+    std::atomic<uint32_t>      m_frames_played{0};
+    std::atomic<int32_t>       m_drift_target_x10{-1};
+    std::atomic<bool>          m_drift_corr_enabled{true};
+    // Wi-Fi TX power, read back from ESP-IDF once per change (setWifiTxPower), never polled
+    std::atomic<int8_t>        m_tx_power_req_qdbm{0};     // 0.25 dBm units
     std::atomic<uint32_t>      m_fifo_overflows;
     std::atomic<uint32_t>      m_redundancy_recovered_packets{0};
     uint8_t                    m_last_rx_seq;

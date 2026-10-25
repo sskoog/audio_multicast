@@ -10,6 +10,7 @@ static IRAM_ATTR bool i2s_dma_tx_done_cb(i2s_chan_handle_t handle, i2s_event_dat
     auto* driver = static_cast<I2sAudioDriver*>(user_ctx);
     BaseType_t high_task_wakeup = pdFALSE;
     if (driver) {
+        driver->onDescriptorSentFromISR();
         driver->notifyDmaSlotFreeFromISR(&high_task_wakeup);
     }
     return high_task_wakeup == pdTRUE;
@@ -165,6 +166,7 @@ esp_err_t I2sAudioDriver::reconfigureAudioFormat(uint32_t sample_rate, i2s_data_
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     chan_cfg.dma_desc_num = 2; // Strictly 2 descriptors (Dual-descriptor ping-pong)
     chan_cfg.dma_frame_num = frame_samples;
+    m_dma_frame_samples = frame_samples;
     chan_cfg.auto_clear = true;
 
     esp_err_t ret = i2s_new_channel(&chan_cfg, &m_tx_handle, nullptr);
@@ -259,6 +261,10 @@ esp_err_t I2sAudioDriver::start() {
     if (m_dma_free_sem) {
         xSemaphoreTake(m_dma_free_sem, 0); // Clear any stale tokens
     }
+    portENTER_CRITICAL(&m_sent_mux);
+    m_desc_sent = 0;
+    m_last_sent_us = static_cast<uint32_t>(esp_timer_get_time());
+    portEXIT_CRITICAL(&m_sent_mux);
     esp_err_t ret = i2s_channel_enable(m_tx_handle);
     if (ret == ESP_OK) {
         m_is_running = true;

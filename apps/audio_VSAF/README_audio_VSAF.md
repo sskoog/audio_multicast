@@ -11,7 +11,7 @@ Main building blocks:
 3. **Dual-rate LC3 encoding (`liblc3_dual`)** (section 5): HQ and MQ frames of a channel share one LC3 analysis; MQ only adds a quantization pass. Output is bit-exact with two separate encoders.
 4. **Commanded round-robin SINK telemetry**: bit 7 (`REQ_ACK`) of `packet_flags` grants exactly one SINK an uplink reply per 10 ms frame; that packet is sent last in the burst so the reply never collides with the downlink.
 5. **Self-healing radio**: TX-done timeouts, ESP-NOW queue exhaustion and implausible completions are detected and repaired by re-initialising ESP-NOW (section 4.4). Channel and PHY changes are applied only at frame boundaries with the radio idle.
-6. **Fixed channel 13 at boot** (`CONFIG_VSAF_PREFERRED_WIFI_CHANNEL`), boot survey off by default (`CONFIG_VSAF_BOOT_CHANNEL_SCAN`). Default PHY HT20 MCS3, TX power +3 dBm.
+6. **Fixed channel 13 at boot** (`CONFIG_VSAF_PREFERRED_WIFI_CHANNEL`), boot survey off by default (`CONFIG_VSAF_BOOT_CHANNEL_SCAN`). SINKs start their search on the same channel and stream ~0.35-0.5 s after power-on. Default PHY HT20 MCS3, TX power 10 dBm on all nodes (`CONFIG_VSAF_TX_POWER_QDBM`).
 7. **Hardware timer pacing**: the 10 ms frame tick is an `esp_timer` periodic callback with direct task notifications, never FreeRTOS tick delays.
 
 ```
@@ -26,7 +26,7 @@ Main building blocks:
                   |  Round-robin telemetry collector, RTT / offset      |
                   +-------------------------+---------------------------+
                                             |
-                 802.11 broadcast, ch 13    |  HT20 MCS3 (default), +3 dBm
+                 802.11 broadcast, ch 13    |  HT20 MCS3 (default), 10 dBm
                  no ACKs, 6 packets / 10 ms |  downlink + 1 commanded uplink reply
                                             |
         +-------------------+---------------+-------------------+-------------------+
@@ -304,6 +304,19 @@ When packets arrive at the SINK:
 
 The SINK decoder adapts to the frame size per frame (120 B HQ vs 60 B redundancy) while keeping its MDCT overlap state. Playout is FIFO driven: a SINK leaves `SCANNING` after a prefill of 5 frames (50 ms: 2 in DMA, 3 in the FIFO).
 
+### 5.3 SINK clock-drift compensation (single-sample insert / drop)
+
+Each SINK plays out on its own crystal, the SOURCE produces frames on its own. Without correction a SINK whose clock runs a few ppm fast slowly empties its FIFO (and a slow one fills it). Once the cushion is gone, every late or lost packet that redundancy would have repaired turns into a FIFO underrun + PLC (seen in the first 15-minute soak test, section 10).
+
+`runSinkLoop()` therefore holds the **total buffered audio** constant: frames in the FIFO plus samples still queued in the I2S DMA.
+1. After every frame pop: buffered = FIFO frames x 480 + (samples written to I2S - samples played). Samples played come from the DMA `on_sent` interrupt (completed 480-sample descriptors, plus the part of the current descriptor since the last completion), so the measure is re-anchored by hardware every 10 ms and does not depend on an assumed sample rate. If a DMA underrun plays zero-filled descriptors, the written count is rebased.
+2. The value is filtered with an EMA in Q16 fixed point (time constant 256 frames, ~2.6 s).
+3. 3 s after entering `STREAM` the filtered value becomes the target (at least 2 frames; typically ~4: 2 in the FIFO, ~2 in the DMA).
+4. If the filtered value is more than 0.5 frame below the target (SINK clock fast), one interpolated sample is inserted into the decoded frame (481 samples played); more than 0.5 frame above (SINK clock slow), two neighbours are merged (479 samples). The edit point is the smoothest spot of the frame (smallest sample-to-sample step), so a single sample in 480 is inaudible.
+5. At most one correction per 16 frames, i.e. up to ~130 ppm of correction range; ESP32 crystals differ by tens of ppm.
+
+`i2s_channel_write()` streams across the two DMA descriptors, so 479 / 481-sample writes need no change to the I2S setup. They do shift the write phase against the descriptors, which moves up to a whole frame between the DMA queue and the FIFO. That is why the controller must not look at the FIFO depth alone: the first version did, and every single inserted sample made the FIFO depth jump by one frame (section 10). The net number of corrections divided by the samples played is the SINK's clock offset against the SOURCE, printed in the heartbeat as `ppm` (positive = SINK clock fast). `driftcorr 0` disables the correction to observe the free-running drift.
+
 ---
 
 ## 6. Round-Trip Time and Clock Offset
@@ -332,13 +345,19 @@ The SINK decoder adapts to the frame size per frame (120 B HQ vs 60 B redundancy
 2. **Master-slave clock offset**: `clock_offset_us = ((t_dwell_us) - (t_rx2 - t_tx1)) / 2`
 3. The SINK smooths the offset with an EMA (`EMA_offs`) and a rolling median (`RB_med`).
 
-**Status:** these values are telemetry today. SINK playout does not yet use them (it is FIFO driven), and there is no sample-clock correction between SINK crystals. The inter-speaker sync target (GOALS.md: within a few samples, held over long sessions) has not been measured yet; earlier claims of +/- 10 us alignment are unverified.
+**Status:** these values are telemetry today. SINK playout does not yet use them (it is FIFO driven). The drift compensation of section 5.3 keeps every SINK's FIFO depth (and thus its latency) constant, but it does not align the SINKs to a common presentation time. The inter-speaker sync target (GOALS.md: within a few samples, held over long sessions) has not been measured yet; earlier claims of +/- 10 us alignment are unverified.
 
 ---
 
 ## 7. Interactive CLI Console Commands
 
 USB serial on all nodes (**COM116** for the SOURCE, **COM4** / **COM5** / **COM23** / **COM24** for the SINKs), 115200 baud. Open ports with DTR/RTS low (see the `esp32-usb-serial-debug` skill).
+
+How each node reads its console:
+- **SOURCE (S3, Node 16):** TinyUSB CDC (COM116).
+- **S3 SINKs (Nodes 4, 5):** the USB-Serial-JTAG port is configured as a secondary, output-only console (the S3 SOURCE needs the USB PHY for TinyUSB), so the CLI task reads the USB-Serial-JTAG RX FIFO directly. Before 2026-10-25 these SINKs ignored all console input.
+- **C6 SINKs:** USB-Serial-JTAG primary console (`stdin`), non-blocking.
+- On all nodes, output written while no program has the port open is dropped once the 64-byte USB FIFO is full, so the first line after opening a port can start mid-line. That is expected, not a stall.
 
 ### 7.1 Audio and network
 
@@ -358,19 +377,26 @@ USB serial on all nodes (**COM116** for the SOURCE, **COM4** / **COM5** / **COM2
 | `scan` / `survey` | SOURCE | Passive channel survey 1..13 (refused while casting). |
 | `wifich <1..13>` / `channel` | SOURCE / SINK | Set Wi-Fi channel (SOURCE: applied at the next frame boundary). |
 | `phy <mode>` | SOURCE | TX PHY rate (default HT20 MCS3), applied at the next frame boundary. |
-| `txp` / `txpower <dBm>` | Both | TX power (default +3 dBm). |
+| `txp` / `txpower <dBm>` | Both | TX power in dBm (2..20 or `max`; default 10 dBm). The reply shows ESP-IDF's readback, taken once right after the change. The radio quantizes the setting to fixed levels and no public API reports the applied level (section 10). The SOURCE heartbeat `GAIN` column shows the same cached value; nothing is polled. |
 | `ch <0..5>` | SINK | Switch the received audio channel. |
+| `driftcorr 0\|1` | SINK | Clock-drift compensation off / on (default on, section 5.3). |
 | `clear` / `cls` | Both | Reset frame, PLC and error counters. |
 | `bootloader` / `download` | Both | Reboot into the ROM bootloader for flashing (Node 16: also triggered by the 1200-baud touch). |
 | `reboot` / `reset` | Both | Software restart. |
 
-### 7.2 SOURCE timing and debug
+### 7.2 Diagnostics on every node
+
+| Command | Description |
+| :--- | :--- |
+| `txstat` | Channel (set / radio), PHY, TX power setting, recoveries, send errors (incl. `no_mem`, last error), TX-done timeouts, status failures, deadline drops. |
+| `usjdiag` | USB-Serial-JTAG console health: console writes accepted / rejected (EIO = firmware believes no host is connected), bytes received, seconds connected / disconnected, connection changes. Kept in RTC memory: after a chip reset (not a power-on) the `previous session` line shows the counters of the session before the reset, e.g. of a stalled console. |
+
+### 7.3 SOURCE timing and debug
 
 | Command | Description |
 | :--- | :--- |
 | `timing` | Per-stage table of the last 1 s window (avg / max / count): DSP, LC3 HQ / MQ / sub job times, TX submit -> TX-done, TX-done -> `src_rf` wake, `esp_now_send()` CPU, radio idle gap between packets, first submit, TX end, all jobs done, encode CPU per core; plus overruns, cancelled jobs, MQ missing / waits, deadline skips, TX timeouts, `src_rf` wakes and active time per frame, heap. |
 | `tasks` | CPU per FreeRTOS task over 1 s (run-time stats; interrupt time counts against the interrupted task). |
-| `txstat` | Channel, PHY, TX power, recoveries, send errors (incl. `no_mem`, last error), TX-done timeouts, status failures, deadline drops. |
 | `mem` | Internal heap free / min / largest block, pipeline task creation report, stack high-water marks. |
 | `log` | Dump the 4 KB RAM ring of recent `ESP_LOG` output (boot messages are kept even before USB enumerates). |
 | `encbench [0\|1] [irq]` | LC3 micro-benchmark on core 0 or 1 in a top-priority task: HQ, MQ, sub and dual-rate encode cost per test signal, plus the dual-rate bit-exactness check. `irq` leaves interrupts enabled (difference = interrupt load). |
@@ -394,23 +420,15 @@ Nodes print fixed-width 1 s heartbeats over USB serial. Test scripts parse these
 - `TXend`: when the frame's last packet finished on air, in ms after the frame tick. This is the critical path; it must stay below the 9.5 ms deadline. It is not CPU time and must not be added to the other stages.
 - `CPU %`: (DSP + EncHQ + EncRed) / (2 cores x 10 ms).
 
-### 8.2 SINK Telemetry - Node 4 (COM4 - Left Channel, PCM5102A 24-bit, -20 dB Post-Gain)
+### 8.2 SINK Telemetry (Node 4 shown: S3, PCM5102A, -20 dB post-gain; C6 SINKs print the same columns)
 ```text
-+=================================================================== ESP32-S3-04-LEFT [SINK] ====================================================================+
-|    CPU      | STATE |  CHAN  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | AMP dB   PKTS  RED  PLC  DMA   FIFO    |         TIME & SYNCHRONIZATION (ms)    |
-|  %   C  MHz |       |        | RSSI Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  SW  HW   1/s  rec  tot  UDR   UDR     |  Local  Master  EMA_offs RB_med RB_rng |
-|  6  47  240 | STRM  | LEFT   |  -50 10 HT0 |  LC3  -33.4 -28.0    48   10  0.62  1.33 | -20   -   100   20    0    0     0    |   7996  127283   +1192   +1192   5.66  |
+|    CPU      | STATE |  CHAN  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | AMP dB   PKTS  RED PLC DMA OVF UDR   | BUF+DMA   DRIFT CORR |         TIME & SYNCHRONIZATION (ms)    |
+|  %   C  MHz |       |        | RSSI Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  SW  HW   1/s  rec tot UDR ovf udr   |  buf min adj    ppm  |  Local  Master  EMA_offs RB_med RB_rng |
+|  4  48  240 | STRM  | LEFT   |  -53 13 HT0 |  LC3    off   off    48   10  0.40  0.49 | -20   -    99   12   0   0   0   0  |  3.9   2   +0   +0.0 |  20050   14585   -5693   -5693   0.38  |
 ```
-
-### 8.3 SINK Telemetry - Node 23 (COM23 - Center Channel, MAX98357A, +3 dB Gain)
-```text
-+=================================================================== ESP32-C6-23-CNTR [SINK] ====================================================================+
-|    CPU      | STATE |  CHAN  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | AMP dB   PKTS  RED  PLC  DMA   FIFO    |         TIME & SYNCHRONIZATION (ms)    |
-|  %   C  MHz |       |        | RSSI Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  SW  HW   1/s  rec  tot  UDR   UDR     |  Local  Master  EMA_offs RB_med RB_rng |
-| 12  46  160 | STRM  | CNTR   |  -51 10 HT0 |  LC3  -33.5 -27.6    48   10  1.24  1.53 |   0  +3    99   12    0    0     0    |   8058  127373   +1193   +1193   6.07  |
-```
-
-The SINK `RED`, `PLC`, `DMA` and `UDR` counters print modulo 1000; `soak_test.py` unwraps them.
+- `RED`: frames recovered from redundancy; `PLC`: concealed frames (each one counts against the zero-glitch target); `DMA` / `OVF` / `UDR`: I2S DMA underruns, FIFO overflows (drops above 18 frames), FIFO underruns. Running totals, printed modulo 1000 (`soak_test.py` unwraps them).
+- `buf`: buffered audio after each frame pop, FIFO + I2S DMA queue, 1 s average (frames; ~4 in steady state). `min`: lowest FIFO depth (FIFO only) in the last second.
+- `DRIFT CORR adj`: net clock-drift corrections in the last second (+ inserted, - dropped samples; `lrn` while the target is being learned, `off` when disabled). `ppm`: SINK clock offset against the SOURCE since STREAM start, from the net corrections (+ = SINK clock fast).
 
 ---
 
@@ -448,8 +466,12 @@ Node 16 has no PSRAM (512 KB SRAM), so internal RAM and the shared flash cache a
 | Wi-Fi static RX buffers (SOURCE) | 6 (SINK 32) | The SOURCE receives only telemetry replies. Set in `vsaf_broadcast_engine.cpp`. |
 | AMPDU TX/RX, SoftAP, WPA3 / OWE, Enterprise | off | ESP-NOW broadcast in STA mode needs none of them (-3.5 KB heap). |
 | Task stacks | `src_rf` 4 KB, `src_enc1` 5 KB, `src_dsp0` 6 KB | Sized from measured high-water marks (`mem`). |
+| `CONFIG_VSAF_TX_POWER_QDBM` (`config.h`, all nodes) | 40 (10 dBm requested) | Moderate on purpose: SOURCE heating (600 packets/s) and future battery SINKs. The old value 12 ("+3 dBm") actually transmitted at 2 dBm. |
+| `CONFIG_VSAF_SCAN_DWELL_MS` / `CONFIG_VSAF_SCAN_HOLD_MS` (`config.h`, SINK) | 30 ms / 3000 ms | Channel search from the preferred channel upward, and the hold on the last channel after a stream loss (section 10). |
 
 Free internal heap with all pipeline tasks running: ~30 KB (largest block 16 KB).
+
+On the C6 (`sdkconfig.c6`) `CONFIG_LC3_CODE_IN_IRAM` is off: the C6 SINKs decode with Espressif's fixed-point codec and must not link liblc3 at all. All SOURCE-only liblc3 code (`encbench`) is compiled for the S3 only; a stray reference once pulled ~100 KB of LC3 code and tables into C6 internal RAM, and `esp_wifi_init()` then failed with `ESP_ERR_NO_MEM` in a boot loop.
 
 ---
 
@@ -519,8 +541,78 @@ Soak test after all changes (3 min, Nodes 4, 5, 23, 24): **0 PLC, 0 underruns** 
 
 Also today: fixed channel 13 at boot with the boot survey off, self-healing ESP-NOW TX and frame-boundary radio changes, Node 16 ROM-bootloader reboot via `esp_rom_software_reset_system()` (an `esp_restart()` from the TinyUSB callback used to hang the board), hands-free Node 16 flashing identified by MAC, and the `soak_test.py` / `usb_audio_streamer.py` reliability test.
 
+### 2026-10-24 (evening): 15-minute soak tests and SINK drift compensation
+
+1. **First 15-minute soak on the new SOURCE: FAIL** (Node 4: 9 PLC, Node 24: 7 PLC, Nodes 5 / 23: 0). The SOURCE was clean (0 frames skipped, TX end 4.4 ms). Every PLC was a single event paired with exactly one FIFO underrun, at a normal 99-100 packets/s, on the two SINKs with the weakest links (0.9 % / 0.6 % loss). The SINKs had been streaming for ~20 min before the window, so the most likely cause was clock drift emptying the 30 ms FIFO cushion; with an empty FIFO a late or lost packet can no longer be repaired from the next packet's redundancy in time.
+2. **FIFO-depth telemetry** added to the SINK heartbeat (section 8.2) and to `soak_test.py` (FIFO avg / min, net corrections, ppm per SINK).
+3. **Drift compensation** (section 5.3): single-sample insert / drop holds the FIFO depth at its start-up level.
+4. **C6 boot loop fixed**: the C6 SINKs had stopped booting (`esp_wifi_init()` out of memory) because the S3-only `encbench` code pulled liblc3 into the C6 image (section 9.1).
+5. **First version of the controller filtered the depth in Q8** with a `>> 8` EMA step, which cannot rise to a new level, so it never dropped samples. Fixed to Q16.
+
+| Soak test (15 min, Nodes 4 / 5 / 23 / 24, music over USB) | PLC | UDR | Corrections (net samples) | FIFO avg (frames) |
+| :--- | :--- | :--- | :--- | :--- |
+| No compensation, SINKs streaming ~20 min before the window | 9 / 0 / 0 / 7 | 9 / 0 / 0 / 7 | - | - |
+| Compensation with the Q8 filter (effectively inactive), fresh SINK start | 0 / 0 / 0 / 0 | 0 | +2 / +1 / +1 / +1 | 2.56 / 2.65 / 2.72 / 2.57 |
+| Compensation with the Q16 filter, fresh SINK start | **0 / 0 / 0 / 0** | **0** | +1 / **-62** / 0 / +1 | **2.02 / 2.06 / 1.98 / 1.88** |
+
+Observations:
+- With the working controller the FIFO depth stays at its learned target (~2 frames after pop) on all SINKs; without it the depth wandered by a whole frame within minutes.
+- The depth does not only drift slowly. Besides slides of about one frame over 6-12 minutes (on the order of 10-25 ppm), it sometimes stepped by a full frame within a minute. **Cause: the controller itself.** All 9 up-steps in both runs fell in the same second as an inserted sample (`adj=+1`), with normal packet rate and redundancy counts (so no SOURCE-side frame loss: a skipped packet is recovered from redundancy without changing the depth, and a lost frame tick would step the depth down, not up). After one 481-sample write, every following 480-sample write straddles two DMA descriptors, the SINK loop runs one descriptor later and the frame moves from the DMA queue into the FIFO: the FIFO depth jumps although the buffered audio did not change.
+- Fix: the controller now measures FIFO + I2S DMA queue (section 5.3). The DMA queue is samples written minus samples played, counted from the DMA `on_sent` interrupt.
+- The `ppm` column only counts corrections, so while the buffered audio stays inside the +/- 0.5 frame deadband it reads ~0; it becomes a drift measurement once corrections run continuously (long runs).
+
+**Counter rollover review** (all counters in the VSAF path checked): the 8-bit `seq`, the SINK clock offset and all display counters are wrap safe. One bug: the SOURCE computed RTT and clock offset as 64-bit `esp_timer` minus the echoed 32-bit `t_tx1_us`, so after 71.6 minutes of SOURCE uptime every telemetry reply failed the RTT filter (RTT frozen, offset garbage). Fixed with 32-bit modular subtraction.
+
+### 2026-10-25 (night): 80-minute soak with buffered-audio drift control and the RTT wrap fix
+
+80-minute window (chosen so the SOURCE crosses 71.6 min of uptime during the run), music over USB, ch 13, HT20 MCS3. **Result: FAIL** (Node 24: 108 PLC, Node 4: 6 PLC; Nodes 5 and 23: 0 PLC).
+
+| Node | RSSI | Loss (RED+PLC) | PLC | of which underruns | Buffered avg (frames) | Net corrections | Drift |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| 4 (L, S3) | -54 dBm | 0.73 % | 6 | 0 | 4.01 | +6 | ~0 ppm |
+| 5 (R, S3) | -45 dBm | 0.15 % | 0 | 0 | 4.09 | **-2116** | **-9.1 ppm** (SINK slow) |
+| 23 (C, C6) | -43 dBm | 0.06 % | 0 | 0 | 3.97 | -5 | ~0 ppm |
+| 24 (Sub, C6) | **-67 dBm** | **3.43 %** | 108 | 47 | 3.93 | -63 | -0.3 ppm |
+
+Findings:
+- **Drift control works.** Buffered audio stayed at ~4 frames on every SINK for 80 minutes. Node 5 needed 2116 dropped samples (one every ~2.3 s, -9.1 ppm), the others close to none. No PLC was caused by drift: Nodes 5 and 23 had zero, Node 4's six were sequence gaps (no underrun).
+- **RTT wrap fix works.** The SOURCE passed 71.6 min of uptime during the run and its RTT columns kept updating with normal values (~0.65-0.95 ms) to the end.
+- **Node 24 (sub) had a much weaker link than in the evening runs**: -64 to -68 dBm for the whole run against -58 to -60 dBm before, and ~4 lost packets per second. The node or its surroundings presumably changed. With that loss rate, bursts beyond the sub's 3-frame redundancy caused 61 gap PLCs, and 47 more were underruns.
+- **The FIFO cushion, not the redundancy depth, limits recovery.** A lost frame is only recovered when the next packet arrives. After 2-3 lost packets in a row, the 2 frames in the FIFO run out before the recovering packet comes, so the SINK conceals frames that redundancy would have restored 10-20 ms later. A deeper FIFO target (+1 to +2 frames, i.e. +10 to +20 ms latency) would let the full redundancy work. This is a latency trade-off against the < 50 ms soft target.
+- **Node 4's 6 PLC** are isolated bursts of 3+ lost packets at a normal -54 dBm (0.73 % loss).
+- **SOURCE**: 7 seconds below 590 packets/s, all in one 9-second episode around 9.5 minutes into the run (567-586 packets/s, TX end 4.3-5.0 ms). The CPU was fine, so this was likely a burst of RF contention (TX-done timeouts or deadline skips). The rest of the run was clean.
+
+### 2026-10-25: boot-to-streaming time and TX power
+
+**Boot time.** Measured with a hard reset (USB RTS) and the `reboot` command, 2-3 runs per SINK, device time since reset:
+
+| SINK | Reset | Before | After |
+| :--- | :--- | :--- | :--- |
+| 4, 5 (S3) | hard reset | 2.17 s | **0.35 s** |
+| 23, 24 (C6) | hard reset | 2.29 s | **0.47 s** |
+| 23, 24 (C6) | `reboot` command | 2.53 s | **0.71 s** |
+
+~80 % of the old time was the channel search: SINKs started on channel 1 and hopped every 150 ms, while the SOURCE sits on channel 13. Now SINKs start on `CONFIG_VSAF_PREFERRED_WIFI_CHANNEL` and hop upward with wrap (13 -> 1 -> 2 ...) with a 30 ms dwell (`CONFIG_VSAF_SCAN_DWELL_MS`; a full sweep takes ~0.4 s). After losing the stream a SINK keeps its channel for `CONFIG_VSAF_SCAN_HOLD_MS` (3 s) before sweeping. SOURCE reboot test: all SINKs detected the loss within 60 ms, held channel 13 and were streaming again 2.3 s after the reset request, limited only by the SOURCE's own boot. The remaining boot time is mostly the bootloader's image check (~250 ms on the C6), kept for robustness against flash corruption.
+
+**TX power.** `esp_wifi_set_max_tx_power()` is quantized (the documented table maps 8-19 -> 2 dBm, 34-43 -> 8.5 dBm, 44-51 -> 11 dBm, ...), so the old setting of 12 ("+3 dBm") actually transmitted at 2 dBm. `esp_wifi_get_max_tx_power()` returns the requested value on both S3 and C6, so the readback cannot confirm the radiated power. Measured instead through RSSI on the receiving side:
+- S3 (SOURCE): 2 -> 13 dBm raised the SINKs' RSSI by +7.5 to +10.5 dB, roughly as set.
+- C6 (Node 23): 2 -> 8.5 dBm raised its uplink by +14.5 dB, 8.5 -> 11 dBm by +5.7 dB, 11 -> 13 dBm by +0.8 dB. The C6 transmits far below nominal at the lowest settings, which explained most of its uplink / downlink asymmetry.
+
+New default for all nodes: 10 dBm requested (`CONFIG_VSAF_TX_POWER_QDBM` = 40), kept moderate for SOURCE heating and future battery SINKs. Result at 0.5 m: downlink -30 to -42 dBm, uplink -30 to -53 dBm, ~99 % of telemetry replies received.
+
+**TX power readback.** Neither `esp_wifi_get_max_tx_power()` (echoes the request) nor `wifi_country_t.max_tx_power` (always 20 dBm, the regulatory maximum) reports the applied level, on S3 and C6 alike. The firmware therefore reads the setting back once after each change and caches it for the heartbeat and `txstat`, labelled as the setting; the earlier per-heartbeat API call was removed.
+
+**Console findings and fixes.**
+- The S3 SINKs (Nodes 4, 5) accepted no console input, because on the S3 the USB-Serial-JTAG console is a secondary, output-only console. Fixed: the CLI task reads the USB-Serial-JTAG RX FIFO directly on S3 SINKs (section 7).
+- Node 24's console once stopped in both directions after repeated USB replugs, while audio kept working. esptool could still use the same port, and a chip reset cleared it, so the host side was alive. The leading suspect is ESP-IDF's "host connected" flag (both `read()` and `write()` fail with EIO while it is false), but the stall has not been reproduced yet. `usjdiag` (section 7.2) now records the evidence across a reset; a replug experiment is pending.
+
 ### Next steps
-- 15-minute soak test (zero-PLC target) on the final build; then longer runs.
+- Reproduce the C6 console stall with a replug experiment and fix it based on the `usjdiag` evidence.
+- Decide on a deeper SINK FIFO target (latency vs. recovery) and re-run.
+- Check Node 24's placement / antenna (RSSI 8 dB worse than in the evening runs).
+- Log `txstat` periodically during soaks to classify SOURCE packet-rate dips.
+- Longer soak runs (1 h+, including a SINK that has streamed for a long time) to confirm zero PLC with drift compensation.
+- Understand the one-frame FIFO depth steps; measure the real per-SINK drift (e.g. a run with `driftcorr 0` and the FIFO slope, or SOURCE/SINK timestamps).
 - Measure end-to-end latency, inter-speaker skew and clock drift (GOALS.md priority 1).
 - Spatial upmix on the SOURCE: about half of each core is now free for it; `dspload` can rehearse the extra load.
 - Optional RAM: limit `liblc3_dual` to 10 ms frames (~8-12 KB of tables) and, if the runtime `sr` switch can go, to 48 kHz + 8 kHz.

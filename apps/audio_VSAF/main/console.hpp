@@ -49,6 +49,10 @@ void handle_ascii_command(const char* raw_line);
  *
  * @param unicast_engine Pointer to active EspNowUnicastEngine instance
  */
+// USB-Serial-JTAG console diagnostics (console.cpp)
+void console_usj_note_rx(int n);
+void console_usj_tick();
+
 void console_init(AudioNet::EspNowUnicastEngine* unicast_engine);
 #endif
 

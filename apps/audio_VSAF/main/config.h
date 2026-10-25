@@ -55,6 +55,28 @@ extern "C" {
 #define CONFIG_VSAF_BOOT_SCAN_DWELL_MS 210 // Per-channel dwell of the boot survey (>= 2 beacon intervals of 102.4 ms)
 #endif
 
+#ifndef CONFIG_VSAF_TX_POWER_QDBM
+// Default Wi-Fi TX power for every node, in 0.25 dBm units (esp_wifi_set_max_tx_power). 40 = +10 dBm requested.
+// ESP-IDF quantizes the setting (e.g. 8..19 -> 2 dBm, 34..43 -> 8.5 dBm, 44..51 -> 11 dBm on the documented
+// table), and esp_wifi_get_max_tx_power() returns the requested value, not the quantized one. Measured
+// 2026-10-25: S3 roughly follows the setting; the C6 transmits far below nominal at the lowest settings
+// (2 -> 8.5 dBm = +14.5 dB uplink) and saturates above ~11 dBm. Kept moderate on purpose: SOURCE heating
+// (it transmits 600 packets/s) and future battery-powered SINKs.
+#define CONFIG_VSAF_TX_POWER_QDBM 40
+#endif
+
+#ifndef CONFIG_VSAF_SCAN_DWELL_MS
+// SINK channel search: dwell per channel. The SOURCE sends 600 packets/s, so 30 ms sees ~18 of them; a full
+// sweep of 13 channels takes ~0.4 s. SINKs start on CONFIG_VSAF_PREFERRED_WIFI_CHANNEL and hop upward with wrap.
+#define CONFIG_VSAF_SCAN_DWELL_MS 30
+#endif
+
+#ifndef CONFIG_VSAF_SCAN_HOLD_MS
+// SINK: after the stream stops, keep listening on the same channel this long before sweeping again
+// (covers a SOURCE reboot, which comes back on the same channel).
+#define CONFIG_VSAF_SCAN_HOLD_MS 3000
+#endif
+
 #ifndef CONFIG_ESPNOW_WATCHDOG_TIMEOUT_FRAMES
 #define CONFIG_ESPNOW_WATCHDOG_TIMEOUT_FRAMES 6 // Consecutive missing frames / PLC before falling back from STREAM to SCANNING (6 = 60ms)
 #endif

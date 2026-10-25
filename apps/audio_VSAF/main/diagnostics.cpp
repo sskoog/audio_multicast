@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+#include <algorithm>
 
 namespace Diagnostics {
 
@@ -157,7 +158,8 @@ void SystemDiagnostics::tick() {
         // 2. Read WiFi RSSI / TX Gain
         char rssi_str[8];
         if (cfg->node_role == NODE_ROLE_SOURCE) {
-            snprintf(rssi_str, sizeof(rssi_str), "+3.0");
+            // SOURCE: TX power setting (dBm), ESP-IDF readback cached at the last change (no polling)
+            snprintf(rssi_str, sizeof(rssi_str), "%4.1f", m_unicast_engine.getWifiTxPower() / 4.0f);
         } else if (m_unicast_engine.getState() == AudioNet::NetworkState::OFF ||
                    m_unicast_engine.getState() == AudioNet::NetworkState::IDLE) {
             snprintf(rssi_str, sizeof(rssi_str), "  - ");
@@ -382,6 +384,42 @@ void SystemDiagnostics::tick() {
                      enc_str, rms_str, peak_str, sr_str, pd_str, codec_avg_str, codec_pk_str);
         }
 
+        // SINK buffered audio and clock-drift compensation: buffered frames (FIFO + I2S DMA queue, 1 s average),
+        // minimum FIFO depth, net corrections in the last second, estimated ppm
+        char drift_block[32] = "";
+        if (cfg->node_role == NODE_ROLE_SINK) {
+            AudioNet::EspNowBroadcastEngine::SinkDriftStats ds{};
+            m_unicast_engine.takeSinkDriftStats(ds);
+            char avg_str[8], min_str[8], adj_str[8], ppm_str[12];
+            if (ds.depth_n > 0 && m_unicast_engine.getState() == AudioNet::NetworkState::STREAM) {
+                snprintf(avg_str, sizeof(avg_str), "%4.1f", ds.depth_avg_x10 / 10.0f);
+                snprintf(min_str, sizeof(min_str), "%3lu", (unsigned long)std::min<uint32_t>(ds.depth_min, 999));
+                if (!ds.enabled) {
+                    snprintf(adj_str, sizeof(adj_str), " off");
+                } else if (ds.target_x10 < 0) {
+                    snprintf(adj_str, sizeof(adj_str), " lrn");
+                } else {
+                    snprintf(adj_str, sizeof(adj_str), "%+4ld", (long)std::max<int32_t>(-999, std::min<int32_t>(999, ds.adj_window)));
+                }
+                // Positive ppm: SINK clock runs fast (samples inserted to hold the FIFO depth)
+                float played = static_cast<float>(ds.frames_played) * 480.0f;
+                if (ds.target_x10 >= 0 && played > 0.0f) {
+                    float ppm = ds.adj_total * 1.0e6f / played;
+                    if (ppm > 999.9f) ppm = 999.9f;
+                    if (ppm < -999.9f) ppm = -999.9f;
+                    snprintf(ppm_str, sizeof(ppm_str), "%+6.1f", ppm);
+                } else {
+                    snprintf(ppm_str, sizeof(ppm_str), "    - ");
+                }
+            } else {
+                snprintf(avg_str, sizeof(avg_str), "  - ");
+                snprintf(min_str, sizeof(min_str), "  -");
+                snprintf(adj_str, sizeof(adj_str), "  - ");
+                snprintf(ppm_str, sizeof(ppm_str), "    - ");
+            }
+            snprintf(drift_block, sizeof(drift_block), " %4.4s %3.3s %4.4s %6.6s |", avg_str, min_str, adj_str, ppm_str);
+        }
+
         char time_sync_block[64];
         if (cfg->node_role == NODE_ROLE_SOURCE) {
             const auto* p0 = m_unicast_engine.getPeer(0); // Left (Node 23)
@@ -431,13 +469,14 @@ void SystemDiagnostics::tick() {
 
         char row_buf[256];
         snprintf(row_buf, sizeof(row_buf),
-                 "| %2d  %2d  %3u | %-5.5s | %-6.6s | %4.4s %02u %-3.3s |%s|%s|%s|",
+                 "| %2d  %2d  %3u | %-5.5s | %-6.6s | %4.4s %02u %-3.3s |%s|%s|%s%s|",
                  cpu_load_pct, (int)(temp_c + 0.5f), (unsigned)cpu_freq_mhz,
                  getState5Char(m_unicast_engine.getState()),
                  role_col_str,
                  rssi_str, (unsigned)wifi_ch, phy_str,
                  audio_block,
                  mid_block,
+                 drift_block,
                  time_sync_block);
 
         if ((m_header_counter % 10) == 0) {
@@ -446,8 +485,8 @@ void SystemDiagnostics::tick() {
                 print_console("|    CPU      | STATE | NODES  |    WIFI     |  AUDIO dBFS  |     STAGE TIMINGS (ms)       |  SOURCE      PKTS  ACK%%  FAIL   TOT  |             ROUND-TRIP NET (us)        |\n");
                 print_console("|  %%   C  MHz |       | 012345 | GAIN Ch PHY |   RMS    Pk  |  DSP   EncHQ  EncRed  TXend  |  INPUT        1/s     %%   1/s  pkts   |              L_Net       R_Net         |\n");
             } else {
-                print_console("|    CPU      | STATE |  CHAN  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | AMP dB   PKTS  RED PLC DMA OVF UDR   |         TIME & SYNCHRONIZATION (ms)    |\n");
-                print_console("|  %%   C  MHz |       |        | RSSI Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  SW  HW   1/s  rec tot UDR ovf udr   |  Local  Master  EMA_offs RB_med RB_rng |\n");
+                print_console("|    CPU      | STATE |  CHAN  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | AMP dB   PKTS  RED PLC DMA OVF UDR   | BUF+DMA   DRIFT CORR |         TIME & SYNCHRONIZATION (ms)    |\n");
+                print_console("|  %%   C  MHz |       |        | RSSI Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  SW  HW   1/s  rec tot UDR ovf udr   |  buf min adj    ppm  |  Local  Master  EMA_offs RB_med RB_rng |\n");
             }
         }
         print_console("%s\n", row_buf);

@@ -10,6 +10,8 @@
 #include "esp_netif.h"
 #include "esp_heap_caps.h"
 #include <cmath>
+#include <algorithm>
+#include <cstdint>
 
 static const char* TAG = "VSAF_BCAST";
 
@@ -218,7 +220,8 @@ esp_err_t EspNowBroadcastEngine::init(uint8_t role, uint8_t node_id, uint8_t wif
     ESP_ERROR_CHECK(esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N));
 #endif
 
-    ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(12)); // +3.00 dBm (12 * 0.25 dBm)
+    // Must be set after esp_wifi_start() (see config.h for the quantization of this setting)
+    ESP_ERROR_CHECK(setWifiTxPower(CONFIG_VSAF_TX_POWER_QDBM));
 
     // 2. SOURCE boot channel: the fixed preferred channel (default), or optionally a boot RF survey that may
     //    move away from it if it looks busy (CONFIG_VSAF_BOOT_CHANNEL_SCAN, see config.h for why it is off)
@@ -229,6 +232,9 @@ esp_err_t EspNowBroadcastEngine::init(uint8_t role, uint8_t node_id, uint8_t wif
 #else
         setWifiChannel(CONFIG_VSAF_PREFERRED_WIFI_CHANNEL);
 #endif
+    } else {
+        // SINK: start the channel search where the SOURCE boots (then hop upward, see runSinkLoop)
+        setWifiChannel(CONFIG_VSAF_PREFERRED_WIFI_CHANNEL);
     }
 
     // 3. Initialize ESP-NOW + 4. register the single broadcast peer (FF:FF:FF:FF:FF:FF)
@@ -694,18 +700,32 @@ esp_err_t EspNowBroadcastEngine::setWifiChannel(uint8_t channel) {
     return ESP_OK;
 }
 
+/**
+ * @brief Set the Wi-Fi TX power and cache ESP-IDF's readback (read once here, never polled).
+ *
+ * The radio quantizes the request to fixed levels, but no public ESP-IDF API reports the applied level:
+ * esp_wifi_get_max_tx_power() echoes the request and wifi_country_t.max_tx_power stays at the regulatory
+ * maximum (20 dBm). Verified on S3 and C6 (2026-10-25); the real output is only measurable through RSSI.
+ *
+ * @param power_0_25dbm Requested power in 0.25 dBm units, clamped to [8, 84] (2..20 dBm).
+ * @return Result of esp_wifi_set_max_tx_power().
+ */
 esp_err_t EspNowBroadcastEngine::setWifiTxPower(int8_t power_0_25dbm) {
     if (power_0_25dbm < 8) power_0_25dbm = 8;
     if (power_0_25dbm > 84) power_0_25dbm = 84;
-    return esp_wifi_set_max_tx_power(power_0_25dbm);
+    esp_err_t err = esp_wifi_set_max_tx_power(power_0_25dbm);
+
+    int8_t readback = 0;
+    if (esp_wifi_get_max_tx_power(&readback) == ESP_OK) {
+        m_tx_power_req_qdbm.store(readback, std::memory_order_relaxed);
+    }
+    ESP_LOGI(TAG, "Wi-Fi TX power %.2f dBm requested (readback %d x 0.25 dBm; the radio quantizes it)%s",
+             power_0_25dbm / 4.0f, m_tx_power_req_qdbm.load(), err == ESP_OK ? "" : " [set failed]");
+    return err;
 }
 
 int8_t EspNowBroadcastEngine::getWifiTxPower() const {
-    int8_t pwr = 0;
-    if (esp_wifi_get_max_tx_power(&pwr) == ESP_OK) {
-        return pwr;
-    }
-    return 78;
+    return m_tx_power_req_qdbm.load(std::memory_order_relaxed);
 }
 
 /**
@@ -958,7 +978,8 @@ void EspNowBroadcastEngine::onPacketReceived(const uint8_t* mac_addr, const uint
             uint8_t sink_id = ack->sink_id;
             if (sink_id < MAX_SINK_NODES) {
                 // Compute RTT metrics
-                int64_t total_rtt = t_now_us - ack->t_tx1_echo;
+                // t_tx1_echo is the low 32 bits of the SOURCE esp_timer (wraps every 71.6 min): subtract modulo 2^32
+                int64_t total_rtt = static_cast<int32_t>(static_cast<uint32_t>(t_now_us) - ack->t_tx1_echo);
                 int64_t dwell_us = ack->t_dwell_us;
                 int64_t net_rtt = total_rtt - dwell_us;
                 if (total_rtt >= 0 && total_rtt < 30000) {
@@ -1252,6 +1273,59 @@ void EspNowBroadcastEngine::handleTxSubsystemHang() {
 // SINK Audio Loop: Jitter Buffer PREFILL -> I2S DMA Synced Output
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// SINK clock-drift compensation helpers
+// ---------------------------------------------------------------------------
+namespace {
+/**
+ * @brief Index k in [8, n-9) where the waveform is smoothest (smallest |x[k+1] - x[k]|): least audible spot.
+ */
+template <typename T>
+size_t driftSmoothestIndex(const T* x, size_t n) {
+    size_t best = n / 2;
+    int64_t best_d = INT64_MAX;
+    for (size_t k = 8; k + 9 < n; ++k) {
+        int64_t d = static_cast<int64_t>(x[k + 1]) - static_cast<int64_t>(x[k]);
+        if (d < 0) d = -d;
+        if (d < best_d) {
+            best_d = d;
+            best = k;
+        }
+    }
+    return best;
+}
+} // namespace
+
+/**
+ * @brief Insert one interpolated sample into a frame (buffer must hold n + 1 samples).
+ * @param x Mono PCM frame, n samples.
+ * @return n + 1.
+ */
+template <typename T>
+size_t EspNowBroadcastEngine::driftInsertSample(T* x, size_t n) {
+    const size_t k = driftSmoothestIndex(x, n);
+    for (size_t i = n; i > k + 1; --i) {
+        x[i] = x[i - 1];
+    }
+    x[k + 1] = static_cast<T>((static_cast<int64_t>(x[k]) + static_cast<int64_t>(x[k + 2])) / 2);
+    return n + 1;
+}
+
+/**
+ * @brief Drop one sample from a frame by merging two neighbours into their average.
+ * @param x Mono PCM frame, n samples.
+ * @return n - 1.
+ */
+template <typename T>
+size_t EspNowBroadcastEngine::driftDropSample(T* x, size_t n) {
+    const size_t k = driftSmoothestIndex(x, n);
+    x[k] = static_cast<T>((static_cast<int64_t>(x[k]) + static_cast<int64_t>(x[k + 1])) / 2);
+    for (size_t i = k + 1; i + 1 < n; ++i) {
+        x[i] = x[i + 1];
+    }
+    return n - 1;
+}
+
 void EspNowBroadcastEngine::sinkTaskTrampoline(void* arg) {
     static_cast<EspNowBroadcastEngine*>(arg)->runSinkLoop();
 }
@@ -1260,14 +1334,28 @@ void EspNowBroadcastEngine::runSinkLoop() {
     ESP_LOGI(TAG, "SINK Audio Decoder & I2S Task started on Core 0");
 
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
-    static int32_t pcm_mono[480];
-    static int32_t pcm_stereo[480 * 2];
+    // One extra sample: drift compensation may play 481 samples from a 480-sample frame
+    static int32_t pcm_mono[480 + 1];
+    static int32_t pcm_stereo[(480 + 1) * 2];
     constexpr size_t SAMPLE_SIZE = sizeof(int32_t);
 #else
-    static int16_t pcm_mono[480];
-    static int16_t pcm_stereo[480 * 2];
+    static int16_t pcm_mono[480 + 1];
+    static int16_t pcm_stereo[(480 + 1) * 2];
     constexpr size_t SAMPLE_SIZE = sizeof(int16_t);
 #endif
+    // Clock-drift compensation (SINK crystal vs SOURCE): keep the FIFO depth at its level after start-up by
+    // playing 481 (insert) or 479 (drop) samples from one frame. Depth filter in Q16 frames (16 fractional bits,
+    // so the EMA can settle on any level; with Q8 and a >> 8 step it could not rise within the last frame).
+    static constexpr int32_t  DRIFT_EMA_SHIFT = 8;        // EMA time constant 256 frames (~2.6 s)
+    static constexpr uint32_t DRIFT_LEARN_FRAMES = 300;   // learn the target 3 s after entering STREAM
+    static constexpr int32_t  DRIFT_DEADBAND_Q16 = 1 << 15; // +/- 0.5 frame around the target
+    static constexpr uint32_t DRIFT_MIN_SPACING = 16;     // >= 16 frames between corrections (<= ~130 ppm)
+    static constexpr int32_t  DRIFT_MIN_TARGET_Q16 = 2 << 16;
+    int32_t  drift_ema_q16 = -1;
+    int64_t  i2s_written = 0;   // samples written to the I2S DMA since start() (preload included)
+    int32_t  drift_target_q16 = -1;
+    uint32_t drift_frames = 0;
+    uint32_t drift_last_adj_frame = 0;
     size_t samples_per_frame = (m_telemetry.sample_rate * 10) / 1000;
     uint32_t consecutive_underruns = 0;
     static constexpr size_t PREFILL_THRESHOLD = CONFIG_ESPNOW_PREFILL_THRESHOLD_FRAMES; // 2 packets = 20 ms cushion
@@ -1298,11 +1386,13 @@ void EspNowBroadcastEngine::runSinkLoop() {
 
         // -------------------------------------------------------------------
         // 1. SCANNING: Dynamic channel hopping until audio stream is discovered
+        //    Starts on CONFIG_VSAF_PREFERRED_WIFI_CHANNEL (set in init), then hops upward with wrap (13 -> 1),
+        //    CONFIG_VSAF_SCAN_DWELL_MS per channel. Any VSAF audio packet locks the channel (handleRx).
         // -------------------------------------------------------------------
         if (current_state == NetworkState::SCANNING) {
             if (!m_channel_locked.load(std::memory_order_acquire)) {
                 int64_t now_us = esp_timer_get_time();
-                if (now_us - last_hop_time_us >= 150000) { // Hop channel every 150 ms
+                if (now_us - last_hop_time_us >= CONFIG_VSAF_SCAN_DWELL_MS * 1000LL) {
                     last_hop_time_us = now_us;
                     uint8_t next_ch = (m_wifi_channel % 13) + 1;
                     setWifiChannel(next_ch);
@@ -1321,7 +1411,10 @@ void EspNowBroadcastEngine::runSinkLoop() {
                 transitionTo(NetworkState::PREFILL);
             } else {
                 int64_t now_us = esp_timer_get_time();
-                if (now_us - m_last_rx_audio_pkt_us.load(std::memory_order_acquire) >= 500000) {
+                // Stream gone (or a stray packet locked a quiet channel): hold, then resume the sweep
+                if (now_us - m_last_rx_audio_pkt_us.load(std::memory_order_acquire) >= CONFIG_VSAF_SCAN_HOLD_MS * 1000LL) {
+                    ESP_LOGI(TAG, "SINK: no audio on Ch %d for %d ms -> channel search", m_wifi_channel,
+                             CONFIG_VSAF_SCAN_HOLD_MS);
                     m_channel_locked.store(false, std::memory_order_release);
                     last_hop_time_us = now_us;
                 }
@@ -1337,6 +1430,7 @@ void EspNowBroadcastEngine::runSinkLoop() {
             if (m_i2s_dac) {
                 m_i2s_dac->stop(); // Ensure stopped before preload
             }
+            i2s_written = 0;
 
             // Preload Frame 1 into DMA Descriptor 0
             SinkFifoItem item1 = {};
@@ -1388,6 +1482,7 @@ void EspNowBroadcastEngine::runSinkLoop() {
                 if (m_i2s_dac) {
                     size_t bytes_written = 0;
                     m_i2s_dac->preload(pcm_stereo, samples_per_frame * SAMPLE_SIZE * 2, &bytes_written);
+                    i2s_written += static_cast<int64_t>(bytes_written / (SAMPLE_SIZE * 2));
                 }
             }
 
@@ -1441,6 +1536,7 @@ void EspNowBroadcastEngine::runSinkLoop() {
                 if (m_i2s_dac) {
                     size_t bytes_written = 0;
                     m_i2s_dac->preload(pcm_stereo, samples_per_frame * SAMPLE_SIZE * 2, &bytes_written);
+                    i2s_written += static_cast<int64_t>(bytes_written / (SAMPLE_SIZE * 2));
                 }
                 m_expected_seq = item2.seq + 1;
                 m_has_expected_seq = true;
@@ -1450,6 +1546,14 @@ void EspNowBroadcastEngine::runSinkLoop() {
                 m_i2s_dac->start(); // Start hardware DMA clocks with preloaded descriptors
             }
             consecutive_underruns = 0;
+            drift_ema_q16 = -1;
+            drift_target_q16 = -1;
+            drift_frames = 0;
+            drift_last_adj_frame = 0;
+            m_drift_adj_total.store(0, std::memory_order_relaxed);
+            m_drift_adj_reported = 0;
+            m_frames_played.store(0, std::memory_order_relaxed);
+            m_drift_target_x10.store(-1, std::memory_order_relaxed);
             transitionTo(NetworkState::STREAM);
             ESP_LOGI(TAG, "SINK: Preload complete. Transition to STREAM (FIFO cushion = %zu pkts).", m_sink_fifo_count);
             continue;
@@ -1560,7 +1664,9 @@ void EspNowBroadcastEngine::runSinkLoop() {
                     m_i2s_dac->stop();
                 }
                 m_has_expected_seq = false;
-                m_channel_locked.store(false, std::memory_order_release);
+                // Keep the channel: the SCANNING state waits CONFIG_VSAF_SCAN_HOLD_MS for the stream to return
+                // (e.g. SOURCE reboot) before it sweeps the other channels
+                m_channel_locked.store(true, std::memory_order_release);
                 transitionTo(NetworkState::SCANNING);
                 consecutive_underruns = 0;
                 last_hop_time_us = esp_timer_get_time();
@@ -1610,11 +1716,62 @@ void EspNowBroadcastEngine::runSinkLoop() {
         m_codec_duration_buf.push(dec_ms);
         m_audio_meter.pushFramePcm(pcm_mono, samples_per_frame);
 
+        // Clock-drift compensation: FIFO depth after this frame's pop, filtered, against the learned target
+        size_t out_samples = samples_per_frame;
+        {
+            portENTER_CRITICAL(&m_sink_fifo_lock);
+            const uint32_t depth = static_cast<uint32_t>(m_sink_fifo_count);
+            portEXIT_CRITICAL(&m_sink_fifo_lock);
+            // Total buffered audio = FIFO frames + samples still queued in the I2S DMA. The FIFO depth alone
+            // jumps by a frame when the write phase against the 480-sample DMA descriptors shifts (e.g. after
+            // one 481-sample write); the total does not.
+            int64_t dma_queued = 0;
+            if (m_i2s_dac) {
+                dma_queued = i2s_written - m_i2s_dac->getPlayedSamples();
+                if (dma_queued < 0) {
+                    // DMA played zero-filled descriptors (underrun): those samples were never written
+                    i2s_written -= dma_queued;
+                    dma_queued = 0;
+                }
+            }
+            const int64_t occ_samples = static_cast<int64_t>(depth) * samples_per_frame + dma_queued;
+            const int32_t depth_q16 = static_cast<int32_t>((occ_samples << 16) / static_cast<int64_t>(samples_per_frame));
+            m_fifo_depth_sum.fetch_add(static_cast<uint32_t>((occ_samples * 100) / static_cast<int64_t>(samples_per_frame)),
+                                       std::memory_order_relaxed);
+            m_fifo_depth_n.fetch_add(1, std::memory_order_relaxed);
+            if (depth < m_fifo_depth_min.load(std::memory_order_relaxed)) {
+                m_fifo_depth_min.store(depth, std::memory_order_relaxed);
+            }
+            drift_ema_q16 = (drift_ema_q16 < 0) ? depth_q16 : drift_ema_q16 + ((depth_q16 - drift_ema_q16) >> DRIFT_EMA_SHIFT);
+            drift_frames++;
+            m_frames_played.store(drift_frames, std::memory_order_relaxed);
+            if (drift_target_q16 < 0 && drift_frames >= DRIFT_LEARN_FRAMES) {
+                drift_target_q16 = std::max(drift_ema_q16, DRIFT_MIN_TARGET_Q16);
+                m_drift_target_x10.store(static_cast<int32_t>((static_cast<int64_t>(drift_target_q16) * 10 + 32768) >> 16),
+                                         std::memory_order_relaxed);
+            }
+            if (drift_target_q16 >= 0 && m_drift_corr_enabled.load(std::memory_order_relaxed) &&
+                drift_frames - drift_last_adj_frame >= DRIFT_MIN_SPACING && samples_per_frame >= 32) {
+                const int32_t err = drift_ema_q16 - drift_target_q16;
+                if (err < -DRIFT_DEADBAND_Q16) {
+                    // FIFO draining: SINK clock fast -> play one sample more from this frame
+                    out_samples = driftInsertSample(pcm_mono, samples_per_frame);
+                    m_drift_adj_total.fetch_add(1, std::memory_order_relaxed);
+                    drift_last_adj_frame = drift_frames;
+                } else if (err > DRIFT_DEADBAND_Q16) {
+                    // FIFO filling: SINK clock slow -> play one sample less
+                    out_samples = driftDropSample(pcm_mono, samples_per_frame);
+                    m_drift_adj_total.fetch_sub(1, std::memory_order_relaxed);
+                    drift_last_adj_frame = drift_frames;
+                }
+            }
+        }
+
         // Mono to Stereo duplication for I2S DAC
         float total_gain_db = m_current_gain_db + m_post_gain_db;
         float gain = (m_current_gain_db <= -90.0f) ? 0.0f : std::pow(10.0f, total_gain_db / 20.0f);
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
-        for (size_t i = 0; i < samples_per_frame; ++i) {
+        for (size_t i = 0; i < out_samples; ++i) {
             int64_t val = static_cast<int64_t>(pcm_mono[i] * gain);
             if (val > 8388607) val = 8388607;
             if (val < -8388608) val = -8388608;
@@ -1625,12 +1782,13 @@ void EspNowBroadcastEngine::runSinkLoop() {
 
         if (m_i2s_dac) {
             size_t bytes_written = 0;
-            m_i2s_dac->write(pcm_stereo, samples_per_frame * SAMPLE_SIZE * 2, &bytes_written, 50);
+            m_i2s_dac->write(pcm_stereo, out_samples * SAMPLE_SIZE * 2, &bytes_written, 50);
+            i2s_written += static_cast<int64_t>(bytes_written / (SAMPLE_SIZE * 2));
         } else {
             vTaskDelay(pdMS_TO_TICKS(10));
         }
 #else
-        for (size_t i = 0; i < samples_per_frame; ++i) {
+        for (size_t i = 0; i < out_samples; ++i) {
             int32_t val = static_cast<int32_t>(pcm_mono[i] * gain);
             if (val > 32767) val = 32767;
             if (val < -32768) val = -32768;
@@ -1641,7 +1799,8 @@ void EspNowBroadcastEngine::runSinkLoop() {
 
         if (m_i2s_dac) {
             size_t bytes_written = 0;
-            m_i2s_dac->write(pcm_stereo, samples_per_frame * SAMPLE_SIZE * 2, &bytes_written, 50);
+            m_i2s_dac->write(pcm_stereo, out_samples * SAMPLE_SIZE * 2, &bytes_written, 50);
+            i2s_written += static_cast<int64_t>(bytes_written / (SAMPLE_SIZE * 2));
         } else {
             vTaskDelay(pdMS_TO_TICKS(10));
         }

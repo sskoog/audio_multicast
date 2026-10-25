@@ -5,6 +5,8 @@
 // #include "lc3_benchmark.hpp" (Disabled)
 #include "driver/uart.h"
 #include "driver/usb_serial_jtag.h"
+#include "esp_attr.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
@@ -30,6 +32,70 @@ static AudioNet::EspNowUnicastEngine* s_unicast_engine = nullptr;
 
 static SemaphoreHandle_t s_console_mutex = nullptr;
 static StaticSemaphore_t s_console_mutex_buf;
+
+// ---------------------------------------------------------------------------
+// USB-Serial-JTAG console diagnostics. Kept in RTC memory (survives a chip / software reset, not a power-on),
+// so after a console stall + reset the previous session's counters can still be read ('usjdiag').
+// ---------------------------------------------------------------------------
+struct UsjDiag {
+    uint32_t magic;
+    uint32_t boots;            // resets since the last power-on
+    uint32_t write_ok;         // console writes accepted by the USJ VFS
+    uint32_t write_fail;       // console writes rejected (EIO: VFS thinks no host is connected)
+    uint32_t rx_bytes;         // console bytes received from the host
+    uint32_t conn_s;           // seconds with usb_serial_jtag_is_connected() == true
+    uint32_t disconn_s;        // seconds with it == false
+    uint32_t conn_changes;     // connected <-> disconnected transitions
+    uint32_t uptime_s;         // session length when last updated
+    uint8_t  last_conn;
+};
+static constexpr uint32_t USJ_DIAG_MAGIC = 0x55534A44;  // "USJD"
+RTC_NOINIT_ATTR static UsjDiag s_usj;                  // current session (also readable after a reset)
+static UsjDiag s_usj_prev = {};                         // previous session, copied at boot
+static bool s_usj_prev_valid = false;
+
+static void usj_diag_boot() {
+    if (s_usj.magic == USJ_DIAG_MAGIC) {
+        s_usj_prev = s_usj;
+        s_usj_prev_valid = true;
+        uint32_t boots = s_usj.boots + 1;
+        s_usj = {};
+        s_usj.boots = boots;
+    } else {
+        s_usj = {};
+    }
+    s_usj.magic = USJ_DIAG_MAGIC;
+    s_usj.last_conn = 1;
+}
+
+void console_usj_note_rx(int n) {
+    if (n > 0) s_usj.rx_bytes += static_cast<uint32_t>(n);
+}
+
+/**
+ * @brief Sample the USJ connection flag once per second (called from the CLI task loop).
+ */
+void console_usj_tick() {
+    static int64_t last_us = 0;
+    int64_t now = esp_timer_get_time();
+    if (now - last_us < 1000000) return;
+    last_us = now;
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG || CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG
+    uint8_t conn = usb_serial_jtag_is_connected() ? 1 : 0;
+    if (conn) s_usj.conn_s++; else s_usj.disconn_s++;
+    if (conn != s_usj.last_conn) s_usj.conn_changes++;
+    s_usj.last_conn = conn;
+#endif
+    s_usj.uptime_s = static_cast<uint32_t>(now / 1000000);
+}
+
+static void print_usj_diag(const char* label, const UsjDiag& d) {
+    print_console("[USJ] %s: boots=%lu up=%lus | writes ok=%lu fail(EIO)=%lu | rx=%lu B | connected=%lus "
+                  "disconnected=%lus changes=%lu now=%s\n",
+                  label, (unsigned long)d.boots, (unsigned long)d.uptime_s, (unsigned long)d.write_ok,
+                  (unsigned long)d.write_fail, (unsigned long)d.rx_bytes, (unsigned long)d.conn_s,
+                  (unsigned long)d.disconn_s, (unsigned long)d.conn_changes, d.last_conn ? "yes" : "no");
+}
 
 static char s_raw_buf[512];
 static char s_out_buf[1024];
@@ -77,7 +143,11 @@ void print_console(const char* format, ...) {
         }
 
         // 2. Standard output / USB-Serial-JTAG VFS (COM4 on S3 SINK, COM23/COM24 on C6)
-        write(STDOUT_FILENO, s_out_buf, out_len);
+        if (write(STDOUT_FILENO, s_out_buf, out_len) < 0) {
+            s_usj.write_fail++;
+        } else {
+            s_usj.write_ok++;
+        }
 
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
         // 3. TinyUSB CDC ACM (COM116 on ESP32-S3 Node 16 SOURCE)
@@ -201,6 +271,7 @@ static int cdc_log_vprintf(const char* fmt, va_list args) {
 
 void console_init(AudioNet::EspNowUnicastEngine* unicast_engine) {
     s_unicast_engine = unicast_engine;
+    usj_diag_boot();
     if (!s_console_mutex) {
         s_console_mutex = xSemaphoreCreateMutexStatic(&s_console_mutex_buf);
     }
@@ -462,7 +533,14 @@ void handle_ascii_command(const char* raw_line) {
         if (pwr_unit > 84) pwr_unit = 84;
         if (s_unicast_engine) {
             s_unicast_engine->setWifiTxPower(pwr_unit);
-            print_console("[OK] Wi-Fi Max TX Power set to %+4.2f dBm (%d / 0.25 dBm)\n", pwr_unit * 0.25f, pwr_unit);
+            print_console("[OK] Wi-Fi TX power set: readback %+4.2f dBm (%d / 0.25 dBm; quantized by the radio)\n",
+                          s_unicast_engine->getWifiTxPower() / 4.0f, s_unicast_engine->getWifiTxPower());
+        }
+    } else if (strncasecmp(line, "driftcorr ", 10) == 0) {
+        // SINK: clock-drift compensation on (1, default) / off (0, to measure free-running drift)
+        if (s_unicast_engine) {
+            s_unicast_engine->setDriftCorrection(atoi(line + 10) != 0);
+            print_console("[OK] SINK drift correction %s\n", s_unicast_engine->getDriftCorrection() ? "ON" : "OFF");
         }
     } else if (strncasecmp(line, "postgain ", 9) == 0) {
         float db = atof(line + 9);
@@ -559,6 +637,14 @@ void handle_ascii_command(const char* raw_line) {
         }
         print_console("\n----- end of log ring -----\n");
 #endif
+    } else if (strcasecmp(line, "usjdiag") == 0) {
+        // USB-Serial-JTAG console health: this session and the session before the last reset
+        print_usj_diag("this session", s_usj);
+        if (s_usj_prev_valid) {
+            print_usj_diag("previous session", s_usj_prev);
+        } else {
+            print_console("[USJ] previous session: none (power-on boot)\n");
+        }
     } else if (strcasecmp(line, "tasks") == 0) {
         print_task_cpu_window();
     } else if (strcasecmp(line, "mem") == 0) {
@@ -623,12 +709,10 @@ void handle_ascii_command(const char* raw_line) {
             uint8_t primary = 0;
             wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
             esp_wifi_get_channel(&primary, &second);
-            int8_t pwr = 0;
-            esp_wifi_get_max_tx_power(&pwr);
             int32_t last_err = s_unicast_engine->getLastTxError();
-            print_console("[TXSTAT] ch set=%u radio=%u | phy=%s | txpwr=%.2f dBm\n",
-                          s_unicast_engine->getWifiChannel(), primary,
-                          s_unicast_engine->getWifiPhyRateString(), pwr * 0.25f);
+            print_console("[TXSTAT] ch set=%u radio=%u | phy=%s | txpwr=%.2f dBm (setting; radio quantizes it)\n",
+                          s_unicast_engine->getWifiChannel(), primary, s_unicast_engine->getWifiPhyRateString(),
+                          s_unicast_engine->getWifiTxPower() / 4.0f);
             print_console("[TXSTAT] recoveries=%lu\n", (unsigned long)s_unicast_engine->getTxRecoveryCount());
             print_console("[TXSTAT] send_err=%lu (no_mem=%lu, last=%s) tx_done_timeouts=%lu tx_status_fail=%lu deadline_drops=%lu\n",
                           (unsigned long)s_unicast_engine->getTxMacErrorCount(),

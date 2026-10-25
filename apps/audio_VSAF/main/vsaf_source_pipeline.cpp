@@ -27,7 +27,9 @@
 #include "esp_rom_sys.h"
 #include "esp_heap_caps.h"
 #include "esp_cpu.h"
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
 #include "lc3.h"
+#endif
 #include <cmath>
 #include <algorithm>
 #include <cstring>
@@ -645,6 +647,7 @@ void EspNowBroadcastEngine::srcRotateTimingWindow() {
     portEXIT_CRITICAL(&m_src_timing_mux);
 }
 
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
 // ---------------------------------------------------------------------------
 // Debug: LC3 encoder micro-benchmark (console 'encbench [core] [irq]')
 // ---------------------------------------------------------------------------
@@ -838,5 +841,15 @@ void EspNowBroadcastEngine::runEncoderBench(void (*print)(const char*, ...), int
     }
     free(ctx);
 }
+
+#else  // !CONFIG_IDF_TARGET_ESP32S3
+// The SOURCE (and thus the LC3 encoder bank) exists only on the ESP32-S3. Keeping liblc3 out of other
+// targets matters: with CONFIG_LC3_CODE_IN_IRAM it would cost ~100 KB of internal RAM on the C6 SINKs.
+void EspNowBroadcastEngine::runEncoderBench(void (*print)(const char*, ...), int core, bool irq_masked) {
+    (void)core;
+    (void)irq_masked;
+    print("[ENCBENCH] only available on the ESP32-S3 SOURCE\n");
+}
+#endif // CONFIG_IDF_TARGET_ESP32S3
 
 } // namespace AudioNet

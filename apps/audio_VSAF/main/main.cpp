@@ -160,12 +160,22 @@ static void usb_serial_cli_task(void* pvParameters) {
         int n_read = 0;
 #if defined(CONFIG_SOC_USB_SERIAL_JTAG_SUPPORTED)
         if (!is_s3_source) {
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+            // S3 SINK: USB-Serial-JTAG is only a secondary (output) console, so stdin never sees USB data.
+            // Read the USJ RX FIFO directly (the S3 SOURCE uses TinyUSB instead and skips this).
+            if (usb_serial_jtag_ll_rxfifo_data_available()) {
+                n_read = static_cast<int>(usb_serial_jtag_ll_read_rxfifo(rx_buf, sizeof(rx_buf)));
+            }
+#else
             int r = read(STDIN_FILENO, rx_buf, sizeof(rx_buf));
             if (r > 0) {
                 n_read = r;
             }
+#endif
+            console_usj_note_rx(n_read);
         }
 #endif
+        console_usj_tick();
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
         if (is_s3_source) {
             if (tud_cdc_available()) {

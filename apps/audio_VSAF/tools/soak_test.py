@@ -109,6 +109,19 @@ def parse_sink_line(line: str) -> dict | None:
         row[name] = num(tok)
     rssi = seg[4].split()
     row["rssi"] = int(rssi[0]) if rssi and rssi[0].lstrip("-").isdigit() else None
+    # FIFO / drift segment (firmware with drift compensation): "avg min adj ppm", e.g. " 2.4   1   +1  +23.4"
+    row["fifo_avg"] = row["fifo_min"] = row["drift_adj"] = row["drift_ppm"] = None
+    if len(seg) >= 10:
+        drift = seg[7].split()
+        if len(drift) == 4:
+            def flt(tok: str) -> float | None:
+                try:
+                    return float(tok)
+                except ValueError:
+                    return None
+            row["fifo_avg"], row["drift_ppm"] = flt(drift[0]), flt(drift[3])
+            row["fifo_min"] = int(drift[1]) if drift[1].isdigit() else None
+            row["drift_adj"] = int(drift[2]) if drift[2].lstrip("+-").isdigit() else None
     return row
 
 
@@ -128,6 +141,10 @@ class SinkStats:
     counter_glitches: int = 0                      # counter decreased (reset/truncation)
     state_drops: list = field(default_factory=list)
     plc_events: list = field(default_factory=list)  # (t_rel_s, delta)
+    fifo_min: int | None = None                    # lowest FIFO depth seen in the window (frames)
+    fifo_avg: list = field(default_factory=list)   # per-second average buffered audio, FIFO + I2S DMA (frames)
+    drift_adj_total: int = 0                       # net drift corrections in the window (+ insert / - drop)
+    drift_ppm_last: float | None = None            # firmware estimate since STREAM start (+ = SINK clock fast)
     in_window: bool = False
 
     def update(self, row: dict, t_rel: float) -> None:
@@ -147,6 +164,15 @@ class SinkStats:
             self.pkts_min = row["pkts"] if self.pkts_min is None else min(self.pkts_min, row["pkts"])
         if row["rssi"] is not None:
             self.rssi.append(row["rssi"])
+        if row["state"] == "STRM":
+            if row.get("fifo_min") is not None:
+                self.fifo_min = row["fifo_min"] if self.fifo_min is None else min(self.fifo_min, row["fifo_min"])
+            if row.get("fifo_avg") is not None:
+                self.fifo_avg.append(row["fifo_avg"])
+            if row.get("drift_adj") is not None:
+                self.drift_adj_total += row["drift_adj"]
+            if row.get("drift_ppm") is not None:
+                self.drift_ppm_last = row["drift_ppm"]
         hidden_resync = False
         for c in COUNTERS:
             v = row[c]
@@ -189,6 +215,9 @@ class SinkStats:
             "rssi_avg_dbm": round(sum(self.rssi) / len(self.rssi), 1) if self.rssi else None,
             **{f"{c}_total": self.totals[c] for c in COUNTERS},
             "plc_events": self.plc_events[:200], "state_drops": self.state_drops, "counter_glitches": self.counter_glitches,
+            "fifo_min": self.fifo_min,
+            "fifo_avg": round(sum(self.fifo_avg) / len(self.fifo_avg), 2) if self.fifo_avg else None,
+            "drift_adj_total": self.drift_adj_total, "drift_ppm": self.drift_ppm_last,
         }
 
 
@@ -449,12 +478,17 @@ def finalize(out_dir: str, results: list, window_s: float, meta: dict) -> int:
 
     print(f"\n=== SOAK RESULT ({window_s / 60:.1f} min) : {'PASS' if passed else 'FAIL'} ===")
     print("(loss% = primary packets lost = (RED + PLC) / frames; pk/s is the firmware's 1 s rate, ~0.8 % low)")
-    print(f"{'Node':<6}{'Ch':<9}{'pk/s':>7}{'min':>5}{'loss%':>8}{'RED':>6}{'PLC':>6}{'DMA':>5}{'OVF':>5}{'UDR':>5}{'RSSI':>6}  drops")
+    print(f"{'Node':<6}{'Ch':<9}{'pk/s':>7}{'min':>5}{'loss%':>8}{'RED':>6}{'PLC':>6}{'DMA':>5}{'OVF':>5}{'UDR':>5}{'RSSI':>6}"
+          f"{'BUFavg':>8}{'min':>4}{'ADJ':>6}{'ppm':>7}  drops")
     for r in results:
         print(f"{r['node']:<6}{r['label']:<9}{(r['pkts_per_s_avg'] or 0):>7.2f}{(r['pkts_per_s_min'] or 0):>5}"
               f"{(r['packet_loss_pct'] if r['packet_loss_pct'] is not None else float('nan')):>8.3f}"
               f"{r['red_total']:>6}{r['plc_total']:>6}{r['dma_total']:>5}{r['ovf_total']:>5}{r['udr_total']:>5}"
-              f"{(r['rssi_avg_dbm'] or 0):>6.0f}  {r['state_drops'] or '-'}")
+              f"{(r['rssi_avg_dbm'] or 0):>6.0f}"
+              f"{(r['fifo_avg'] if r.get('fifo_avg') is not None else float('nan')):>8.2f}"
+              f"{(r['fifo_min'] if r.get('fifo_min') is not None else -1):>4}"
+              f"{r.get('drift_adj_total', 0):>+6}"
+              f"{(r['drift_ppm'] if r.get('drift_ppm') is not None else float('nan')):>+7.1f}  {r['state_drops'] or '-'}")
     src = meta.get("source")
     if src and src.get("heartbeats"):
         over = src["low_rate_seconds"] or src["tx_end_ms_max_of_1s_avgs"] > 9.0
