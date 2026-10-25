@@ -156,6 +156,7 @@ static const tusb_desc_device_t s_device_descriptor = {
 
 static int8_t s_mute[3] = {0, 0, 0}; // master, ch1, ch2
 static int16_t s_volume[3] = {0, 0, 0}; // master, ch1, ch2 (in 1/256 dB)
+static std::atomic<uint32_t> s_fu_set_count{0};  // SET_CUR requests (TinyUSB task writes, console reads)
 
 // Host volume / mute -> linear gain per channel (read by the SOURCE DSP stage once per frame). The controls are
 // written from the TinyUSB task; single aligned 8 / 16-bit stores, so a torn read cannot happen.
@@ -163,11 +164,22 @@ static float fu_gain(int ch) {
     if (s_mute[0] || s_mute[ch]) {
         return 0.0f;
     }
-    const float db = (static_cast<float>(s_volume[0]) + static_cast<float>(s_volume[ch])) / 256.0f;
+    // Windows sets the master and the channel controls to the same slider value (seen: all three at -4.6 dB),
+    // so adding them would attenuate twice. Use the lower one: master-only, channel-only and balance all work.
+    const int16_t v = s_volume[0] < s_volume[ch] ? s_volume[0] : s_volume[ch];
+    const float db = static_cast<float>(v) / 256.0f;
     if (db <= -90.0f) {
         return 0.0f;
     }
     return db >= 0.0f ? 1.0f : powf(10.0f, db / 20.0f);
+}
+
+extern "C" void usb_audio_get_fu_state(int8_t mute[3], int16_t volume[3], uint32_t* set_count) {
+    for (int i = 0; i < 3; ++i) {
+        mute[i] = s_mute[i];
+        volume[i] = s_volume[i];
+    }
+    *set_count = s_fu_set_count.load(std::memory_order_relaxed);
 }
 
 extern "C" void usb_audio_get_gain(float* gain_l, float* gain_r) {
@@ -187,11 +199,13 @@ extern "C" bool tud_audio_set_req_entity_cb(uint8_t rhport, tusb_control_request
         if (ctrlSel == AUDIO10_FU_CTRL_MUTE) {
             if (p_request->bRequest == AUDIO10_CS_REQ_SET_CUR && p_request->wLength == 1) {
                 s_mute[channelNum] = pBuff[0];
+                s_fu_set_count.fetch_add(1, std::memory_order_relaxed);
                 return true;
             }
         } else if (ctrlSel == AUDIO10_FU_CTRL_VOLUME) {
             if (p_request->bRequest == AUDIO10_CS_REQ_SET_CUR && p_request->wLength == 2) {
                 s_volume[channelNum] = (int16_t)tu_unaligned_read16(pBuff);
+                s_fu_set_count.fetch_add(1, std::memory_order_relaxed);
                 return true;
             }
         }

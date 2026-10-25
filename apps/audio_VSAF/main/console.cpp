@@ -442,6 +442,48 @@ void handle_ascii_command(const char* raw_line) {
             s_unicast_engine->transitionTo(AudioNet::NetworkState::IDLE);
             print_console("[OK] Transitioned to IDLE (streaming paused)\n");
         }
+    } else if (strncasecmp(line, "thdn", 4) == 0) {
+        // SINK: THD+N of a sine (play `caltone sine <dBFS> <hz>` on the SOURCE first). thdn [hz] [seconds]
+        if (s_unicast_engine) {
+            int hz = 1000, secs = 3;
+            sscanf(line + 4, "%d %d", &hz, &secs);
+            secs = std::clamp(secs, 1, 30);
+            auto* e = s_unicast_engine;
+            if (e->m_thdn_state.load() == 1 || !e->m_thdn_dec.configure(static_cast<uint32_t>(hz)) ||
+                !e->m_thdn_out.configure(static_cast<uint32_t>(hz))) {
+                print_console("[ERR] usage: thdn <hz, multiple of 100> [seconds 1..30] (busy or bad frequency)\n");
+                return;
+            }
+            e->m_thdn_target_frames = static_cast<uint32_t>(secs) * 100;
+            e->m_thdn_skipped = 0;
+            e->m_thdn_state.store(1, std::memory_order_release);
+            for (int i = 0; i < (secs + 2) * 10 && e->m_thdn_state.load(std::memory_order_acquire) != 2; ++i) {
+                vTaskDelay(pdMS_TO_TICKS(100));
+            }
+            const bool done = e->m_thdn_state.load(std::memory_order_acquire) == 2;
+            e->m_thdn_state.store(0, std::memory_order_release);
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+            const double fs = 8388607.0;  // S3: both taps 24-bit
+#else
+            const double fs = 32767.0;    // C6: both taps 16-bit
+#endif
+            print_console("[THDN] %d Hz, %s: decoder out: %lu frames, level %.1f dBFS, peak %ld, THD+N %.1f dB | "
+                          "I2S in: %lu frames (%lu skipped: sample edits), level %.1f dBFS, peak %ld, THD+N %.1f dB\n",
+                          hz, done ? "done" : "TIMEOUT (no HQ frames? not streaming?)",
+                          (unsigned long)e->m_thdn_dec.frames(), e->m_thdn_dec.levelDbfs(fs), (long)e->m_thdn_dec.peak(),
+                          e->m_thdn_dec.thdnDb(), (unsigned long)e->m_thdn_out.frames(),
+                          (unsigned long)e->m_thdn_skipped, e->m_thdn_out.levelDbfs(fs), (long)e->m_thdn_out.peak(),
+                          e->m_thdn_out.thdnDb());
+        }
+    } else if (strcasecmp(line, "usbvol") == 0) {
+        // SOURCE: USB host volume / mute requests (UAC1 feature unit); not applied unless CONFIG_VSAF_APPLY_USB_HOST_VOLUME
+        int8_t mute[3];
+        int16_t vol[3];
+        uint32_t n = 0;
+        usb_audio_get_fu_state(mute, vol, &n);
+        print_console("[USBVOL] SET_CUR requests %lu | master %+.1f dB%s | L %+.1f dB%s | R %+.1f dB%s | applied: %s\n",
+                      (unsigned long)n, vol[0] / 256.0f, mute[0] ? " MUTE" : "", vol[1] / 256.0f, mute[1] ? " MUTE" : "",
+                      vol[2] / 256.0f, mute[2] ? " MUTE" : "", CONFIG_VSAF_APPLY_USB_HOST_VOLUME ? "yes" : "no (host scales PCM)");
     } else if (strncasecmp(line, "caltone", 7) == 0) {
         // SOURCE: calibration signal for SPL level matching.
         // caltone off | caltone pink [rms_dBFS] | caltone sine [rms_dBFS] [sat_Hz] [sub_Hz]

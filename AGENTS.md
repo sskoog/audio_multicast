@@ -39,7 +39,7 @@ Legacy / exploratory experiments in Bluetooth Low Energy Audio (Auracast) are al
   - DIN (DOUT): GPIO 1
   - WS2812B Status LED: GPIO 8
   - BOOT Button: GPIO 9
-  - MAX98357A GAIN: GPIO 0 (firmware drives it: input + pull-up = 3 dB, output HIGH = 6 dB, input floating = 9 dB, output LOW = 12 dB; Nodes 23 / 24 use 12 dB)
+  - MAX98357A GAIN: GPIO 0 (firmware drives it: input + pull-up = 3 dB, output HIGH = 6 dB, input floating = 9 dB, output LOW = 12 dB; internal pull-down = 15 dB; Nodes 23 / 24 use 15 dB)
 - **Node 16 (SOURCE)**:
   - User Status LED: GPIO 21 (Active LOW discrete LED)
   - BOOT Button: GPIO 0
@@ -49,15 +49,15 @@ Per-node software attenuation matches the acoustic level of all speakers (differ
 
 Calibrated 2026-10-25 with an SPL meter (TRS TA650A, dB-A, slow) on `caltone pink -30` (SOURCE, 500-2000 Hz pink noise), volume 100 %, meter at the same distance on each speaker's axis. All nodes are matched to the quietest one (Node 24 at 0 dB; the 16-bit MAX98357A path has no room for boost), i.e. ~57.5 dBA at -30 dBFS RMS.
 
-| Node ID | Channel | Hardware | Level at 0 dB SW, cal. (dBA) | Post-Gain at calibration | Post-Gain now (+6 dB) | Notes |
+| Node ID | Channel | Hardware | Level at 0 dB SW, cal. (dBA) | Post-Gain at calibration | Post-Gain now (+9 dB) | Notes |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| Node 4 | Ch 0 (Left) | S3, PCM5102A + TPA3118 | 91.3 | -33.8 dB | -27.8 dB | One driver of pipe D connected; verified 57.5 dBA |
-| Node 5 | Ch 1 (Right) | S3, PCM5102A + TPA3118 | 79.5 | -22.0 dB | -16.0 dB | Both drivers of pipe C connected; verified 57.5 dBA |
-| Node 23 | Ch 2 (Center) | C6, MAX98357A | 58.1 (GAIN 3 dB) | -0.6 dB | -3.6 dB, GAIN 12 dB | Single 4-ohm driver (pipe A); verified 56.9 dBA (first pass used an outlier reading 65.0) |
-| Node 24 | Ch 3 (Surround Left) | C6, MAX98357A | 57.5 (GAIN 3 dB) | 0.0 dB | -3.0 dB, GAIN 12 dB | Single 4-ohm driver (pipe E); reference (quietest); verified 57.1 dBA |
+| Node 4 | Ch 0 (Left) | S3, PCM5102A + TPA3118 | 91.3 | -33.8 dB | -24.8 dB | One driver of pipe D connected; verified 57.5 dBA |
+| Node 5 | Ch 1 (Right) | S3, PCM5102A + TPA3118 | 79.5 | -22.0 dB | -13.0 dB | Both drivers of pipe C connected; verified 57.5 dBA |
+| Node 23 | Ch 2 (Center) | C6, MAX98357A | 58.1 (GAIN 3 dB) | -0.6 dB | -3.6 dB, GAIN 15 dB | Single 4-ohm driver (pipe A); verified 56.9 dBA (first pass used an outlier reading 65.0) |
+| Node 24 | Ch 3 (Surround Left) | C6, MAX98357A | 57.5 (GAIN 3 dB) | 0.0 dB | -3.0 dB, GAIN 15 dB | Single 4-ohm driver (pipe E); reference (quietest); verified 57.1 dBA |
 | Node 1, 2, 3 | TBD | S3, PCM5102A + TPA3118 | - | - | -34.0 dB (default) | Not yet calibrated |
 
-Calibration target ~57.5 dBA at -30 dBFS RMS. Afterwards all nodes were raised by 6 dB: on the C6 nodes the MAX98357A GAIN pin (GPIO 0) went from 3 dB (pull-up) to 12 dB (output LOW) with 3 dB less software gain; the S3 post-gains went up by 6 dB. The C6 step assumes the pull-up gave exactly 3 dB; check with `caltone pink -30` (all nodes should then read ~63.5 dBA).
+Calibration target ~57.5 dBA at -30 dBFS RMS. Afterwards all nodes were raised by 9 dB: on the C6 nodes the MAX98357A GAIN pin (GPIO 0) went from 3 dB (pull-up) to 15 dB (pull-down) with 3 dB less software gain; the S3 post-gains went up by 9 dB. The C6 step assumes the internal pull-up / pull-down (~45 kOhm) give the datasheet's 3 / 15 dB (specified for 100 kOhm); check with `caltone pink -30` (all nodes should then read ~66.5 dBA).
 
 Recalibrate when drivers, amplifiers or gain straps change.
 

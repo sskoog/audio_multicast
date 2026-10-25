@@ -114,6 +114,15 @@ void I2sAudioDriver::setHardwareGain(Max98357Gain gain) {
             m_current_gain = Max98357Gain::GAIN_12DB;
             ESP_LOGI(TAG, "MAX98357A Hardware GAIN set to 12 dB (Output LOW on GPIO %d)", m_gain_pin);
             break;
+
+        case Max98357Gain::GAIN_15DB:
+            io_conf.mode = GPIO_MODE_INPUT;
+            io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+            io_conf.pull_down_en = GPIO_PULLDOWN_ENABLE;
+            gpio_config(&io_conf);
+            m_current_gain = Max98357Gain::GAIN_15DB;
+            ESP_LOGI(TAG, "MAX98357A Hardware GAIN set to 15 dB (Input + Pull-Down on GPIO %d)", m_gain_pin);
+            break;
     }
 }
 

@@ -116,11 +116,11 @@ const system_config_t* get_system_config(void) {
             s_active_config.node_id = 23;
             s_active_config.device_name = "ESP32-C6-23-CNTR";
             s_active_config.default_channel = 2; // Center (Ch 2)
-            s_active_config.max98357a_gain_db = 12; // MAX98357A GAIN wired to GPIO 0: output LOW = 12 dB
+            s_active_config.max98357a_gain_db = 15; // MAX98357A GAIN wired to GPIO 0: input + pull-down = 15 dB
         } else if (mac[5] == 0xE4 && mac[4] == 0x18) {
             s_active_config.node_id = 24;
             s_active_config.device_name = "ESP32-C6-24-LSUR";
-            s_active_config.max98357a_gain_db = 12; // MAX98357A GAIN wired to GPIO 0: output LOW = 12 dB
+            s_active_config.max98357a_gain_db = 15; // MAX98357A GAIN wired to GPIO 0: input + pull-down = 15 dB
             s_active_config.default_channel = 3; // Surround Left (Ch 3); was the subwoofer (Ch 5) until 2026-10-25
         } else if (mac[5] == 0xEC && mac[4] == 0x57) {
             s_active_config.node_id = 21;

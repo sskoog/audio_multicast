@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cal_signal.hpp"
+#include "thdn_meter.hpp"
 #include "config.h"
 #include "vsaf_protocol.hpp"
 #include "lc3_codec.hpp"
@@ -706,6 +707,11 @@ public:
     std::atomic<uint32_t> m_sync_unsynced_frames{0};
     std::atomic<int64_t>  m_dbg_played{0}, m_dbg_written{0}, m_dbg_t{0};
     std::atomic<bool>     m_sync_disable{false};
+    // THD+N self-test (console `thdn`): state 0 idle, 1 measuring (SINK task owns the meters), 2 done
+    Audio::ThdnMeter      m_thdn_dec, m_thdn_out;
+    std::atomic<int>      m_thdn_state{0};
+    uint32_t              m_thdn_target_frames = 0;
+    uint32_t              m_thdn_skipped = 0;     // frames not used at the output tap (sample edits, coarse)
     std::atomic<uint32_t> m_dma_rebase{0};
     std::atomic<int32_t>  m_dbg_q_min{1 << 30}, m_dbg_q_max{-(1 << 30)};
 private: // SOURCE: max |tick - grid| (us) since last read

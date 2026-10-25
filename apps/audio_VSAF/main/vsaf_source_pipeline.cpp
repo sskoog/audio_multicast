@@ -211,13 +211,16 @@ void EspNowBroadcastEngine::srcRunDsp(SrcFrame& f) {
     }
     const bool stereo = m_is_stereo || m_tone_test_mode;
 
-    // USB host volume / mute (Windows sends it as hardware volume and does not scale the PCM), ramped linearly
-    // over the frame to avoid zipper noise. Not applied to the internal test signals.
+    // USB host volume / mute (CONFIG_VSAF_APPLY_USB_HOST_VOLUME): Windows sends the slider as feature-unit
+    // requests and does not scale the PCM, ramped linearly over the frame against zipper noise. `usbvol` shows
+    // what the host sends.
     static float s_vol_l = 1.0f, s_vol_r = 1.0f;
     float tgt_l = 1.0f, tgt_r = 1.0f;
+#if CONFIG_VSAF_APPLY_USB_HOST_VOLUME
     if (!m_tone_test_mode) {
         usb_audio_get_gain(&tgt_l, &tgt_r);
     }
+#endif
     const float step_l = (tgt_l - s_vol_l) / static_cast<float>(samples);
     const float step_r = (tgt_r - s_vol_r) / static_cast<float>(samples);
 

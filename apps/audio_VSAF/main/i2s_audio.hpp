@@ -16,7 +16,8 @@ enum class Max98357Gain {
     GAIN_3DB = 3,   // Input with internal pull-up (~45k to VDD -> 3 dB)
     GAIN_6DB = 6,   // Output HIGH (Direct VDD -> 6 dB)
     GAIN_9DB = 9,   // Input High-Z / Floating (No pulls -> 9 dB)
-    GAIN_12DB = 12  // Output LOW (Direct GND -> 12 dB)
+    GAIN_12DB = 12, // Output LOW (Direct GND -> 12 dB)
+    GAIN_15DB = 15  // Input with internal pull-down (~45k to GND; datasheet: 100k to GND -> 15 dB)
 };
 
 class I2sAudioDriver {

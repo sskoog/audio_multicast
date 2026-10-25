@@ -58,8 +58,8 @@ Main building blocks:
 | **Node 16** | Seeed Studio XIAO ESP32-S3 | ESP32-S3 (Xtensa Dual-Core + FPU) | 4 MB / 512 KB (no PSRAM) | `E0:72:A1:D8:4C:D0` | **COM16** (Bootloader)<br>**COM116** (Runtime App) | **Audio SOURCE**: UAC1 USB Audio Speaker (48 kHz 16-bit Stereo), dual-core DSP + LC3 pipeline (5 satellites dual-rate + sub), RF task, round-robin telemetry collector, User LED (GPIO 21). |
 | **Node 20** | Waveshare ESP32-C6-LCD-1.47 | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `AC:EB:E6:23:DC:24` | **COM20** | **Audio SINK / Subwoofer (Ch 5)**: MAX98357A I2S Mono DAC (+3 dB gain), ST7789 1.47" LCD Console Display, WS2812B RGB LED (GPIO 8), 8 kHz decimated LC3 decoding. |
 | **Node 21** | ESP32-C6-WROOM-1 DevKit | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `98:A3:16:9D:57:EC` | **COM21** (Flash)<br>**COM121** (App) | Audio SINK (Ch 2: Center) / USB Host Bridge: MAX98357A I2S DAC (+3 dB gain), CP2102N UART bridge + Native USB. |
-| **Node 23** | Waveshare ESP32-C6-Zero | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `B0:A6:04:99:38:44` | **COM23** | **Audio SINK (Ch 2: Center)**: MAX98357A I2S Mono DAC (GAIN on GPIO 0, set to 12 dB), WS2812B RGB LED (GPIO 8). |
-| **Node 24** | Waveshare ESP32-C6-Zero | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `B0:A6:04:99:18:E4` | **COM24** | **Audio SINK (Ch 3: Surround Left)**, satellite driver (was the Ch 5 subwoofer until 2026-10-25): MAX98357A I2S Mono DAC (GAIN on GPIO 0, set to 12 dB), WS2812B RGB LED (GPIO 8). |
+| **Node 23** | Waveshare ESP32-C6-Zero | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `B0:A6:04:99:38:44` | **COM23** | **Audio SINK (Ch 2: Center)**: MAX98357A I2S Mono DAC (GAIN on GPIO 0, set to 15 dB), WS2812B RGB LED (GPIO 8). |
+| **Node 24** | Waveshare ESP32-C6-Zero | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `B0:A6:04:99:18:E4` | **COM24** | **Audio SINK (Ch 3: Surround Left)**, satellite driver (was the Ch 5 subwoofer until 2026-10-25): MAX98357A I2S Mono DAC (GAIN on GPIO 0, set to 15 dB), WS2812B RGB LED (GPIO 8). |
 | **Node 25** | Heemol ESP32-C6 Mini | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `E8:3D:C1:FB:DC:C4` | **COM25** (or COM10) | Audio SINK (Ch 3: Surround Left) / Test Node: MAX98357A I2S DAC (+3 dB gain), discrete User LED (GPIO 15). |
 | **Node 26** | Heemol ESP32-C6 Mini | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `98:A3:16:AC:13:38` | **COM26** (or COM22) | Audio SINK (Ch 4: Surround Right) / Test Node: MAX98357A I2S DAC (+3 dB gain), discrete User LED (GPIO 15). |
 
@@ -245,7 +245,7 @@ The 10 ms frame is the master metronome (GOALS.md): every task must finish insid
 | Task | Core | Prio | Role |
 | :--- | :--- | :--- | :--- |
 | `esp_timer` callback `frameTimerCb` | 0 | 22 | Frame tick: notifies `src_dsp0` and `src_rf` (`SRC_BIT_TICK`) |
-| `src_dsp0` | 0 | 5 | USB read (or tone synth / `caltone`) -> USB host volume + mute -> LR4 crossover -> sub decimation -> publish frame -> encode jobs |
+| `src_dsp0` | 0 | 5 | USB read (or tone synth / `caltone`) -> LR4 crossover -> sub decimation -> publish frame -> encode jobs |
 | `src_enc1` | 1 | 5 | Encode jobs of the published frame |
 | `src_rf` | 1 | 7 | Radio owner: radio health, deferred channel / PHY changes, one packet in flight |
 | Wi-Fi driver | 0 | 23 | ESP-IDF; calls the ESP-NOW send callback (TX-done) |

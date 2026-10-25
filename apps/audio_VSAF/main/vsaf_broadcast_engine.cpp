@@ -1830,6 +1830,16 @@ void EspNowBroadcastEngine::runSinkLoop() {
         float dec_ms = (esp_timer_get_time() - dec_t0) / 1000.0f;
         m_codec_duration_buf.push(dec_ms);
         m_audio_meter.pushFramePcm(pcm_mono, samples_per_frame);
+        // THD+N self-test, tap 1: decoder output of HQ frames (before sample edits and gain)
+        const bool thdn_frame = m_thdn_state.load(std::memory_order_acquire) == 1 && has_item && !item.is_redundant &&
+                                actual_samples == 480 && samples_per_frame == 480;
+        if (thdn_frame) {
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+            m_thdn_dec.addFrame(pcm_mono, 1, 0);  // 24-bit in int32
+#else
+            m_thdn_dec.addFrame(pcm_mono, 1, 0);  // 16-bit
+#endif
+        }
 
         // Frame time of this frame (SOURCE clock): from the FIFO item, or the expected one for a concealed frame
         const uint32_t frame_us = 10000;
@@ -2071,6 +2081,21 @@ void EspNowBroadcastEngine::runSinkLoop() {
         }
 #endif
         if (m_i2s_dac) {
+            // THD+N self-test, tap 2: the samples handed to I2S (after gain and clamping), unedited frames only
+            if (thdn_frame) {
+                if (n_out == 480 && skip_head == 0) {
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+                    m_thdn_out.addFrame(pcm_stereo, 2, 8);  // 24-bit << 8 in int32 -> 24-bit
+#else
+                    m_thdn_out.addFrame(pcm_stereo, 2, 0);
+#endif
+                } else {
+                    m_thdn_skipped++;
+                }
+                if (m_thdn_dec.frames() >= m_thdn_target_frames) {
+                    m_thdn_state.store(2, std::memory_order_release);
+                }
+            }
             dac_push(pcm_stereo, n_out);
         } else {
             vTaskDelay(pdMS_TO_TICKS(10));

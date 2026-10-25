@@ -83,6 +83,12 @@ extern "C" {
 #define CONFIG_VSAF_DAC_DELAY_US 0
 #endif
 
+#ifndef CONFIG_VSAF_APPLY_USB_HOST_VOLUME
+// SOURCE: apply the UAC1 feature-unit volume / mute from the USB host. Windows treats the device as having
+// hardware volume: it sends the slider as SET_CUR requests and does not scale the PCM itself.
+#define CONFIG_VSAF_APPLY_USB_HOST_VOLUME 1
+#endif
+
 #ifndef CONFIG_VSAF_DMA_DESC_PER_FRAME
 // SINK: I2S DMA descriptors per 10 ms audio frame (2 descriptors in the ring either way). 2 = 5 ms descriptors:
 // the SINK decodes a frame only ~5-10 ms + staging before it plays instead of ~20-25 ms, which leaves that much

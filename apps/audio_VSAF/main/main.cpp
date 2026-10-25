@@ -385,15 +385,15 @@ extern "C" void app_main(void) {
         // drivers differ). SPL calibration 2026-10-25 (TRS TA650A, dB-A, slow; `caltone pink -30`, volume 100 %):
         // level at 0 dB post-gain N4 91.3, N5 79.5, N23 58.1, N24 57.5 dBA with MAX98357A GAIN at 3 dB (N23: one 65.0
         // reading was an outlier); check pass 56.9-57.5 dBA. Then all nodes +6 dB: C6 MAX98357A GAIN 3 -> 12 dB with
-        // 3 dB less software gain, S3 nodes +6 dB. Valid for the drivers connected then (N4: one driver of pipe D,
+        // 3 dB less software gain, S3 nodes +6 dB; then GAIN 15 dB and S3 +3 dB more (all +9 dB vs. calibration). Valid for the drivers connected then (N4: one driver of pipe D,
         // N5: both drivers of pipe C, N23: one 4-ohm driver in pipe A, N24: one 4-ohm driver in pipe E).
         float postgain_db = cfg->is_pcm5102a ? -34.0f : 0.0f; // uncalibrated default: quiet on PCM5102A + TPA3118
         if (matched_node) {
             switch (matched_node->node_id) {
-                case 4:  postgain_db = -27.8f; break; // S3 PCM5102A + TPA3118
-                case 5:  postgain_db = -16.0f; break; // S3 PCM5102A + TPA3118
-                case 23: postgain_db =  -3.6f; break; // C6 MAX98357A, HW gain 12 dB (from measurements 1 + 3)
-                case 24: postgain_db =  -3.0f; break; // C6 MAX98357A, HW gain 12 dB (reference: quietest node)
+                case 4:  postgain_db = -24.8f; break; // S3 PCM5102A + TPA3118
+                case 5:  postgain_db = -13.0f; break; // S3 PCM5102A + TPA3118
+                case 23: postgain_db =  -3.6f; break; // C6 MAX98357A, HW gain 15 dB (from measurements 1 + 3)
+                case 24: postgain_db =  -3.0f; break; // C6 MAX98357A, HW gain 15 dB (reference: quietest node)
                 default: break;
             }
         }
