@@ -61,14 +61,14 @@ Both Bluetooth 5.3+ Low Energy Audio and ESP-NOW (802.11) are used as layer-2 co
 ### Bluetooth 5.3+ Low Energy Audio (to be implemented)
 To be defined.
 
-### 802.11 (ESP-NOW) Packet Structure (VSAF 3.0, `apps/audio_VSAF`)
+### 802.11 (ESP-NOW) Packet Structure (VSAF 3.1, `apps/audio_VSAF`)
 Source of truth: `apps/audio_VSAF/main/vsaf_protocol.hpp`. Audio packets are strictly 248 bytes, 32-bit word aligned, little-endian, with multi-tier Unequal Error Protection (UEP) redundancy and round-robin SINK replies. Full spec: `apps/audio_VSAF/README_audio_VSAF.md`.
-- **Packet types (`type_id`)**: `0x1337` Satellite audio (Ch 0-4), `0x1338` Subwoofer audio (Ch 5), `0x1350` Control (from SOURCE), `0x1360` SINK telemetry reply (16 bytes).
+- **Packet types (`type_id`)**: `0x1337` Satellite audio (Ch 0-4), `0x1338` Subwoofer audio (Ch 5), `0x1350` Control (from SOURCE, 88 bytes, every 100 ms: per-channel clock offset / drift / RTT / trim + playout latency), `0x1360` SINK telemetry reply (20 bytes, doubles as the PTP delay request: t2, dwell, previous reply's TX delay, playout error).
 - **8-Byte Word-Aligned Header** (both audio types):
   - `type_id` (2B)
   - `packet_flags` (1B): Bit 0: Frame duration (0=7.5 ms deprecated, 1=10 ms), Bits 1-3: Sample rate code (0=8k, 1=16k, 2=24k, 3=32k, 4=48k), Bits 4-6: Receiver channel ID (0-5, 7=broadcast), Bit 7: REQ_ACK (this SINK must reply with telemetry)
   - `seq` (1B): Monotonically incrementing 8-bit sequence number (0-255)
-  - `t_tx1_us` (4B): SOURCE microsecond master presentation timestamp (`esp_timer_get_time()`)
+  - `t_tx1_us` (4B): SOURCE frame time t0(N) in us (low 32 bits of `esp_timer` on the 10 ms frame grid, same in all packets of a frame; redundant frame t-k = t0 - k x 10 ms). Presentation time = t0 + latency + trim[ch]. See README section 6.
 - **Satellite payload (`0x1337`, 240 Bytes, 3-tier)**: t0 120 B (HQ, offset 8) + t-1 60 B (redundancy, offset 128) + t-2 60 B (redundancy, offset 188).
 - **Subwoofer payload (`0x1338`, 240 Bytes, 4-tier)**: t0 / t-1 / t-2 / t-3, 60 B each @ 8 kHz (offsets 8 / 68 / 128 / 188).
 

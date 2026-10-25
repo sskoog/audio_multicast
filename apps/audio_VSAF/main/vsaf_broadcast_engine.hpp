@@ -289,7 +289,9 @@ public:
 
     // Packet Callbacks
     void onPacketSent(const uint8_t* mac_addr, esp_now_send_status_t status);
-    void onPacketReceived(const uint8_t* mac_addr, const uint8_t* data, int data_len, int8_t rssi = -127, uint8_t rate = 0);
+    // t_rx_us: esp_timer at the start of the receive callback; rx_hw_ts: rx_ctrl->timestamp (probe only)
+    void onPacketReceived(const uint8_t* mac_addr, const uint8_t* data, int data_len, int8_t rssi = -127, uint8_t rate = 0,
+                          int64_t t_rx_us = 0, uint32_t rx_hw_ts = 0);
 
     // Audio Input Pipeline
     bool pushUsbAudioPcm(const int16_t* pcm_stereo, size_t samples_per_channel);
@@ -453,6 +455,62 @@ public:
     // Called from the ESP-NOW send callback (Wi-Fi task context)
     void onSrcTxDone(esp_now_send_status_t status);
 
+    // ---------------- Time synchronization (vsaf_time_sync.cpp) ----------------
+    // SOURCE: PTP-like offset estimate per channel from the REQ_ACK packet + telemetry reply exchange
+    struct PtpChannelStatus {
+        bool     valid;            // at least one two-step sample in the window
+        int32_t  offset_us;        // SINK clock - SOURCE clock, projected to now (modulo 2^32)
+        int32_t  drift_ppb;        // SINK clock rate vs SOURCE (+ = SINK fast)
+        uint16_t rtt_us;           // round trip of the best sample in the window
+        uint8_t  samples;          // two-step samples in the window
+        uint32_t samples_total;    // all two-step samples
+        uint32_t twostep_miss;     // replies whose previous exchange could not be completed
+        uint32_t t1_miss;          // replies without a matching t1 (REQ_ACK TX-done) record
+        int16_t  playout_err_us;   // last playout error reported by the SINK
+        int16_t  trim_us;
+    };
+    void getPtpStatus(uint8_t ch, PtpChannelStatus& out);
+    void setChannelTrimUs(uint8_t ch, int16_t us);
+    int32_t takeSrcGridDevMax() { return m_src_grid_dev_max.exchange(0, std::memory_order_relaxed); }
+    void setPlayoutLatencyUs(uint32_t us) { m_latency_us.store(us, std::memory_order_relaxed); }
+    uint32_t getPlayoutLatencyUs() const { return m_latency_us.load(std::memory_order_relaxed); }
+
+    // SINK: time sync / scheduled playout state
+    struct SinkSyncStatus {
+        bool     sync_valid;       // recent control frame with an estimate for our channel
+        bool     aligned;          // playout locked to the presentation time
+        int32_t  offset_us;        // offset in use (SINK - SOURCE)
+        int32_t  drift_ppb;
+        uint32_t ctrl_age_ms;      // since the last control frame
+        uint32_t latency_us;
+        int16_t  trim_us;
+        uint16_t rtt_us;
+        int32_t  err_filt_us;      // filtered playout error (+ = late)
+        int32_t  err_max_abs_us;   // max |raw error| since the last reset
+        uint32_t coarse_aligns;    // frame skips / silence pads (start, recovery)
+        uint32_t fine_corrections; // single-sample inserts / drops
+        uint32_t ctrl_frames;
+        uint32_t why_jump, why_theta, why_skip, why_head, why_pad;  // coarse-align causes
+    };
+    void getSinkSyncStatus(SinkSyncStatus& out, bool reset_window);
+    // Receive timestamp probe: (esp_timer at callback, low 32 bits) - rx_ctrl->timestamp, min / max per window
+    void getRxTsProbe(int32_t& min_d, int32_t& max_d, uint32_t& n, bool reset);
+    // SINK self-test ('syncprobe'): SOURCE-time of a common packet's arrival and of a frame's playout, once per second
+    struct SyncProbe {
+        bool     rx_new;
+        uint32_t rx_frame_t;       // frame time of the subwoofer packet (all SINKs receive it)
+        uint32_t rx_master;        // its arrival time converted to SOURCE time
+        bool     play_new;
+        uint32_t play_frame_t;     // frame whose first sample is scheduled
+        uint32_t play_master;      // predicted play time of that sample in SOURCE time
+        int32_t  play_err_us;      // vs. its presentation time
+    };
+    bool takeSyncProbe(SyncProbe& out);
+    void setSyncProbe(bool on) { m_syncprobe.store(on, std::memory_order_relaxed); }
+    bool getSyncProbe() const { return m_syncprobe.load(std::memory_order_relaxed); }
+    // SINK: ESP-NOW send callback (telemetry reply TX-done) for the two-step correction
+    void onSinkTxDone();
+
     void setStereo(bool stereo) { m_is_stereo = stereo; }
     bool isStereo() const { return m_is_stereo; }
 
@@ -493,6 +551,7 @@ private:
     struct SrcFrame {
         uint32_t frame_no = 0;  // monotonic frame counter (seq = frame_no & 0xFF)
         int64_t  t0_us = 0;     // frame-timer tick
+        int64_t  t_grid_us = 0; // ideal frame time on the exact 10 ms timer grid (stamped into the packets)
         size_t   samples = 480;
         uint8_t  ack_ch = 0;    // channel whose packet requests the telemetry reply (sent last)
         SrcJob   jobs[SRC_NUM_JOBS] = {};
@@ -503,6 +562,7 @@ private:
         std::atomic<uint8_t>  pkt_ready[SRC_NUM_PKTS] = {};
         std::atomic<uint8_t>  hq_done[NUM_SATELLITE_CHANNELS] = {}; // HQ phase finished (MQ may run)
     };
+    static constexpr uint32_t SRC_CONTROL_EVERY_FRAMES = 10; // control frame (time sync) every 100 ms
     static constexpr uint32_t SRC_BIT_TICK   = 1u << 0; // frame timer fired (radio health / pending changes)
     static constexpr uint32_t SRC_BIT_FRAME  = 1u << 1; // core 0 published a new frame
     static constexpr uint32_t SRC_BIT_PKT    = 1u << 2; // a packet became ready
@@ -530,6 +590,7 @@ private:
     TaskHandle_t               m_src_rf_task{nullptr};
     SrcFrame                   m_src_frames[2];                          // by frame_no & 1
     std::atomic<uint32_t>      m_src_pub_frame_no{0};                    // last frame published by core 0
+    int64_t                    m_src_grid_epoch_us = -1;                 // first frame tick (grid origin)
     std::atomic<int64_t>       m_src_tick_us{0};                         // time of the last frame-timer tick
     int16_t                    m_src_pcm_sat[2][NUM_SATELLITE_CHANNELS][480];
     int16_t                    m_src_pcm_sub[2][80];
@@ -559,7 +620,93 @@ private:
     SourceTimingSnapshot       m_src_timing_snap;
 
     void handleAudioPacket(const uint8_t* data, size_t data_len, int8_t rssi, int64_t t_rx1_us);
-    void sendSinkTelemetry(uint8_t ack_seq, uint32_t t_tx1_echo, int64_t t_rx1_us, int8_t rssi);
+    void sendSinkTelemetry(uint8_t ack_seq, int64_t t_rx1_us, int8_t rssi);
+    bool sinkFifoPush(uint8_t seq, uint8_t len, uint8_t flags, bool redundant, const uint8_t* src, uint32_t t_frame);
+
+    // ---------------- Time synchronization state (vsaf_time_sync.cpp) ----------------
+    struct PtpSample {
+        uint32_t t_ref;            // SOURCE time of the sample (t1)
+        int32_t  theta;            // SINK - SOURCE (us)
+        int32_t  rtt;              // round trip (us)
+    };
+    static constexpr int PTP_SAMPLES = 16;
+    struct PtpChannel {
+        bool      pend_valid = false;  // previous exchange waiting for its two-step correction
+        uint8_t   pend_seq = 0;
+        uint32_t  pend_t1 = 0, pend_t2 = 0, pend_t3s = 0, pend_t4 = 0;
+        PtpSample s[PTP_SAMPLES] = {};
+        uint8_t   head = 0, count = 0;
+        bool      drift_ref_valid = false;
+        uint32_t  drift_ref_t = 0;
+        int32_t   drift_ref_theta = 0;
+        bool      drift_valid = false;
+        int32_t   drift_ppb = 0;
+        uint32_t  samples_total = 0, twostep_miss = 0, t1_miss = 0;
+        int16_t   playout_err_us = VSAF_PLAYOUT_ERR_UNKNOWN;
+    };
+    PtpChannel                 m_ptp[MAX_SINK_NODES];
+    portMUX_TYPE               m_ptp_mux = portMUX_INITIALIZER_UNLOCKED;
+    // t1 of each REQ_ACK packet (SOURCE TX-done time) indexed by seq, tagged with the frame number
+    std::atomic<uint32_t>      m_ptp_t1[256] = {};
+    std::atomic<uint32_t>      m_ptp_t1_frame[256] = {};
+    std::atomic<int16_t>       m_trim_us[MAX_SINK_NODES] = {};
+    std::atomic<uint32_t>      m_latency_us{CONFIG_VSAF_PLAYOUT_LATENCY_US};
+    vsaf_control_t             m_ctrl_pkt = {};
+    uint8_t                    m_ctrl_seq = 0;
+    void ptpOnTelemetry(const vsaf_sink_telemetry_t* t, uint32_t t4);
+    bool ptpBest(PtpChannel& c, uint32_t now32, int32_t& theta_now, uint16_t& rtt, uint8_t& n);  // m_ptp_mux held
+    void srcBuildControl(vsaf_control_t& out);
+    void sinkOnControl(const uint8_t* data, int len);
+    bool sinkCurrentTheta(int64_t now_local, int32_t& theta, uint32_t& latency, int16_t& trim);
+
+    struct SinkSync {
+        bool     valid = false;
+        int32_t  offset = 0;
+        uint32_t t_ref = 0;
+        int32_t  drift = 0;
+        uint32_t latency = CONFIG_VSAF_PLAYOUT_LATENCY_US;
+        int16_t  trim = 0;
+        uint16_t rtt = 0;
+        int64_t  last_ctrl_us = 0;
+        uint32_t ctrl_frames = 0;
+    };
+    SinkSync                   m_sync;
+    portMUX_TYPE               m_sync_mux = portMUX_INITIALIZER_UNLOCKED;
+    std::atomic<bool>          m_sync_aligned{false};
+    std::atomic<int32_t>       m_sync_offset_used{0};
+    std::atomic<int32_t>       m_sync_err_filt{0};
+    std::atomic<int32_t>       m_sync_err_maxabs{0};
+    std::atomic<uint32_t>      m_sync_coarse{0};
+    std::atomic<uint32_t>      m_sync_fine{0};
+    std::atomic<uint32_t>      m_sync_why[5] = {};   // coarse causes: timeline jump, offset jump, skip, head drop, pad
+    std::atomic<int32_t>       m_src_grid_dev_max{0};
+public:
+    // Debug ring of the last coarse alignments (SINK task writes, console reads)
+    struct CoarseEvent { int32_t err_us; uint16_t fifo; int16_t dma_queued; uint8_t has_item; uint8_t was_aligned; uint16_t frames_since; };
+    CoarseEvent m_coarse_ring[8] = {};
+    uint32_t    m_coarse_head = 0;
+    std::atomic<uint32_t> m_sync_unsynced_frames{0};
+    std::atomic<int64_t>  m_dbg_played{0}, m_dbg_written{0}, m_dbg_t{0};
+    std::atomic<bool>     m_sync_disable{false};
+    std::atomic<uint32_t> m_dma_rebase{0};
+    std::atomic<int32_t>  m_dbg_q_min{1 << 30}, m_dbg_q_max{-(1 << 30)};
+private: // SOURCE: max |tick - grid| (us) since last read
+    std::atomic<int16_t>       m_playout_err_report{VSAF_PLAYOUT_ERR_UNKNOWN};
+    // SINK reply two-step: submit time of the reply in flight, and the measured delay of the previous one
+    std::atomic<uint32_t>      m_reply_submit_us{0};
+    std::atomic<uint8_t>       m_reply_seq{0};
+    std::atomic<bool>          m_reply_inflight{false};
+    std::atomic<uint16_t>      m_prev_reply_delay_us{0};
+    std::atomic<uint8_t>       m_prev_reply_seq{0};
+    std::atomic<bool>          m_prev_reply_valid{false};
+    // Receive timestamp probe
+    std::atomic<int32_t>       m_rxts_min{INT32_MAX};
+    std::atomic<int32_t>       m_rxts_max{INT32_MIN};
+    std::atomic<uint32_t>      m_rxts_n{0};
+    // Sync self-test probe
+    std::atomic<bool>          m_syncprobe{false};
+    portMUX_TYPE               m_probe_mux = portMUX_INITIALIZER_UNLOCKED;
+    SyncProbe                  m_probe = {};
 
     Codec::Lc3CodecEngine&          m_lc3_codec;
     Audio::ToneGenerator*           m_tone_gen;
@@ -673,6 +820,7 @@ private:
 
     static constexpr size_t    SINK_FIFO_PACKETS = 24;
     struct SinkFifoItem {
+        uint32_t t_frame;          // SOURCE frame time of this frame (presentation time = t_frame + latency + trim)
         uint8_t  seq;
         uint8_t  len;
         uint8_t  flags;

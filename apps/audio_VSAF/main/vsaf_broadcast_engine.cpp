@@ -67,6 +67,7 @@ static void IRAM_ATTR onEspNowSendCb(const esp_now_send_info_t* tx_info, esp_now
     EspNowBroadcastEngine::s_last_tx_status.store(status, std::memory_order_relaxed);
     if (s_engine_instance) {
         s_engine_instance->onSrcTxDone(status); // SOURCE RF task hand-off (no-op on SINKs)
+        s_engine_instance->onSinkTxDone();      // SINK reply TX-done for the time-sync two-step (no-op on SOURCE)
     }
     if (EspNowBroadcastEngine::s_tx_done_sem) {
         BaseType_t xHigherPriorityTaskWoken = pdFALSE;
@@ -78,10 +79,14 @@ static void IRAM_ATTR onEspNowSendCb(const esp_now_send_info_t* tx_info, esp_now
 }
 
 static void IRAM_ATTR onEspNowRecvCb(const esp_now_recv_info_t* esp_now_info, const uint8_t* data, int data_len) {
+    // Receive timestamp first (time sync uses it): esp_timer at callback entry, plus the hardware timestamp for
+    // the 'ptp' probe that compares the two clocks
+    const int64_t t_rx_us = esp_timer_get_time();
     if (!s_engine_instance || !data || data_len < 2) return;
     int8_t rssi = (esp_now_info->rx_ctrl) ? esp_now_info->rx_ctrl->rssi : -127;
     uint8_t rate = (esp_now_info->rx_ctrl) ? esp_now_info->rx_ctrl->rate : 0;
-    s_engine_instance->onPacketReceived(esp_now_info->src_addr, data, data_len, rssi, rate);
+    uint32_t hw_ts = (esp_now_info->rx_ctrl) ? esp_now_info->rx_ctrl->timestamp : 0;
+    s_engine_instance->onPacketReceived(esp_now_info->src_addr, data, data_len, rssi, rate, t_rx_us, hw_ts);
 }
 
 EspNowBroadcastEngine::EspNowBroadcastEngine(Codec::Lc3CodecEngine& primary_codec,
@@ -929,10 +934,19 @@ void EspNowBroadcastEngine::onPacketSent(const uint8_t* mac_addr, esp_now_send_s
     // Handled via ISR semaphore give
 }
 
-void EspNowBroadcastEngine::onPacketReceived(const uint8_t* mac_addr, const uint8_t* data, int data_len, int8_t rssi, uint8_t rate) {
+void EspNowBroadcastEngine::onPacketReceived(const uint8_t* mac_addr, const uint8_t* data, int data_len, int8_t rssi, uint8_t rate,
+                                             int64_t t_rx_us, uint32_t rx_hw_ts) {
     if (!data || data_len < 2) return;
     m_raw_espnow_rx_count++;
-    int64_t t_now_us = esp_timer_get_time();
+    int64_t t_now_us = (t_rx_us != 0) ? t_rx_us : esp_timer_get_time();
+
+    // Probe: callback time minus hardware RX timestamp (same clock -> small, steady value)
+    if (rx_hw_ts != 0) {
+        const int32_t d = static_cast<int32_t>(static_cast<uint32_t>(t_now_us) - rx_hw_ts);
+        if (d < m_rxts_min.load(std::memory_order_relaxed)) m_rxts_min.store(d, std::memory_order_relaxed);
+        if (d > m_rxts_max.load(std::memory_order_relaxed)) m_rxts_max.store(d, std::memory_order_relaxed);
+        m_rxts_n.fetch_add(1, std::memory_order_relaxed);
+    }
 
     uint16_t type_id = *reinterpret_cast<const uint16_t*>(data);
 
@@ -943,12 +957,32 @@ void EspNowBroadcastEngine::onPacketReceived(const uint8_t* mac_addr, const uint
         if (m_state.load(std::memory_order_acquire) == NetworkState::IDLE) {
             return;
         }
+        if (type_id == VSAF_TYPE_CONTROL) {
+            sinkOnControl(data, data_len);
+            return;
+        }
 
         if ((type_id == VSAF_TYPE_AUDIO_SATELLITE && data_len >= static_cast<int>(sizeof(vsaf_audio_packet_t))) ||
             (type_id == VSAF_TYPE_AUDIO_SUBWOOFER && data_len >= static_cast<int>(sizeof(vsaf_sub_packet_t)))) {
             m_raw_audio_pkt_count++;
             m_channel_locked.store(true, std::memory_order_release);
             m_last_rx_audio_pkt_us.store(t_now_us, std::memory_order_release);
+
+            // Sync self-test: every SINK receives the subwoofer packet; once per second (frame time % 1 s) record
+            // its arrival converted to SOURCE time, to compare the SINKs' time bases from the host
+            if (type_id == VSAF_TYPE_AUDIO_SUBWOOFER && m_syncprobe.load(std::memory_order_relaxed)) {
+                uint32_t frame_t;
+                memcpy(&frame_t, data + 4, sizeof(frame_t));
+                if ((frame_t / 10000U) % 100U == 0) {
+                    const uint32_t rx_master = static_cast<uint32_t>(t_now_us) -
+                                               static_cast<uint32_t>(m_sync_offset_used.load(std::memory_order_relaxed));
+                    portENTER_CRITICAL(&m_probe_mux);
+                    m_probe.rx_new = true;
+                    m_probe.rx_frame_t = frame_t;
+                    m_probe.rx_master = rx_master;
+                    portEXIT_CRITICAL(&m_probe_mux);
+                }
+            }
 
             uint8_t flags = data[2];
             uint8_t rx_id = get_flags_rx_id(flags);
@@ -969,20 +1003,23 @@ void EspNowBroadcastEngine::onPacketReceived(const uint8_t* mac_addr, const uint
         if (type_id == VSAF_TYPE_SINK_TELEMETRY && data_len >= static_cast<int>(sizeof(vsaf_sink_telemetry_t))) {
             const auto* ack = reinterpret_cast<const vsaf_sink_telemetry_t*>(data);
 
-            // Verify CRC-16 (over first 12 bytes of telemetry structure)
-            uint16_t computed_crc = calc_crc16(data, sizeof(vsaf_sink_telemetry_t) - 4);
+            // Verify CRC-16 (over the first 18 bytes of the telemetry structure)
+            uint16_t computed_crc = calc_crc16(data, sizeof(vsaf_sink_telemetry_t) - 2);
             if (computed_crc != ack->crc16) {
                 return;
             }
 
             uint8_t sink_id = ack->sink_id;
             if (sink_id < MAX_SINK_NODES) {
-                // Compute RTT metrics
-                // t_tx1_echo is the low 32 bits of the SOURCE esp_timer (wraps every 71.6 min): subtract modulo 2^32
-                int64_t total_rtt = static_cast<int32_t>(static_cast<uint32_t>(t_now_us) - ack->t_tx1_echo);
-                int64_t dwell_us = ack->t_dwell_us;
-                int64_t net_rtt = total_rtt - dwell_us;
-                if (total_rtt >= 0 && total_rtt < 30000) {
+                const uint32_t t4 = static_cast<uint32_t>(t_now_us);
+                // Round trip (single step, display): t4 - t1 - dwell, t1 = TX-done of the REQ_ACK packet
+                const uint8_t s = ack->ack_seq;
+                const uint32_t f_tag = m_ptp_t1_frame[s].load(std::memory_order_acquire);
+                const uint32_t t1 = m_ptp_t1[s].load(std::memory_order_relaxed);
+                const int32_t total_rtt = static_cast<int32_t>(t4 - t1);
+                const int32_t dwell_us = ack->t_dwell_us;
+                const int32_t net_rtt = total_rtt - dwell_us;
+                if (f_tag != 0 && static_cast<uint8_t>(f_tag) == s && total_rtt >= 0 && total_rtt < 30000) {
                     m_peers[sink_id].last_total_rtt_us = static_cast<uint32_t>(total_rtt);
                     m_peers[sink_id].last_dwell_us = static_cast<uint32_t>(dwell_us);
                     m_peers[sink_id].last_net_rtt_us = (net_rtt >= 0) ? static_cast<uint32_t>(net_rtt) : 0;
@@ -992,11 +1029,8 @@ void EspNowBroadcastEngine::onPacketReceived(const uint8_t* mac_addr, const uint
                         : ((m_peers[sink_id].avg_rtt_us * 7 + m_peers[sink_id].last_net_rtt_us) / 8);
                 }
 
-                // Dual-Way PTP Time Sync calculation
-                int64_t offset = ((ack->t_dwell_us) - (total_rtt)) / 2;
-                m_peers[sink_id].clock_offset_us = static_cast<int32_t>(offset);
-                m_time_offset_buf.push(offset / 1000.0f);
-                m_ema_time_offset_ms = (m_ema_time_offset_ms * 0.9f) + (offset / 1000.0f * 0.1f);
+                // Time sync: two-step PTP-like exchange (vsaf_time_sync.cpp)
+                ptpOnTelemetry(ack, t4);
 
                 // Update signal quality & status
                 m_peers[sink_id].last_rssi = rssi; // Uplink RSSI
@@ -1045,169 +1079,39 @@ void EspNowBroadcastEngine::handleAudioPacket(const uint8_t* data, size_t data_l
     const vsaf_audio_packet_t* sat_pkt = reinterpret_cast<const vsaf_audio_packet_t*>(data);
     const vsaf_sub_packet_t*   sub_pkt = reinterpret_cast<const vsaf_sub_packet_t*>(data);
 
-    // Sequence tracking & multi-tier redundancy recovery
+    // Sequence tracking & multi-tier redundancy recovery. Every FIFO item carries the SOURCE frame time of its
+    // frame: t_tx1 is t0 of this packet's t0 frame, the redundant frame t-k belongs to t0 - k * 10 ms.
+    const uint8_t* t0_data = is_sub ? sub_pkt->data_t0 : sat_pkt->data_t0;
+    const uint8_t  t0_len = static_cast<uint8_t>(is_sub ? LC3_FRAME_OCTETS_RED : LC3_FRAME_OCTETS_HQ);
+    const uint8_t* hist[3] = {is_sub ? sub_pkt->data_t_prev1 : sat_pkt->data_t_prev1,
+                              is_sub ? sub_pkt->data_t_prev2 : sat_pkt->data_t_prev2,
+                              is_sub ? sub_pkt->data_t_prev3 : nullptr};
+    const int max_hist = is_sub ? 3 : 2;
+    const uint32_t frame_us = get_flags_frame_dur_us(flags);
     int8_t seq_diff = static_cast<int8_t>(static_cast<uint8_t>(seq - m_last_rx_seq));
 
+    int recover = -1;  // history frames to push before t0; -1 = stale / duplicate packet
     if (!m_first_packet_received || seq_diff < -64 || seq_diff > 64) {
         // Initial synchronization or major sequence discontinuity
         m_first_packet_received = true;
+        recover = 0;
+    } else if (seq_diff >= 1) {
+        // seq_diff - 1 packets were lost: recover as many as the redundancy carries (t-1, t-2, sub also t-3)
+        recover = std::min<int>(seq_diff - 1, max_hist);
+    }
+    if (recover >= 0) {
         m_last_rx_seq = seq;
-
         portENTER_CRITICAL(&m_sink_fifo_lock);
-        if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
-            m_sink_fifo[m_sink_fifo_head].seq = seq;
-            m_sink_fifo[m_sink_fifo_head].len = is_sub ? LC3_FRAME_OCTETS_RED : LC3_FRAME_OCTETS_HQ;
-            m_sink_fifo[m_sink_fifo_head].flags = flags;
-            m_sink_fifo[m_sink_fifo_head].is_redundant = false;
-            memcpy(m_sink_fifo[m_sink_fifo_head].data, is_sub ? sub_pkt->data_t0 : sat_pkt->data_t0, m_sink_fifo[m_sink_fifo_head].len);
-            m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
-            m_sink_fifo_count++;
+        for (int k = recover; k >= 1; --k) {
+            sinkFifoPush(static_cast<uint8_t>(seq - k), LC3_FRAME_OCTETS_RED, flags, true, hist[k - 1],
+                         t_tx1_us - static_cast<uint32_t>(k) * frame_us);
         }
-        portEXIT_CRITICAL(&m_sink_fifo_lock);
-
-        m_rx_packets_total++;
-        m_rx_packets_sec++;
-    } else if (seq_diff == 1) {
-        // Consecutive frame (normal flow): push t0
-        m_last_rx_seq = seq;
-        portENTER_CRITICAL(&m_sink_fifo_lock);
-        if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
-            m_sink_fifo[m_sink_fifo_head].seq = seq;
-            m_sink_fifo[m_sink_fifo_head].len = is_sub ? LC3_FRAME_OCTETS_RED : LC3_FRAME_OCTETS_HQ;
-            m_sink_fifo[m_sink_fifo_head].flags = flags;
-            m_sink_fifo[m_sink_fifo_head].is_redundant = false;
-            memcpy(m_sink_fifo[m_sink_fifo_head].data, is_sub ? sub_pkt->data_t0 : sat_pkt->data_t0, m_sink_fifo[m_sink_fifo_head].len);
-            m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
-            m_sink_fifo_count++;
-        } else {
+        if (!sinkFifoPush(seq, t0_len, flags, false, t0_data, t_tx1_us)) {
             m_fifo_overflows++;
         }
         portEXIT_CRITICAL(&m_sink_fifo_lock);
-
-        m_rx_packets_total++;
-        m_rx_packets_sec++;
-    } else if (seq_diff == 2) {
-        // EXACTLY 1 packet dropped in RF: recover t-1 (60B), then push t0
-        m_last_rx_seq = seq;
-        portENTER_CRITICAL(&m_sink_fifo_lock);
-        // Push t-1
-        if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
-            m_sink_fifo[m_sink_fifo_head].seq = static_cast<uint8_t>(seq - 1);
-            m_sink_fifo[m_sink_fifo_head].len = LC3_FRAME_OCTETS_RED;
-            m_sink_fifo[m_sink_fifo_head].flags = flags;
-            m_sink_fifo[m_sink_fifo_head].is_redundant = true;
-            memcpy(m_sink_fifo[m_sink_fifo_head].data, is_sub ? sub_pkt->data_t_prev1 : sat_pkt->data_t_prev1, LC3_FRAME_OCTETS_RED);
-            m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
-            m_sink_fifo_count++;
-        }
-        // Push t0
-        if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
-            m_sink_fifo[m_sink_fifo_head].seq = seq;
-            m_sink_fifo[m_sink_fifo_head].len = is_sub ? LC3_FRAME_OCTETS_RED : LC3_FRAME_OCTETS_HQ;
-            m_sink_fifo[m_sink_fifo_head].flags = flags;
-            m_sink_fifo[m_sink_fifo_head].is_redundant = false;
-            memcpy(m_sink_fifo[m_sink_fifo_head].data, is_sub ? sub_pkt->data_t0 : sat_pkt->data_t0, m_sink_fifo[m_sink_fifo_head].len);
-            m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
-            m_sink_fifo_count++;
-        } else {
-            m_fifo_overflows++;
-        }
-        portEXIT_CRITICAL(&m_sink_fifo_lock);
-
-        m_rx_packets_total += 2;
-        m_rx_packets_sec += 2;
-    } else if (seq_diff == 3) {
-        // BURST of 2 packets dropped in RF: recover t-2 (60B), then t-1 (60B), then push t0
-        m_last_rx_seq = seq;
-        portENTER_CRITICAL(&m_sink_fifo_lock);
-        // Push t-2
-        if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
-            m_sink_fifo[m_sink_fifo_head].seq = static_cast<uint8_t>(seq - 2);
-            m_sink_fifo[m_sink_fifo_head].len = LC3_FRAME_OCTETS_RED;
-            m_sink_fifo[m_sink_fifo_head].flags = flags;
-            m_sink_fifo[m_sink_fifo_head].is_redundant = true;
-            memcpy(m_sink_fifo[m_sink_fifo_head].data, is_sub ? sub_pkt->data_t_prev2 : sat_pkt->data_t_prev2, LC3_FRAME_OCTETS_RED);
-            m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
-            m_sink_fifo_count++;
-        }
-        // Push t-1
-        if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
-            m_sink_fifo[m_sink_fifo_head].seq = static_cast<uint8_t>(seq - 1);
-            m_sink_fifo[m_sink_fifo_head].len = LC3_FRAME_OCTETS_RED;
-            m_sink_fifo[m_sink_fifo_head].flags = flags;
-            m_sink_fifo[m_sink_fifo_head].is_redundant = true;
-            memcpy(m_sink_fifo[m_sink_fifo_head].data, is_sub ? sub_pkt->data_t_prev1 : sat_pkt->data_t_prev1, LC3_FRAME_OCTETS_RED);
-            m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
-            m_sink_fifo_count++;
-        }
-        // Push t0
-        if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
-            m_sink_fifo[m_sink_fifo_head].seq = seq;
-            m_sink_fifo[m_sink_fifo_head].len = is_sub ? LC3_FRAME_OCTETS_RED : LC3_FRAME_OCTETS_HQ;
-            m_sink_fifo[m_sink_fifo_head].flags = flags;
-            m_sink_fifo[m_sink_fifo_head].is_redundant = false;
-            memcpy(m_sink_fifo[m_sink_fifo_head].data, is_sub ? sub_pkt->data_t0 : sat_pkt->data_t0, m_sink_fifo[m_sink_fifo_head].len);
-            m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
-            m_sink_fifo_count++;
-        } else {
-            m_fifo_overflows++;
-        }
-        portEXIT_CRITICAL(&m_sink_fifo_lock);
-
-        m_rx_packets_total += 3;
-        m_rx_packets_sec += 3;
-    } else if (seq_diff >= 4) {
-        // BURST of 3+ packets dropped: recover available history (up to t-3 for sub, t-2 for sat)
-        m_last_rx_seq = seq;
-        portENTER_CRITICAL(&m_sink_fifo_lock);
-        if (is_sub) {
-            // Push t-3 for Subwoofer
-            if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
-                m_sink_fifo[m_sink_fifo_head].seq = static_cast<uint8_t>(seq - 3);
-                m_sink_fifo[m_sink_fifo_head].len = LC3_FRAME_OCTETS_RED;
-                m_sink_fifo[m_sink_fifo_head].flags = flags;
-                m_sink_fifo[m_sink_fifo_head].is_redundant = true;
-                memcpy(m_sink_fifo[m_sink_fifo_head].data, sub_pkt->data_t_prev3, LC3_FRAME_OCTETS_RED);
-                m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
-                m_sink_fifo_count++;
-            }
-        }
-        // Push t-2
-        if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
-            m_sink_fifo[m_sink_fifo_head].seq = static_cast<uint8_t>(seq - 2);
-            m_sink_fifo[m_sink_fifo_head].len = LC3_FRAME_OCTETS_RED;
-            m_sink_fifo[m_sink_fifo_head].flags = flags;
-            m_sink_fifo[m_sink_fifo_head].is_redundant = true;
-            memcpy(m_sink_fifo[m_sink_fifo_head].data, is_sub ? sub_pkt->data_t_prev2 : sat_pkt->data_t_prev2, LC3_FRAME_OCTETS_RED);
-            m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
-            m_sink_fifo_count++;
-        }
-        // Push t-1
-        if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
-            m_sink_fifo[m_sink_fifo_head].seq = static_cast<uint8_t>(seq - 1);
-            m_sink_fifo[m_sink_fifo_head].len = LC3_FRAME_OCTETS_RED;
-            m_sink_fifo[m_sink_fifo_head].flags = flags;
-            m_sink_fifo[m_sink_fifo_head].is_redundant = true;
-            memcpy(m_sink_fifo[m_sink_fifo_head].data, is_sub ? sub_pkt->data_t_prev1 : sat_pkt->data_t_prev1, LC3_FRAME_OCTETS_RED);
-            m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
-            m_sink_fifo_count++;
-        }
-        // Push t0
-        if (m_sink_fifo_count < SINK_FIFO_PACKETS) {
-            m_sink_fifo[m_sink_fifo_head].seq = seq;
-            m_sink_fifo[m_sink_fifo_head].len = is_sub ? LC3_FRAME_OCTETS_RED : LC3_FRAME_OCTETS_HQ;
-            m_sink_fifo[m_sink_fifo_head].flags = flags;
-            m_sink_fifo[m_sink_fifo_head].is_redundant = false;
-            memcpy(m_sink_fifo[m_sink_fifo_head].data, is_sub ? sub_pkt->data_t0 : sat_pkt->data_t0, m_sink_fifo[m_sink_fifo_head].len);
-            m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
-            m_sink_fifo_count++;
-        } else {
-            m_fifo_overflows++;
-        }
-        portEXIT_CRITICAL(&m_sink_fifo_lock);
-
-        m_rx_packets_total += (is_sub ? 4 : 3);
-        m_rx_packets_sec += (is_sub ? 4 : 3);
+        m_rx_packets_total += static_cast<uint32_t>(recover + 1);
+        m_rx_packets_sec += static_cast<uint32_t>(recover + 1);
     }
     // (If seq_diff <= 0, duplicate/stale frame: ignore)
 
@@ -1219,29 +1123,69 @@ void EspNowBroadcastEngine::handleAudioPacket(const uint8_t* data, size_t data_l
     // SINK Reply on Command Only:
     // Only transmit telemetry reply if SOURCE explicitly requested it in packet_flags (bit 7)
     if (get_flags_req_ack(flags)) {
-        sendSinkTelemetry(seq, t_tx1_us, t_rx1_us, rssi);
+        sendSinkTelemetry(seq, t_rx1_us, rssi);
     }
 }
 
-void EspNowBroadcastEngine::sendSinkTelemetry(uint8_t ack_seq, uint32_t t_tx1_echo, int64_t t_rx1_us, int8_t rssi) {
-    int64_t t_tx2 = esp_timer_get_time();
+/**
+ * @brief Push one frame into the SINK FIFO (m_sink_fifo_lock held).
+ * @return false if the FIFO is full.
+ */
+bool EspNowBroadcastEngine::sinkFifoPush(uint8_t seq, uint8_t len, uint8_t flags, bool redundant, const uint8_t* src,
+                                        uint32_t t_frame) {
+    if (m_sink_fifo_count >= SINK_FIFO_PACKETS || !src) {
+        return false;
+    }
+    SinkFifoItem& it = m_sink_fifo[m_sink_fifo_head];
+    it.t_frame = t_frame;
+    it.seq = seq;
+    it.len = len;
+    it.flags = flags;
+    it.is_redundant = redundant;
+    memcpy(it.data, src, len);
+    m_sink_fifo_head = (m_sink_fifo_head + 1) % SINK_FIFO_PACKETS;
+    m_sink_fifo_count++;
+    return true;
+}
 
+/**
+ * @brief Telemetry reply = time-sync delay request (see vsaf_time_sync.cpp and vsaf_protocol.hpp).
+ *
+ * @param ack_seq  seq of the REQ_ACK packet being answered.
+ * @param t_rx1_us t2: receive time of that packet (SINK esp_timer).
+ * @param rssi     its RSSI.
+ */
+void EspNowBroadcastEngine::sendSinkTelemetry(uint8_t ack_seq, int64_t t_rx1_us, int8_t rssi) {
     vsaf_sink_telemetry_t telem = {};
     telem.type_id = VSAF_TYPE_SINK_TELEMETRY;
     telem.sink_id = m_target_channel;
     telem.ack_seq = ack_seq;
-    telem.t_tx1_echo = t_tx1_echo;
-    telem.t_dwell_us = static_cast<uint16_t>(t_tx2 - t_rx1_us);
+    telem.t_rx_us = static_cast<uint32_t>(t_rx1_us);
     telem.downlink_rssi = rssi;
 
     portENTER_CRITICAL(&m_sink_fifo_lock);
     telem.fifo_fill = static_cast<uint8_t>((m_sink_fifo_count * 100) / SINK_FIFO_PACKETS);
     portEXIT_CRITICAL(&m_sink_fifo_lock);
 
-    telem.crc16 = calc_crc16(reinterpret_cast<const uint8_t*>(&telem), sizeof(vsaf_sink_telemetry_t) - 4);
-    telem.reserved = 0;
+    // Two-step: TX-done delay of our previous reply (measured in its send callback)
+    if (m_prev_reply_valid.exchange(false, std::memory_order_acq_rel)) {
+        telem.flags |= VSAF_TELEM_FLAG_PREV_DELAY_VALID;
+        telem.prev_ack_seq = m_prev_reply_seq.load(std::memory_order_relaxed);
+        telem.prev_tx_delay_us = m_prev_reply_delay_us.load(std::memory_order_relaxed);
+    }
+    telem.playout_err_us = m_playout_err_report.load(std::memory_order_relaxed);
 
-    esp_now_send(s_broadcast_mac, reinterpret_cast<const uint8_t*>(&telem), sizeof(vsaf_sink_telemetry_t));
+    // t3 (submit time) as late as possible, right before the send
+    const int64_t t_tx2 = esp_timer_get_time();
+    telem.t_dwell_us = static_cast<uint16_t>(std::min<int64_t>(t_tx2 - t_rx1_us, 65535));
+    telem.crc16 = calc_crc16(reinterpret_cast<const uint8_t*>(&telem), sizeof(vsaf_sink_telemetry_t) - 2);
+
+    m_reply_seq.store(ack_seq, std::memory_order_relaxed);
+    m_reply_submit_us.store(static_cast<uint32_t>(t_tx2), std::memory_order_relaxed);
+    m_reply_inflight.store(true, std::memory_order_release);
+    if (esp_now_send(s_broadcast_mac, reinterpret_cast<const uint8_t*>(&telem), sizeof(vsaf_sink_telemetry_t)) != ESP_OK) {
+        m_reply_inflight.store(false, std::memory_order_relaxed);
+    }
 }
 
 // SOURCE audio pipeline (DSP, parallel LC3 encoding on both cores, event-driven RF TX) lives in
@@ -1357,6 +1301,53 @@ void EspNowBroadcastEngine::runSinkLoop() {
     uint32_t drift_frames = 0;
     uint32_t drift_last_adj_frame = 0;
     size_t samples_per_frame = (m_telemetry.sample_rate * 10) / 1000;
+    // Scheduled playout (time sync): every frame's first sample is placed on its presentation time
+    // t_frame + latency + trim (SOURCE clock) converted with the offset from the control frames
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+    static int32_t zero_stereo[480 * 2] = {};
+#else
+    static int16_t zero_stereo[480 * 2] = {};
+#endif
+    // DMA staging: the I2S driver with 2 descriptors takes a fresh descriptor on every i2s_channel_write()
+    // (its free-buffer queue holds one entry), so a short write leaves zeros at the end of a descriptor and a
+    // long one spills into a nearly empty descriptor. All output therefore goes through this buffer and only
+    // whole descriptors (samples_per_frame) are written; a dropped / inserted sample then really shifts the
+    // timeline by one sample. Queued audio = i2s_written + stage_n - played.
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+    static int32_t dac_stage[480 * 2];
+#else
+    static int16_t dac_stage[480 * 2];
+#endif
+    size_t   stage_n = 0;        // stereo frames waiting in dac_stage
+    uint32_t q_ovf_seen = m_i2s_dac ? m_i2s_dac->getQueueOverflows() : 0;
+    auto dac_push = [&](const auto* src, size_t n) {
+        while (n > 0 && m_i2s_dac) {
+            const size_t take = std::min(n, samples_per_frame - stage_n);
+            memcpy(&dac_stage[stage_n * 2], src, take * 2 * SAMPLE_SIZE);
+            stage_n += take;
+            src += take * 2;
+            n -= take;
+            if (stage_n >= samples_per_frame) {
+                size_t bytes_written = 0;
+                m_i2s_dac->write(dac_stage, samples_per_frame * SAMPLE_SIZE * 2, &bytes_written, 50);
+                i2s_written += static_cast<int64_t>(bytes_written / (SAMPLE_SIZE * 2));
+                stage_n = 0;
+            }
+        }
+    };
+    static constexpr int32_t SYNC_COARSE_US = 3000;     // larger errors: skip frames / drop or pad samples
+    static constexpr int64_t SYNC_MAX_PAD_SAMPLES = 4800; // at most 100 ms of silence per frame when early
+    static constexpr int32_t SYNC_THETA_SLEW_US = 2;      // offset in use follows the estimate <= 2 us / frame
+    static constexpr int32_t SYNC_THETA_JUMP_US = 1000;   // larger estimate changes: jump and realign
+    bool     sync_aligned = false;
+    bool     theta_valid = false;
+    int32_t  theta_used = 0;
+    int32_t  err_filt_us = 0;     // filtered playout error (us), from err_filt_q8
+    int32_t  err_filt_q8 = 0;     // same in Q8 (us * 256), so the slow EMA has no integer dead zone
+    uint32_t next_frame_t = 0;
+    bool     next_frame_t_valid = false;
+    uint32_t last_fine_frame = 0;
+    int64_t  sync_wait_start_us = 0;
     uint32_t consecutive_underruns = 0;
     static constexpr size_t PREFILL_THRESHOLD = CONFIG_ESPNOW_PREFILL_THRESHOLD_FRAMES; // 2 packets = 20 ms cushion
     int64_t last_hop_time_us = esp_timer_get_time();
@@ -1406,8 +1397,29 @@ void EspNowBroadcastEngine::runSinkLoop() {
             portEXIT_CRITICAL(&m_sink_fifo_lock);
 
             if (buffered >= PREFILL_THRESHOLD) {
-                ESP_LOGI(TAG, "SINK: Jitter buffer prefill threshold reached (%zu pkts on Ch %d) -> PREFILL",
-                         buffered, m_wifi_channel);
+                // Start scheduled (time-synced) playback if possible: wait up to CONFIG_VSAF_SYNC_WAIT_MS for the
+                // first control frame with an estimate for our channel, keeping the FIFO short meanwhile
+                const int64_t now_us = esp_timer_get_time();
+                int32_t th = 0;
+                uint32_t lat = 0;
+                int16_t tr = 0;
+                const bool synced = sinkCurrentTheta(now_us, th, lat, tr);
+                if (sync_wait_start_us == 0) {
+                    sync_wait_start_us = now_us;
+                }
+                if (!synced && now_us - sync_wait_start_us < CONFIG_VSAF_SYNC_WAIT_MS * 1000LL) {
+                    portENTER_CRITICAL(&m_sink_fifo_lock);
+                    while (m_sink_fifo_count > PREFILL_THRESHOLD + 2) {
+                        m_sink_fifo_tail = (m_sink_fifo_tail + 1) % SINK_FIFO_PACKETS;
+                        m_sink_fifo_count--;
+                    }
+                    portEXIT_CRITICAL(&m_sink_fifo_lock);
+                    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
+                    continue;
+                }
+                sync_wait_start_us = 0;
+                ESP_LOGI(TAG, "SINK: Jitter buffer prefill threshold reached (%zu pkts on Ch %d), time sync %s -> PREFILL",
+                         buffered, m_wifi_channel, synced ? "valid" : "NOT valid (unsynchronized start)");
                 transitionTo(NetworkState::PREFILL);
             } else {
                 int64_t now_us = esp_timer_get_time();
@@ -1429,9 +1441,24 @@ void EspNowBroadcastEngine::runSinkLoop() {
         if (m_state.load(std::memory_order_acquire) == NetworkState::PREFILL) {
             if (m_i2s_dac) {
                 m_i2s_dac->stop(); // Ensure stopped before preload
+                q_ovf_seen = m_i2s_dac->getQueueOverflows();
             }
             i2s_written = 0;
+            stage_n = 0;
 
+            int32_t pf_theta = 0;
+            uint32_t pf_lat = 0;
+            int16_t pf_trim = 0;
+            const bool pf_synced = sinkCurrentTheta(esp_timer_get_time(), pf_theta, pf_lat, pf_trim);
+            if (pf_synced) {
+                // Scheduled playout: start the DAC on silence, the first frame is placed on its presentation time
+                for (int d = 0; d < 2 && m_i2s_dac; ++d) {
+                    size_t bytes_written = 0;
+                    m_i2s_dac->preload(zero_stereo, samples_per_frame * SAMPLE_SIZE * 2, &bytes_written);
+                    i2s_written += static_cast<int64_t>(bytes_written / (SAMPLE_SIZE * 2));
+                }
+                m_has_expected_seq = false;
+            } else {
             // Preload Frame 1 into DMA Descriptor 0
             SinkFifoItem item1 = {};
             bool has_item1 = false;
@@ -1541,10 +1568,16 @@ void EspNowBroadcastEngine::runSinkLoop() {
                 m_expected_seq = item2.seq + 1;
                 m_has_expected_seq = true;
             }
+            }  // !pf_synced
 
             if (m_i2s_dac) {
                 m_i2s_dac->start(); // Start hardware DMA clocks with preloaded descriptors
             }
+            sync_aligned = false;
+            theta_valid = false;
+            err_filt_us = 0;
+            err_filt_q8 = 0;
+            next_frame_t_valid = false;
             consecutive_underruns = 0;
             drift_ema_q16 = -1;
             drift_target_q16 = -1;
@@ -1716,22 +1749,60 @@ void EspNowBroadcastEngine::runSinkLoop() {
         m_codec_duration_buf.push(dec_ms);
         m_audio_meter.pushFramePcm(pcm_mono, samples_per_frame);
 
-        // Clock-drift compensation: FIFO depth after this frame's pop, filtered, against the learned target
+        // Frame time of this frame (SOURCE clock): from the FIFO item, or the expected one for a concealed frame
+        const uint32_t frame_us = 10000;
+        uint32_t frame_t = 0;
+        bool frame_t_valid = false;
+        if (has_item) {
+            frame_t = item.t_frame;
+            frame_t_valid = true;
+            if (next_frame_t_valid) {
+                const int32_t jump = static_cast<int32_t>(frame_t - next_frame_t);
+                if (jump > 2000 || jump < -2000) {
+                    sync_aligned = false;  // discontinuity in the SOURCE timeline (restart): realign
+                    m_sync_why[0].fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        } else if (next_frame_t_valid) {
+            frame_t = next_frame_t;
+            frame_t_valid = true;
+        }
+
+        // Buffered audio after this pop: FIFO frames + samples still queued in the I2S DMA (telemetry, and the
+        // fallback drift control). The DMA queue also gives the play time of the next sample written.
         size_t out_samples = samples_per_frame;
+        size_t skip_head = 0;      // samples dropped from the start of this frame (coarse alignment, late)
+        int64_t pad_zeros = 0;     // silence written before this frame (coarse alignment, early)
+        bool skip_frame = false;   // late by >= 1 frame: do not play it
+        const uint32_t sr_hz = static_cast<uint32_t>(samples_per_frame * 100);
+        int64_t dma_queued = 0;
+        int64_t now_us = esp_timer_get_time();
         {
             portENTER_CRITICAL(&m_sink_fifo_lock);
             const uint32_t depth = static_cast<uint32_t>(m_sink_fifo_count);
             portEXIT_CRITICAL(&m_sink_fifo_lock);
-            // Total buffered audio = FIFO frames + samples still queued in the I2S DMA. The FIFO depth alone
-            // jumps by a frame when the write phase against the 480-sample DMA descriptors shifts (e.g. after
-            // one 481-sample write); the total does not.
-            int64_t dma_queued = 0;
             if (m_i2s_dac) {
-                dma_queued = i2s_written - m_i2s_dac->getPlayedSamples();
-                if (dma_queued < 0) {
-                    // DMA played zero-filled descriptors (underrun): those samples were never written
+                now_us = esp_timer_get_time();
+                // DMA underruns: each one played a descriptor of zeros that was never written
+                const uint32_t q_ovf = m_i2s_dac->getQueueOverflows();
+                if (q_ovf != q_ovf_seen) {
+                    i2s_written += static_cast<int64_t>(q_ovf - q_ovf_seen) * m_i2s_dac->getDmaFrameSamples();
+                    q_ovf_seen = q_ovf;
+                    sync_aligned = false;
+                }
+                const int64_t dbg_played = m_i2s_dac->getPlayedSamples();
+                dma_queued = i2s_written + static_cast<int64_t>(stage_n) - dbg_played;
+                if (dma_queued < m_dbg_q_min.load(std::memory_order_relaxed)) m_dbg_q_min.store((int32_t)dma_queued, std::memory_order_relaxed);
+                if (dma_queued > m_dbg_q_max.load(std::memory_order_relaxed)) m_dbg_q_max.store((int32_t)dma_queued, std::memory_order_relaxed);
+                m_dbg_played.store(dbg_played, std::memory_order_relaxed);
+                m_dbg_written.store(i2s_written, std::memory_order_relaxed);
+                m_dbg_t.store(now_us, std::memory_order_relaxed);
+                if (dma_queued < -static_cast<int64_t>(samples_per_frame)) {
+                    // Unexplained (missed overflow event): re-base the counter and realign
                     i2s_written -= dma_queued;
                     dma_queued = 0;
+                    sync_aligned = false;
+                    m_dma_rebase.fetch_add(1, std::memory_order_relaxed);
                 }
             }
             const int64_t occ_samples = static_cast<int64_t>(depth) * samples_per_frame + dma_queued;
@@ -1745,6 +1816,115 @@ void EspNowBroadcastEngine::runSinkLoop() {
             drift_ema_q16 = (drift_ema_q16 < 0) ? depth_q16 : drift_ema_q16 + ((depth_q16 - drift_ema_q16) >> DRIFT_EMA_SHIFT);
             drift_frames++;
             m_frames_played.store(drift_frames, std::memory_order_relaxed);
+        }
+
+        int32_t s_theta = 0;
+        uint32_t s_lat = 0;
+        int16_t s_trim = 0;
+        const bool synced = frame_t_valid && m_i2s_dac && !m_sync_disable.load(std::memory_order_relaxed) && sinkCurrentTheta(now_us, s_theta, s_lat, s_trim);
+        if (synced) {
+            // Offset in use: follows the estimate slowly, jumps (and realigns) only on a large change
+            if (!theta_valid || s_theta - theta_used > SYNC_THETA_JUMP_US || s_theta - theta_used < -SYNC_THETA_JUMP_US) {
+                if (theta_valid) {
+                    m_sync_why[1].fetch_add(1, std::memory_order_relaxed);
+                }
+                theta_used = s_theta;
+                theta_valid = true;
+                sync_aligned = false;
+            } else {
+                theta_used += std::clamp<int32_t>(s_theta - theta_used, -SYNC_THETA_SLEW_US, SYNC_THETA_SLEW_US);
+            }
+            m_sync_offset_used.store(theta_used, std::memory_order_relaxed);
+
+            // Error of this frame's first sample: predicted DAC time vs. presentation time (SINK clock)
+            const uint32_t pt_local = frame_t + s_lat + static_cast<uint32_t>(static_cast<int32_t>(s_trim)) +
+                                      static_cast<uint32_t>(theta_used);
+            const uint32_t play_local = static_cast<uint32_t>(now_us) +
+                                        static_cast<uint32_t>((dma_queued * 1000000) / sr_hz) + CONFIG_VSAF_DAC_DELAY_US;
+            const int32_t err_us = static_cast<int32_t>(play_local - pt_local);  // + = would play late
+            const int32_t abs_err = err_us < 0 ? -err_us : err_us;
+            if (abs_err > m_sync_err_maxabs.load(std::memory_order_relaxed)) {
+                m_sync_err_maxabs.store(abs_err, std::memory_order_relaxed);
+            }
+
+            if (!sync_aligned || err_us > SYNC_COARSE_US || err_us < -SYNC_COARSE_US) {
+                // Coarse: start, recovery or a timeline change
+                const int64_t err_samples = (static_cast<int64_t>(err_us) * sr_hz) / 1000000;
+                {
+                    static uint32_t s_last_coarse_frame = 0;
+                    portENTER_CRITICAL(&m_sink_fifo_lock);
+                    const uint32_t d_fifo = static_cast<uint32_t>(m_sink_fifo_count);
+                    portEXIT_CRITICAL(&m_sink_fifo_lock);
+                    CoarseEvent& ev = m_coarse_ring[m_coarse_head % 8];
+                    ev.err_us = err_us;
+                    ev.fifo = static_cast<uint16_t>(d_fifo);
+                    ev.dma_queued = static_cast<int16_t>(std::clamp<int64_t>(dma_queued, -32768, 32767));
+                    ev.has_item = has_item ? 1 : 0;
+                    ev.was_aligned = sync_aligned ? 1 : 0;
+                    ev.frames_since = static_cast<uint16_t>(std::min<uint32_t>(drift_frames - s_last_coarse_frame, 65535));
+                    s_last_coarse_frame = drift_frames;
+                    m_coarse_head++;
+                }
+                if (err_samples >= static_cast<int64_t>(samples_per_frame)) {
+                    skip_frame = true;  // late by a frame or more: drop it, try the next one
+                    m_sync_why[2].fetch_add(1, std::memory_order_relaxed);
+                } else if (err_samples > 0) {
+                    skip_head = static_cast<size_t>(err_samples);
+                    sync_aligned = true;
+                    m_sync_why[3].fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    m_sync_why[4].fetch_add(1, std::memory_order_relaxed);
+                    pad_zeros = std::min<int64_t>(-err_samples, SYNC_MAX_PAD_SAMPLES);
+                    sync_aligned = (-err_samples <= SYNC_MAX_PAD_SAMPLES);
+                }
+                err_filt_us = 0;
+                err_filt_q8 = 0;
+                m_sync_coarse.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                // Fine: filtered error (EMA 1/32, ~320 ms: the raw per-frame error has ~+/-100 us of ISR and
+                // task-wake jitter), at most one inserted / dropped sample every 2 frames, deadband +/-3/4 sample
+                err_filt_q8 += ((err_us << 8) - err_filt_q8) / 32;
+                err_filt_us = err_filt_q8 >> 8;
+                const int32_t sample_us = static_cast<int32_t>(1000000 / sr_hz);
+                if (drift_frames - last_fine_frame >= 2 && samples_per_frame >= 32) {
+                    if (err_filt_us > (sample_us * 3) / 4) {
+                        out_samples = driftDropSample(pcm_mono, samples_per_frame);
+                        err_filt_q8 -= sample_us << 8;
+                        err_filt_us = err_filt_q8 >> 8;
+                        last_fine_frame = drift_frames;
+                        m_sync_fine.fetch_add(1, std::memory_order_relaxed);
+                        m_drift_adj_total.fetch_sub(1, std::memory_order_relaxed);
+                    } else if (err_filt_us < -(sample_us * 3) / 4) {
+                        out_samples = driftInsertSample(pcm_mono, samples_per_frame);
+                        err_filt_q8 += sample_us << 8;
+                        err_filt_us = err_filt_q8 >> 8;
+                        last_fine_frame = drift_frames;
+                        m_sync_fine.fetch_add(1, std::memory_order_relaxed);
+                        m_drift_adj_total.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
+            }
+            m_sync_err_filt.store(err_filt_us, std::memory_order_relaxed);
+            m_playout_err_report.store(static_cast<int16_t>(std::clamp<int32_t>(sync_aligned ? err_filt_us : err_us, -32767, 32767)),
+                                       std::memory_order_relaxed);
+
+            // Self-test probe: predicted play time of the first sample of the frame at each full second
+            if (m_syncprobe.load(std::memory_order_relaxed) && (frame_t / 10000U) % 100U == 0 && !skip_frame) {
+                const int32_t applied_us = static_cast<int32_t>((skip_head * 1000000ULL) / sr_hz) -
+                                           static_cast<int32_t>((pad_zeros * 1000000LL) / sr_hz);
+                portENTER_CRITICAL(&m_probe_mux);
+                m_probe.play_new = true;
+                m_probe.play_frame_t = frame_t;
+                m_probe.play_master = play_local - static_cast<uint32_t>(theta_used) - static_cast<uint32_t>(applied_us);
+                m_probe.play_err_us = err_us - applied_us;
+                portEXIT_CRITICAL(&m_probe_mux);
+            }
+        } else {
+            // No time sync: unsynchronized playout, FIFO-level clock-drift compensation (section 5.3 of the README)
+            sync_aligned = false;
+            theta_valid = false;
+            m_sync_unsynced_frames.fetch_add(1, std::memory_order_relaxed);
+            m_playout_err_report.store(VSAF_PLAYOUT_ERR_UNKNOWN, std::memory_order_relaxed);
             if (drift_target_q16 < 0 && drift_frames >= DRIFT_LEARN_FRAMES) {
                 drift_target_q16 = std::max(drift_ema_q16, DRIFT_MIN_TARGET_Q16);
                 m_drift_target_x10.store(static_cast<int32_t>((static_cast<int64_t>(drift_target_q16) * 10 + 32768) >> 16),
@@ -1766,45 +1946,53 @@ void EspNowBroadcastEngine::runSinkLoop() {
                 }
             }
         }
+        m_sync_aligned.store(synced && sync_aligned, std::memory_order_relaxed);
+        if (frame_t_valid) {
+            next_frame_t = frame_t + frame_us;
+            next_frame_t_valid = true;
+        }
+        if (skip_frame) {
+            continue;  // late: not played, the next frame is checked right away
+        }
 
-        // Mono to Stereo duplication for I2S DAC
+        // Silence before the frame (coarse alignment, early)
+        while (pad_zeros > 0 && m_i2s_dac) {
+            const size_t n = static_cast<size_t>(std::min<int64_t>(pad_zeros, static_cast<int64_t>(samples_per_frame)));
+            dac_push(zero_stereo, n);
+            pad_zeros -= static_cast<int64_t>(n);
+        }
+        if (skip_head >= out_samples) {
+            skip_head = 0;
+        }
+
+        // Mono to Stereo duplication for I2S DAC (from skip_head on)
         float total_gain_db = m_current_gain_db + m_post_gain_db;
         float gain = (m_current_gain_db <= -90.0f) ? 0.0f : std::pow(10.0f, total_gain_db / 20.0f);
+        const size_t n_out = out_samples - skip_head;
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
-        for (size_t i = 0; i < out_samples; ++i) {
-            int64_t val = static_cast<int64_t>(pcm_mono[i] * gain);
+        for (size_t i = 0; i < n_out; ++i) {
+            int64_t val = static_cast<int64_t>(pcm_mono[i + skip_head] * gain);
             if (val > 8388607) val = 8388607;
             if (val < -8388608) val = -8388608;
             int32_t sample = static_cast<int32_t>(val << 8) & 0xffffff00;
             pcm_stereo[i * 2]     = sample;
             pcm_stereo[i * 2 + 1] = sample;
         }
-
-        if (m_i2s_dac) {
-            size_t bytes_written = 0;
-            m_i2s_dac->write(pcm_stereo, out_samples * SAMPLE_SIZE * 2, &bytes_written, 50);
-            i2s_written += static_cast<int64_t>(bytes_written / (SAMPLE_SIZE * 2));
-        } else {
-            vTaskDelay(pdMS_TO_TICKS(10));
-        }
 #else
-        for (size_t i = 0; i < out_samples; ++i) {
-            int32_t val = static_cast<int32_t>(pcm_mono[i] * gain);
+        for (size_t i = 0; i < n_out; ++i) {
+            int32_t val = static_cast<int32_t>(pcm_mono[i + skip_head] * gain);
             if (val > 32767) val = 32767;
             if (val < -32768) val = -32768;
             int16_t sample = static_cast<int16_t>(val);
             pcm_stereo[i * 2]     = sample;
             pcm_stereo[i * 2 + 1] = sample;
         }
-
+#endif
         if (m_i2s_dac) {
-            size_t bytes_written = 0;
-            m_i2s_dac->write(pcm_stereo, out_samples * SAMPLE_SIZE * 2, &bytes_written, 50);
-            i2s_written += static_cast<int64_t>(bytes_written / (SAMPLE_SIZE * 2));
+            dac_push(pcm_stereo, n_out);
         } else {
             vTaskDelay(pdMS_TO_TICKS(10));
         }
-#endif
     }
     vTaskDelete(nullptr);
 }

@@ -386,7 +386,7 @@ void SystemDiagnostics::tick() {
 
         // SINK buffered audio and clock-drift compensation: buffered frames (FIFO + I2S DMA queue, 1 s average),
         // minimum FIFO depth, net corrections in the last second, estimated ppm
-        char drift_block[32] = "";
+        char drift_block[48] = "";
         if (cfg->node_role == NODE_ROLE_SINK) {
             AudioNet::EspNowBroadcastEngine::SinkDriftStats ds{};
             m_unicast_engine.takeSinkDriftStats(ds);
@@ -418,6 +418,33 @@ void SystemDiagnostics::tick() {
                 snprintf(ppm_str, sizeof(ppm_str), "    - ");
             }
             snprintf(drift_block, sizeof(drift_block), " %4.4s %3.3s %4.4s %6.6s |", avg_str, min_str, adj_str, ppm_str);
+
+            // Time sync: state (LOCK = playout on the presentation time, SYNC = estimate valid but aligning,
+            // FREE = no sync, unsynchronized playout) and filtered playout error in us
+            AudioNet::EspNowBroadcastEngine::SinkSyncStatus ss{};
+            m_unicast_engine.getSinkSyncStatus(ss, false);
+            char st[8], er[8];
+            const bool streaming = m_unicast_engine.getState() == AudioNet::NetworkState::STREAM;
+            snprintf(st, sizeof(st), "%s", !streaming ? " -  " : (ss.aligned ? "LOCK" : (ss.sync_valid ? "SYNC" : "FREE")));
+            if (streaming && ss.aligned) {
+                snprintf(er, sizeof(er), "%+5ld", (long)std::clamp<int32_t>(ss.err_filt_us, -9999, 9999));
+            } else {
+                snprintf(er, sizeof(er), "  -  ");
+            }
+            char sync_block[16];
+            snprintf(sync_block, sizeof(sync_block), " %4.4s %5.5s |", st, er);
+            strncat(drift_block, sync_block, sizeof(drift_block) - strlen(drift_block) - 1);
+
+            AudioNet::EspNowBroadcastEngine::SyncProbe pr{};
+            if (m_unicast_engine.getSyncProbe() && m_unicast_engine.takeSyncProbe(pr)) {
+                if (pr.rx_new) {
+                    print_console("[SYNC] rx f=%lu m=%lu\n", (unsigned long)pr.rx_frame_t, (unsigned long)pr.rx_master);
+                }
+                if (pr.play_new) {
+                    print_console("[SYNC] play f=%lu m=%lu err=%ld\n", (unsigned long)pr.play_frame_t,
+                                  (unsigned long)pr.play_master, (long)pr.play_err_us);
+                }
+            }
         }
 
         char time_sync_block[64];
@@ -485,8 +512,8 @@ void SystemDiagnostics::tick() {
                 print_console("|    CPU      | STATE | NODES  |    WIFI     |  AUDIO dBFS  |     STAGE TIMINGS (ms)       |  SOURCE      PKTS  ACK%%  FAIL   TOT  |             ROUND-TRIP NET (us)        |\n");
                 print_console("|  %%   C  MHz |       | 012345 | GAIN Ch PHY |   RMS    Pk  |  DSP   EncHQ  EncRed  TXend  |  INPUT        1/s     %%   1/s  pkts   |              L_Net       R_Net         |\n");
             } else {
-                print_console("|    CPU      | STATE |  CHAN  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | AMP dB   PKTS  RED PLC DMA OVF UDR   | BUF+DMA   DRIFT CORR |         TIME & SYNCHRONIZATION (ms)    |\n");
-                print_console("|  %%   C  MHz |       |        | RSSI Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  SW  HW   1/s  rec tot UDR ovf udr   |  buf min adj    ppm  |  Local  Master  EMA_offs RB_med RB_rng |\n");
+                print_console("|    CPU      | STATE |  CHAN  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | AMP dB   PKTS  RED PLC DMA OVF UDR   | BUF+DMA   DRIFT CORR | SYNC  e_us |         TIME & SYNCHRONIZATION (ms)    |\n");
+                print_console("|  %%   C  MHz |       |        | RSSI Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  SW  HW   1/s  rec tot UDR ovf udr   |  buf min adj    ppm  |       (us) |  Local  Master  EMA_offs RB_med RB_rng |\n");
             }
         }
         print_console("%s\n", row_buf);

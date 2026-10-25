@@ -9,6 +9,7 @@ set(srcs
     "button.cpp"
     "vsaf_broadcast_engine.cpp"
     "vsaf_source_pipeline.cpp"
+    "vsaf_time_sync.cpp"
     "diagnostics.cpp"
     # "lc3_benchmark.cpp" (Disabled)
 )

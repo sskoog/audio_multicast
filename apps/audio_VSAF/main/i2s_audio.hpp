@@ -98,6 +98,14 @@ public:
         return static_cast<int64_t>(sent) * m_dma_frame_samples + frac;
     }
 
+    // Called from the DMA on_send_q_ovf ISR: the writer missed a descriptor, so one descriptor of zeros
+    // (auto_clear) was played that was never written
+    inline void IRAM_ATTR onSendQueueOverflowFromISR() { m_q_ovf.fetch_add(1, std::memory_order_relaxed); }
+
+    // DMA underruns (zero descriptors played) since boot; each one is getDmaFrameSamples() samples
+    uint32_t getQueueOverflows() const { return m_q_ovf.load(std::memory_order_relaxed); }
+    uint32_t getDmaFrameSamples() const { return m_dma_frame_samples; }
+
     bool isRunning() const { return m_is_running; }
     bool isInitialized() const { return m_tx_handle != nullptr; }
 
@@ -129,6 +137,7 @@ private:
     uint32_t m_desc_sent = 0;
     uint32_t m_last_sent_us = 0;
     uint32_t m_dma_frame_samples = 480;
+    std::atomic<uint32_t> m_q_ovf{0};
 };
 
 } // namespace Hardware

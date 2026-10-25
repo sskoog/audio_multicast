@@ -1,4 +1,4 @@
-# audio_VSAF: VSAF 3.0 Multi-Channel Wi-Fi Audio Broadcast
+# audio_VSAF: VSAF 3.1 Multi-Channel Wi-Fi Audio Broadcast
 
 ## 1. Overview
 
@@ -7,12 +7,13 @@ The **`audio_VSAF`** application distributes up to 6 audio channels (5.1) from o
 Main building blocks:
 
 1. **VSAF 3.0 multi-tier Unequal Error Protection (UEP)**: every 248-byte satellite packet (`0x1337`, ch 0..4) carries the current frame at HQ (120 B, 96 kbps @ 48 kHz) plus the two previous frames at MQ (60 B, 48 kbps). Subwoofer packets (`0x1338`, ch 5) carry 4 frames of 60 B @ 8 kHz. Up to 2 lost satellite packets in a row (3 for the sub) are recovered from later packets without concealment.
-2. **Dual-core SOURCE pipeline** (section 4): core 0 runs USB input + DSP and encodes, core 1 encodes and owns the radio. Encode work is a lock-free job queue shared by both cores. A dedicated RF task keeps exactly one packet in flight, stamps `t_tx1_us` right before each `esp_now_send()` and never transmits after the 9.5 ms frame deadline.
+2. **Dual-core SOURCE pipeline** (section 4): core 0 runs USB input + DSP and encodes, core 1 encodes and owns the radio. Encode work is a lock-free job queue shared by both cores. A dedicated RF task keeps exactly one packet in flight and never transmits after the 9.5 ms frame deadline.
 3. **Dual-rate LC3 encoding (`liblc3_dual`)** (section 5): HQ and MQ frames of a channel share one LC3 analysis; MQ only adds a quantization pass. Output is bit-exact with two separate encoders.
 4. **Commanded round-robin SINK telemetry**: bit 7 (`REQ_ACK`) of `packet_flags` grants exactly one SINK an uplink reply per 10 ms frame; that packet is sent last in the burst so the reply never collides with the downlink.
 5. **Self-healing radio**: TX-done timeouts, ESP-NOW queue exhaustion and implausible completions are detected and repaired by re-initialising ESP-NOW (section 4.4). Channel and PHY changes are applied only at frame boundaries with the radio idle.
 6. **Fixed channel 13 at boot** (`CONFIG_VSAF_PREFERRED_WIFI_CHANNEL`), boot survey off by default (`CONFIG_VSAF_BOOT_CHANNEL_SCAN`). SINKs start their search on the same channel and stream ~0.35-0.5 s after power-on. Default PHY HT20 MCS3, TX power 10 dBm on all nodes (`CONFIG_VSAF_TX_POWER_QDBM`).
-7. **Hardware timer pacing**: the 10 ms frame tick is an `esp_timer` periodic callback with direct task notifications, never FreeRTOS tick delays.
+7. **Time-synchronized playout** (section 6): a PTP-like two-step exchange over the round-robin replies gives the SOURCE every SINK's clock offset and drift; a control frame every 100 ms distributes them. Each SINK plays frame N at `t0(N) + latency + trim` with single-sample corrections. Measured SINK-to-SINK spread ~25 us (self-reported, not yet acoustic).
+8. **Hardware timer pacing**: the 10 ms frame tick is an `esp_timer` periodic callback with direct task notifications, never FreeRTOS tick delays.
 
 ```
                   +-----------------------------------------------------+
@@ -116,9 +117,9 @@ Until the spatial upmix exists (GOALS.md priority 2), the SOURCE fills ch 2 (Cen
 
 ---
 
-## 3. VSAF 3.0 Protocol Specification & Wire Formats (`vsaf_protocol.hpp`)
+## 3. VSAF 3.1 Protocol Specification & Wire Formats (`vsaf_protocol.hpp`)
 
-All network communication uses the **VSAF 3.0 (Variable-rate Synchronized Audio Frame)** container format. All structures are strictly 32-bit word aligned with little-endian byte ordering. The source of truth is [main/vsaf_protocol.hpp](main/vsaf_protocol.hpp) (`static_assert`s pin the sizes).
+All network communication uses the **VSAF 3.0 (Variable-rate Synchronized Audio Frame)** container format (3.1 since 2026-10-25: frame-time stamps, 20-byte telemetry reply, 88-byte control frame for time sync). All structures are strictly 32-bit word aligned with little-endian byte ordering. The source of truth is [main/vsaf_protocol.hpp](main/vsaf_protocol.hpp) (`static_assert`s pin the sizes).
 
 ### 3.1 Satellite Broadcast Packet (`0x1337`, 3-Tier UEP, 248 Bytes Total)
 
@@ -191,9 +192,11 @@ All network communication uses the **VSAF 3.0 (Variable-rate Synchronized Audio 
      - `1`: Target SINK is explicitly commanded by SOURCE to send a telemetry reply in this 10 ms window.
      - `0`: SINK remains silent.
 3. **`seq` (`uint8_t`, 1 Byte)**: Monotonically incrementing 8-bit sequence number (0..255).
-4. **`t_tx1_us` (`uint32_t`, 4 Bytes)**: SOURCE `esp_timer_get_time()` in microseconds, written immediately before the packet is handed to `esp_now_send()` (so it excludes encode time and queueing inside the SOURCE).
+4. **`t_tx1_us` (`uint32_t`, 4 Bytes)** (VSAF 3.1): the SOURCE **frame time** `t0(N)` of the packet's t0 frame: low 32 bits of the SOURCE `esp_timer` on an exact 10 ms grid (the grid follows the frame tick; the tick's own callback jitter, max ~120 us, is not stamped). It is identical in all 6 packets of a frame. The redundant frames t-k of a packet have frame time `t0 - k x 10 ms`. Presentation time = frame time + playout latency + channel trim (section 6). All timestamp math is modulo 2^32 (wraps every 71.6 min). Up to VSAF 3.0 this field was the send time of each packet.
 
-### 3.4 Round-Robin SINK Telemetry Frame (`vsaf_sink_telemetry_t`)
+### 3.4 Round-Robin SINK Telemetry Reply (`vsaf_sink_telemetry_t`, `0x1360`, 20 Bytes, VSAF 3.1)
+
+The SINK addressed by `REQ_ACK` (one per 10 ms, round robin, so each SINK replies about every 6th frame for 6 SINKs) answers immediately. The reply doubles as the PTP delay request of section 6.
 
 ```
  0                   1                   2                   3
@@ -201,18 +204,36 @@ All network communication uses the **VSAF 3.0 (Variable-rate Synchronized Audio 
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |          type_id (0x1360)     |  sink_id (u8) |  ack_seq (u8) |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                          t_tx1_echo                           |
-|             (Echoed SOURCE Timestamp in Microseconds)         |
+|                     t_rx_us (t2, SINK clock)                  |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|         t_dwell_us (u16)      | down_rssi(i8) | fifo_fill(u8) |
+|      t_dwell_us (t3 - t2)     | down_rssi(i8) | fifo_fill(u8) |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|          crc16 (u16)          |         reserved (u16)        |
+| prev_ack_seq  |   flags (u8)  |    prev_tx_delay_us (u16)     |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|      playout_err_us (i16)     |          crc16 (u16)          |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
 
-- **Size**: Strictly 16 bytes.
-- **`t_dwell_us`**: Turnaround dwell time inside SINK: `t_dwell_us = t_tx2 - t_rx1`.
-- **`crc16`**: CCITT-16 checksum protecting arithmetic fields against bit errors.
+- **`ack_seq`**: `seq` of the REQ_ACK packet this reply answers. **`t_rx_us`**: SINK `esp_timer` when that packet was received (t2).
+- **`t_dwell_us`**: submit time of this reply relative to t2 (t3 = t2 + dwell, taken right before `esp_now_send()`).
+- **`prev_ack_seq` / `prev_tx_delay_us` / `flags` bit 0**: two-step correction for the previous reply of this SINK: its submit -> TX-done delay (channel access backoff), valid when bit 0 is set.
+- **`playout_err_us`**: filtered playout error against the presentation time (+ = late), `INT16_MIN` = not synchronized.
+- **`crc16`**: CCITT-16 over the first 18 bytes.
+
+### 3.5 Control Frame (`vsaf_control_t`, `0x1350`, 88 Bytes, VSAF 3.1)
+
+Broadcast by the SOURCE every 10th frame (100 ms), after the 6 audio packets and within the 9.5 ms TX deadline.
+
+| Offset | Field | Content |
+| :--- | :--- | :--- |
+| 0 | `type_id` (u16), `version` (u8, = 1), `seq` (u8) | |
+| 4 | `t_ref_us` (u32) | SOURCE time the offsets refer to |
+| 8 | `latency_us` (u32) | Playout latency added to the frame time (default 50 ms, console `latency`) |
+| 12 | `offset_us[6]` (i32) | Per channel: SINK clock - SOURCE clock at `t_ref` (modulo 2^32) |
+| 36 | `drift_ppb[6]` (i32) | Per channel: rate of change of the offset (ppb) |
+| 60 | `rtt_us[6]` (u16) | Per channel: round trip of the sample used, 0 = no estimate |
+| 72 | `trim_us[6]` (i16) | Per channel: acoustic / pipeline trim added to the presentation time (console `trim`) |
+| 84 | `crc16` (u16), `reserved` (u16) | CRC over bytes 0..83 |
 
 ---
 
@@ -235,7 +256,7 @@ The 10 ms frame is the master metronome (GOALS.md): every task must finish insid
  core 0 :  [USB+DSP ~0.45]  publish  [jobs: SUB, HQ, HQ, ... MQ ...]           idle
  core 1 :                   [jobs: HQ, HQ, ... MQ ...]                          idle
  radio  :        [sub][HQ][HQ][HQ][HQ][HQ(ack ch, last)]          | 9.5 ms deadline
-                 ^ each packet: t_tx1_us stamped right before esp_now_send()
+                 ^ all packets carry the frame time t0(N) (10 ms grid); TX-done of the REQ_ACK packet = PTP t1
  measured (music over USB, ch 13, HT3): all jobs done ~5.1 ms, last packet on air ~5.1 ms
 ```
 
@@ -253,8 +274,8 @@ PCM and packet buffers are double-buffered by `frame_no & 1`. Before publishing 
 
 - Event-driven, no polling. It sleeps on a task notification. It is woken by a TX-done, by a packet becoming ready (encoders notify only while `src_rf` is idle and waiting, via a store/load flag handshake that cannot lose a wake-up), or by the frame tick. The only timed wake-up is the release of a held reply-request packet.
 - Exactly one packet in flight: the next ready packet is submitted as soon as the previous TX-done arrives. Nothing piles up in the ESP-NOW queue, so `ESP_ERR_ESPNOW_NO_MEM` cannot build up.
-- `t_tx1_us` is written into the packet immediately before `esp_now_send()`.
-- The packet carrying `REQ_ACK` goes last (its SINK replies immediately), unless the others are later than 8 ms.
+- `t_tx1_us` carries the frame time (section 3.3). The TX-done time of the `REQ_ACK` packet is stored per `seq` as the PTP t1 of section 6.
+- The packet carrying `REQ_ACK` goes last (its SINK replies immediately), unless the others are later than 8 ms. Every 10th frame the control frame (section 3.5) follows it, still within the deadline.
 - No submit after **9.5 ms** into the frame; unsent packets are counted as deadline skips.
 - Measured: TX-done callback -> `src_rf` running ~14 us average. Submitting the next packet from inside the send callback was evaluated and rejected: it would save under 0.1 ms per frame and move `esp_now_send()` into the Wi-Fi task.
 
@@ -302,51 +323,85 @@ When packets arrive at the SINK:
 4. **Triple Packet Drop for Subwoofer (`Delta_seq = 4`)**: Recovers `t-3` (60B) -> `t-2` (60B) -> `t-1` (60B) -> pushes `t0` (60B).
 5. **Irrecoverable Burst Drop (`Delta_seq > 3`)**: SINK synthesizes LC3 PLC frames for intermediate slots via `lc3_decode(..., NULL, pcm_out)`. Every PLC frame counts as a glitch in the GOALS.md reliability target.
 
-The SINK decoder adapts to the frame size per frame (120 B HQ vs 60 B redundancy) while keeping its MDCT overlap state. Playout is FIFO driven: a SINK leaves `SCANNING` after a prefill of 5 frames (50 ms: 2 in DMA, 3 in the FIFO).
+The SINK decoder adapts to the frame size per frame (120 B HQ vs 60 B redundancy) while keeping its MDCT overlap state. Without time sync, playout is FIFO driven: a SINK leaves `SCANNING` after a prefill of 5 frames (50 ms: 2 in DMA, 3 in the FIFO). With time sync (section 6), the SINK waits up to `CONFIG_VSAF_SYNC_WAIT_MS` (1.5 s) for a control frame, and the presentation time sets the playout position. The FIFO then holds whatever the latency leaves after radio and DMA: at 50 ms about 4-5 frames, so even the sub's t-3 copy arrives in time.
 
 ### 5.3 SINK clock-drift compensation (single-sample insert / drop)
 
 Each SINK plays out on its own crystal, the SOURCE produces frames on its own. Without correction a SINK whose clock runs a few ppm fast slowly empties its FIFO (and a slow one fills it). Once the cushion is gone, every late or lost packet that redundancy would have repaired turns into a FIFO underrun + PLC (seen in the first 15-minute soak test, section 10).
 
+This FIFO-level control is the **fallback** when no time sync is available (no control frames for 1 s, or `syncoff 1`). With time sync, the scheduled playout of section 6.3 replaces it, using the same single-sample edits.
+
 `runSinkLoop()` therefore holds the **total buffered audio** constant: frames in the FIFO plus samples still queued in the I2S DMA.
-1. After every frame pop: buffered = FIFO frames x 480 + (samples written to I2S - samples played). Samples played come from the DMA `on_sent` interrupt (completed 480-sample descriptors, plus the part of the current descriptor since the last completion), so the measure is re-anchored by hardware every 10 ms and does not depend on an assumed sample rate. If a DMA underrun plays zero-filled descriptors, the written count is rebased.
+1. After every frame pop: buffered = FIFO frames x 480 + (samples written to I2S + samples in the staging buffer - samples played). Samples played come from the DMA `on_sent` interrupt (completed 480-sample descriptors, plus the part of the current descriptor since the last completion), so the measure is re-anchored by hardware every 10 ms and does not depend on an assumed sample rate. A DMA underrun (the driver's `on_send_q_ovf` event: a descriptor of zeros was played) adds one descriptor to the written count.
 2. The value is filtered with an EMA in Q16 fixed point (time constant 256 frames, ~2.6 s).
 3. 3 s after entering `STREAM` the filtered value becomes the target (at least 2 frames; typically ~4: 2 in the FIFO, ~2 in the DMA).
 4. If the filtered value is more than 0.5 frame below the target (SINK clock fast), one interpolated sample is inserted into the decoded frame (481 samples played); more than 0.5 frame above (SINK clock slow), two neighbours are merged (479 samples). The edit point is the smoothest spot of the frame (smallest sample-to-sample step), so a single sample in 480 is inaudible.
 5. At most one correction per 16 frames, i.e. up to ~130 ppm of correction range; ESP32 crystals differ by tens of ppm.
 6. Every (re-)entry into `STREAM` (power-on, SOURCE reboot, outage) resets the filter, relearns the target and restarts the `ppm` statistics.
 
-`i2s_channel_write()` streams across the two DMA descriptors, so 479 / 481-sample writes need no change to the I2S setup. They do shift the write phase against the descriptors, which moves up to a whole frame between the DMA queue and the FIFO. That is why the controller must not look at the FIFO depth alone: the first version did, and every single inserted sample made the FIFO depth jump by one frame (section 10). The net number of corrections divided by the samples played is the SINK's clock offset against the SOURCE, printed in the heartbeat as `ppm` (positive = SINK clock fast). `driftcorr 0` disables the correction to observe the free-running drift.
+**DMA staging buffer (2026-10-25 fix).** With 2 DMA descriptors, ESP-IDF's `i2s_channel_write()` does *not* stream across descriptors: its free-buffer queue holds `desc_num - 1 = 1` entry, and it fetches a fresh descriptor on every call when `uxQueueSpacesAvailable() <= 1`, which is always true here. So every write call fills exactly one descriptor: a 479-sample write left one stale zero at the end of a descriptor (the timeline did not move), and a 481-sample write put 1 sample + 479 zeros into an extra descriptor (10 ms of near silence and a whole-frame jump, the "FIFO depth jumps by one frame" seen in section 10). The written counter was also clamped to the played counter, which erased every correction from the model. All SINK output now goes through a one-descriptor staging buffer (`dac_push()` in `runSinkLoop()`), and only whole 480-sample descriptors are written, so a dropped or inserted sample (and a coarse pad / head drop) really moves the timeline by that amount. The net number of corrections divided by the samples played is the SINK's clock offset against the SOURCE, printed in the heartbeat as `ppm` (positive = SINK clock fast). `driftcorr 0` disables the correction to observe the free-running drift.
 
 ---
 
-## 6. Round-Trip Time and Clock Offset
+## 6. Time Synchronization and Scheduled Playout (VSAF 3.1)
+
+Every SINK plays frame N at the same **presentation time** on the SOURCE clock:
 
 ```
-   SOURCE Timeline (Master)                      SINK Timeline (Slave)
-   ========================                      =====================
-             |                                             |
-   t_tx1 ----* (Audio Frame Sent)                          |
-             \                                             |
-              \  Propagation Time                          |
-               \                                           |
-                +----------------------------------------> *---- t_rx1 (Audio Frame Received)
-                                                           |
-                                                           | t_dwell_us
-                                                           |
-                * <----------------------------------------*---- t_tx2 (Telemetry Sent)
-               /
-              /  Propagation Time
-             /
-   t_rx2 ----* (Telemetry Received)                        |
-             |                                             |
+PT(N) = t0(N) + latency + trim[ch]          (SOURCE clock, us, modulo 2^32)
+PT_local(N) = PT(N) + offset[ch](now)       (SINK clock)
 ```
 
-1. **Net round-trip time**: `net_rtt_us = (t_rx2 - t_tx1) - t_dwell_us`
-2. **Master-slave clock offset**: `clock_offset_us = ((t_dwell_us) - (t_rx2 - t_tx1)) / 2`
-3. The SINK smooths the offset with an EMA (`EMA_offs`) and a rolling median (`RB_med`).
+`t0(N)` is in every audio packet (section 3.3), `latency` (default `CONFIG_VSAF_PLAYOUT_LATENCY_US` = 50 ms) and `trim` come in the control frame, and the offset is estimated by the SOURCE with a PTP-like exchange that only uses the round-robin telemetry replies. The SOURCE does all the estimation; the SINKs only apply the result.
 
-**Status:** these values are telemetry today. SINK playout does not yet use them (it is FIFO driven). The drift compensation of section 5.3 keeps every SINK's FIFO depth (and thus its latency) constant, but it does not align the SINKs to a common presentation time. The inter-speaker sync target (GOALS.md: within a few samples, held over long sessions) has not been measured yet; earlier claims of +/- 10 us alignment are unverified.
+### 6.1 Offset measurement (two-step, on the SOURCE)
+
+```
+   SOURCE (master)                                    SINK c
+   t1 ----* TX-done of the REQ_ACK audio packet (seq s)
+           \
+            +------------------------------------------> * t2  RX callback (t_rx_us)
+                                                         | dwell
+            +<------------------------------------------ * t3' reply submitted (t2 + t_dwell_us)
+           /                                             |  ... channel access backoff ...
+   t4 ----* RX callback of the reply                     * t3 = t3' + tx_delay (TX-done; sent in the NEXT reply)
+
+   a = t2 - t1 (down),  b = t4 - t3 (up),  rtt = a + b,  offset = a - rtt / 2   (= SINK - SOURCE)
+```
+
+- **t1** is the TX-done callback time of the REQ_ACK packet (the radio has finished sending), stored per `seq` in a 256-entry table tagged with the frame number, so a late or duplicated reply cannot pick a wrong t1.
+- **t3** uses the real TX-done time of the reply: the SINK measures submit -> TX-done for each reply and sends it in its next reply (`prev_ack_seq`, `prev_tx_delay_us`). One exchange therefore completes when the next reply of the same SINK arrives (~60 ms later with 6 SINKs). This removes the random channel-access backoff (up to a few hundred us) from the upstream path.
+- Lost packets in either direction just lose that sample (counted as `2step_miss` / `t1_miss` in `ptp`). Nothing is retried.
+- Samples with 0 < rtt < 20 ms go into a 16-entry ring per channel. The estimate is the **minimum-RTT sample of the last 1 s** (least queuing), projected to "now" with the drift.
+- **Drift** (ppb) is the slope of the best-sample offset over a baseline of at least 5 s (EMA 1/4, capped at +/-200 ppm). It lets the SINK extrapolate between control frames and over lost ones.
+- Measured: best-sample RTT 1..60 us; offset jitter between estimates within a few us; drift -2..+8 ppm between the nodes.
+
+### 6.2 Distribution
+
+Every 100 ms the SOURCE broadcasts the control frame (section 3.5) with offset, drift, RTT and trim for all 6 channels plus the latency. A SINK takes the entry of its own channel. It treats the sync as valid while the last control frame is less than 1 s old: up to 9 control frames in a row may be lost.
+
+### 6.3 SINK playout scheduler (`runSinkLoop()`)
+
+For each popped frame (or concealed frame: its frame time continues the previous one by 10 ms):
+1. **Offset in use** follows the estimate slowly (at most 2 us per frame). A change above 1 ms makes it jump and forces a realign.
+2. **Play time of the frame's first sample** = now + (samples queued in DMA + staging buffer) / fs + `CONFIG_VSAF_DAC_DELAY_US`.
+3. **Error** = play time - PT_local (+ = late).
+4. **Coarse** (start, timeline jump, |error| > 3 ms): late by a frame or more -> skip the frame; late less than a frame -> drop the first samples of the frame; early -> write silence before it (at most 100 ms).
+5. **Fine** (|error| <= 3 ms): EMA of the error (1/32, ~320 ms, Q8 fixed point, since the raw error has ~+/-100 us of interrupt / task-wake jitter). Above +3/4 sample: drop one sample; below -3/4 sample: insert one, at the smoothest point of the frame (same edit as section 5.3), at most one per 2 frames (~1000 ppm range).
+6. Without a valid sync the SINK falls back to the FIFO-level drift control of section 5.3. On entering STREAM with sync, the DMA is preloaded with silence and the first frame is placed by step 4.
+
+All output goes through the staging buffer of section 5.3, so each correction really moves the playout by the edited number of samples.
+
+### 6.4 Verification (over USB, no acoustic measurement yet)
+
+- `ptp` on a SINK: filtered playout error and coarse / fine counters. Steady state on all 4 SINKs: filtered error within +/-13 us, no coarse realign after start-up, no DMA rebase.
+- `syncprobe 1` on several SINKs prints, for the frame at each full SOURCE second, the time it starts playing converted back to the SOURCE clock. [tools/sync_probe.py](tools/sync_probe.py) turns the probe on for all SINKs at once and compares them per frame. 2026-10-25, 30 s, Nodes 4 / 5 / 23 / 24: per-frame spread of the four SINKs **25 us mean (~1.2 samples), 102 us max** (one raw-jitter outlier).
+- This checks the SINKs against each other *as each one measures itself*. It does not include: offset estimation bias (an asymmetric RX-callback latency between S3 and C6 shows up as a constant skew), the DAC pipeline (PCM5102A vs MAX98357A digital filter delay, I2S FIFO), and acoustic path differences. Those need the UMM-6 / line-in measurement; constant differences are then removed with `trim <ch> <us>` (or `CONFIG_VSAF_DAC_DELAY_US` per chip family).
+- RX timestamps: the RX callback time is used for t2 / t4. `rx_ctrl->timestamp` (hardware) is a different time base with a constant per-boot offset to `esp_timer` (S3 ~-232 ms, C6 ~+81 ms) and 175-200 us spread against the callback time, i.e. the callback jitter. The min-RTT filter already removes most of it; switching t2 / t4 to the hardware stamp + learned offset is a possible refinement.
+
+### 6.5 Round-trip display (`peer list`, SOURCE heartbeat)
+
+`RTT = t4 - t1 - t_dwell_us` (no two-step correction), shown for link health. The old `clock_offset_us` / `EMA_offs` / `RB_med` values in the SINK heartbeat `TIME & SYNCHRONIZATION` block are legacy telemetry and are not used for playout.
 
 ---
 
@@ -405,6 +460,16 @@ How each node reads its console:
 | `enccores 1\|2` | Debug: encode on core 0 only (frames are cut at 8 ms so the task watchdog stays fed) or on both cores. |
 | `txfault` | Break the ESP-NOW TX path at the next frame boundary to test self-healing. |
 
+### 7.4 Time sync (section 6)
+
+| Command | Target | Description |
+| :--- | :--- | :--- |
+| `ptp` | Both | SOURCE: per channel valid, offset (SINK - SOURCE), drift (ppm), best RTT, samples in window / total, two-step and t1 misses, trim, reported playout error, plus frame-tick jitter. SINK: sync state, offset in use, drift, control-frame age, latency, trim, filtered / max playout error since the last `ptp`, coarse and fine correction counts with coarse causes, the last 8 coarse events, DMA queue min / max, DMA rebases, unsynced frames. Both: RX hardware-timestamp probe. |
+| `trim <ch> <us>` | SOURCE | Per-channel presentation-time trim (-30000..30000 us), sent in the control frame. + = that speaker plays later. |
+| `latency <ms>` | SOURCE | Playout latency 20..200 ms (default 50). Below ~45 ms frames arrive too late to use the redundancy. |
+| `syncprobe 0\|1` | SINK | Print `[SYNC] rx` / `[SYNC] play` lines once per SOURCE second (see `tools/sync_probe.py`). |
+| `syncoff 0\|1` | SINK | Debug: ignore the time sync and use the FIFO-level fallback (section 5.3). |
+
 ---
 
 ## 8. Real-Time Telemetry Specification
@@ -423,10 +488,11 @@ Nodes print fixed-width 1 s heartbeats over USB serial. Test scripts parse these
 
 ### 8.2 SINK Telemetry (Node 4 shown: S3, PCM5102A, -20 dB post-gain; C6 SINKs print the same columns)
 ```text
-|    CPU      | STATE |  CHAN  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | AMP dB   PKTS  RED PLC DMA OVF UDR   | BUF+DMA   DRIFT CORR |         TIME & SYNCHRONIZATION (ms)    |
-|  %   C  MHz |       |        | RSSI Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  SW  HW   1/s  rec tot UDR ovf udr   |  buf min adj    ppm  |  Local  Master  EMA_offs RB_med RB_rng |
-|  4  48  240 | STRM  | LEFT   |  -53 13 HT0 |  LC3    off   off    48   10  0.40  0.49 | -20   -    99   12   0   0   0   0  |  3.9   2   +0   +0.0 |  20050   14585   -5693   -5693   0.38  |
+|    CPU      | STATE |  CHAN  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | AMP dB   PKTS  RED PLC DMA OVF UDR   | BUF+DMA   DRIFT CORR | SYNC  e_us |         TIME & SYNCHRONIZATION (ms)    |
+|  %   C  MHz |       |        | RSSI Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  SW  HW   1/s  rec tot UDR ovf udr   |  buf min adj    ppm  |       (us) |  Local  Master  EMA_offs RB_med RB_rng |
+|  4  48  240 | STRM  | LEFT   |  -42 13 HT0 |  LC3    off   off    48   10  0.44  0.57 | -20   -   100   44   0   0   0   0  |  7.2   5   +0   +8.1 | LOCK    +5 |  81243  471755   +3905   +3905   6.88  |
 ```
+- `SYNC`: `LOCK` = playout on the presentation time (section 6.3), `SYNC` = sync valid but not yet aligned, `FREE` = no sync (FIFO-level fallback), `-` = not streaming. `e_us`: filtered playout error (+ = late).
 - `RED`: frames recovered from redundancy; `PLC`: concealed frames (each one counts against the zero-glitch target); `DMA` / `OVF` / `UDR`: I2S DMA underruns, FIFO overflows (drops above 18 frames), FIFO underruns. Running totals, printed modulo 1000 (`soak_test.py` unwraps them).
 - `buf`: buffered audio after each frame pop, FIFO + I2S DMA queue, 1 s average (frames; ~4 in steady state). `min`: lowest FIFO depth (FIFO only) in the last second.
 - `DRIFT CORR adj`: net clock-drift corrections in the last second (+ inserted, - dropped samples; `lrn` while the target is being learned, `off` when disabled). `ppm`: SINK clock offset against the SOURCE since STREAM start, from the net corrections (+ = SINK clock fast).
@@ -615,6 +681,23 @@ New default for all nodes: 10 dBm requested (`CONFIG_VSAF_TX_POWER_QDBM` = 40), 
   | C | Replug while a program held COM24 open | The open handle failed (Windows error 22) and never delivered again, as expected; COM24 was back 8.9 s after the unplug and a reopened port delivered the fresh boot log |
 
   Conclusion: replugging alone, quick or slow or with the port held open, is handled correctly by the firmware console path and by Windows. The original stall needed another condition, e.g. power lost again mid-boot or several programs (Device Manager, test scripts) touching the port at the same time. Topic parked. If a console goes silent again: open the port, try a host-side reopen / DTR toggle, then reset the chip (RTS) and run `usjdiag`; its `previous session` line shows whether the firmware believed no host was connected (`fail(EIO)` > 0, a device-side cause) or wrote normally while the data was lost on the host.
+
+### 2026-10-25 (afternoon): time-synchronized playout (VSAF 3.1)
+
+Before: playout was FIFO driven, so each SINK's start offset was random (several ms) and only its FIFO depth was held constant. Now (section 6):
+- Packets carry the frame grid time; the SOURCE estimates every SINK's offset and drift from the round-robin replies (two-step, min-RTT of 1 s; best RTT 1..60 us, drift -2..+8 ppm) and broadcasts them every 100 ms; each SINK schedules frame N at `t0 + 50 ms + trim`.
+- **Bug found on the way (also affected the old drift control):** with 2 DMA descriptors, `i2s_channel_write()` takes a fresh descriptor on every call, so 479 / 481-sample writes did not shift the timeline (they left a zero sample, or an extra mostly-empty descriptor), and the written-sample counter was clamped to the played counter, hiding every correction. Symptom: ~100 coarse "head drop" realigns per second on Nodes 4 / 5 / 23 and a stuck +2 ms error on Node 24. Fix: whole-descriptor staging buffer + underrun accounting via `on_send_q_ovf` (section 5.3).
+
+Results (Nodes 4, 5, 23, 24, music over USB, 50 ms latency):
+
+| Check | Result |
+| :--- | :--- |
+| Filtered playout error per SINK (`ptp`) | within +/-13 us, coarse realigns only at start-up, 0 DMA rebases |
+| SINK-to-SINK spread, `sync_probe.py`, 30 s right after boot | mean 25 us, max 102 us |
+| Same, after ~40 min uptime (incl. the soak below) | **mean 22 us, median 23 us, max 44 us** (per-SINK stdev 8-13 us) |
+| 15-min soak (`soak_test.py`) | **PASS: 0 PLC, 0 underruns, 0 DMA underruns** on all 4 SINKs; packet loss 0.1-0.34 %, all recovered from redundancy; SOURCE TX end avg 4.56 ms |
+
+Caveats: the spread is each SINK's own estimate (common SOURCE clock); it excludes offset-estimation bias between chip families, DAC filter delay (PCM5102A vs MAX98357A) and acoustics. Next: acoustic / line-in skew measurement with the UMM-6, then calibrate `trim` / `CONFIG_VSAF_DAC_DELAY_US`. The soak table's `ADJ` / `ppm` columns come from the FIFO fallback and read `+0` / `nan` while synced.
 
 ### Next steps
 - Decide on a deeper SINK FIFO target (latency vs. recovery) and re-run.

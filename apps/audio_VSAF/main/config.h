@@ -65,6 +65,24 @@ extern "C" {
 #define CONFIG_VSAF_TX_POWER_QDBM 40
 #endif
 
+#ifndef CONFIG_VSAF_PLAYOUT_LATENCY_US
+// Presentation time of frame N = SOURCE frame time t0(N) + this latency (+ per-channel trim). Must cover SOURCE
+// encode + TX (<= 9.5 ms), redundancy recovery (t-2 arrives ~20 ms after t0), decode and the 2-descriptor DMA queue.
+// Sent to the SINKs in the control frame; the SOURCE console 'latency <ms>' changes it at runtime.
+#define CONFIG_VSAF_PLAYOUT_LATENCY_US 50000
+#endif
+
+#ifndef CONFIG_VSAF_SYNC_WAIT_MS
+// SINK: how long to wait for a valid time sync before starting playback unsynchronized (FIFO-level drift control)
+#define CONFIG_VSAF_SYNC_WAIT_MS 1500
+#endif
+
+#ifndef CONFIG_VSAF_DAC_DELAY_US
+// SINK: fixed delay from the I2S output to the analog output (DAC filter), added to the predicted play time.
+// Not calibrated yet (needs an acoustic / line-in measurement); 0 on both DAC types.
+#define CONFIG_VSAF_DAC_DELAY_US 0
+#endif
+
 #ifndef CONFIG_VSAF_SCAN_DWELL_MS
 // SINK channel search: dwell per channel. The SOURCE sends 600 packets/s, so 30 ms sees ~18 of them; a full
 // sweep of 13 channels takes ~0.4 s. SINKs start on CONFIG_VSAF_PREFERRED_WIFI_CHANNEL and hop upward with wrap.

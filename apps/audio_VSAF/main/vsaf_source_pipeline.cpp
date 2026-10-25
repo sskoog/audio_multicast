@@ -125,6 +125,25 @@ void EspNowBroadcastEngine::srcPrepareFrame(SrcFrame& f, uint32_t frame_no, int6
     }
     f.frame_no = frame_no;
     f.t0_us = t0_us;
+    // Frame time for the SINKs: the periodic esp_timer fires on an exact 10 ms grid, but the callback (and
+    // so t0_us) jitters with the load on core 0. Round to the grid; re-anchor if the timer phase changed.
+    if (m_src_grid_epoch_us < 0) {
+        m_src_grid_epoch_us = t0_us;
+    }
+    {
+        const int64_t period = 10000;
+        const int64_t k = (t0_us - m_src_grid_epoch_us + period / 2) / period;
+        int64_t grid = m_src_grid_epoch_us + k * period;
+        if (t0_us - grid > 2000 || grid - t0_us > 2000) {
+            m_src_grid_epoch_us = t0_us;  // timer restarted with a new phase
+            grid = t0_us;
+        }
+        f.t_grid_us = grid;
+        const int32_t dev = static_cast<int32_t>(t0_us > grid ? t0_us - grid : grid - t0_us);
+        if (dev > m_src_grid_dev_max.load(std::memory_order_relaxed)) {
+            m_src_grid_dev_max.store(dev, std::memory_order_relaxed);
+        }
+    }
     f.samples = samples;
     f.ack_ch = static_cast<uint8_t>(frame_no % SRC_NUM_PKTS);
 
@@ -342,7 +361,7 @@ void EspNowBroadcastEngine::srcDoJob(SrcFrame& f, const SrcJob& job) {
         p.type_id = VSAF_TYPE_AUDIO_SUBWOOFER;
         p.packet_flags = make_packet_flags(SUBWOOFER_CHANNEL_ID, 8000, 10000, false);
         p.seq = seq;
-        p.t_tx1_us = 0;
+        p.t_tx1_us = static_cast<uint32_t>(f.t_grid_us);  // frame time t0(N) on the 10 ms grid: same in all 6 packets
         int64_t t = esp_timer_get_time();
         m_lc3_codec.encodeFrame(m_src_pcm_sub[par], 80, p.data_t0, LC3_FRAME_OCTETS_SUB, &actual,
                                 Codec::Lc3CodecEngine::SUB_ENCODER_INDEX, 1);
@@ -371,7 +390,7 @@ void EspNowBroadcastEngine::srcDoJob(SrcFrame& f, const SrcJob& job) {
         p.type_id = VSAF_TYPE_AUDIO_SATELLITE;
         p.packet_flags = make_packet_flags(job.ch, m_telemetry.sample_rate, 10000, false);
         p.seq = seq;
-        p.t_tx1_us = 0;
+        p.t_tx1_us = static_cast<uint32_t>(f.t_grid_us);  // frame time t0(N) on the 10 ms grid: same in all 6 packets
         // Phase 1: shared analysis + HQ frame; the MQ frame of this analysis stays pending for the MQ job
         int64_t t = esp_timer_get_time();
         m_lc3_codec.encodeFrameDualBegin(m_src_pcm_sat[par][job.ch], p.data_t0, LC3_FRAME_OCTETS_HQ,
@@ -417,6 +436,10 @@ void EspNowBroadcastEngine::runSrcRfLoop() {
     int64_t t_submit = 0;
     int64_t t_last_done = 0;
     uint32_t tick_count = 0;
+    // Packet in flight: 0 = audio, 1 = audio with REQ_ACK (time-sync t1 is recorded at its TX-done), 2 = control
+    int inflight_kind = 0;
+    uint32_t inflight_frame = 0;
+    bool ctrl_sent = false;
 
     // Next packet to submit for the open frame, or -1. Sets ack_held when only the held reply-request
     // packet is ready (it goes last, unless the other packets are very late).
@@ -487,6 +510,12 @@ void EspNowBroadcastEngine::runSrcRfLoop() {
                 m_consecutive_tx_timeouts = 0;
                 busy = false;
                 t_last_done = t_done;
+                if (inflight_kind == 1) {
+                    // Time sync t1: TX-done of the REQ_ACK packet, indexed by its seq (tag = frame number)
+                    const uint8_t seq8 = static_cast<uint8_t>(inflight_frame);
+                    m_ptp_t1[seq8].store(static_cast<uint32_t>(t_done), std::memory_order_relaxed);
+                    m_ptp_t1_frame[seq8].store(inflight_frame, std::memory_order_release);
+                }
             } else if (now - t_submit > SRC_TX_DONE_TIMEOUT_US) {
                 m_tx_timeout_count++;
                 m_acc_tx_timeouts.fetch_add(1, std::memory_order_relaxed);
@@ -537,6 +566,7 @@ void EspNowBroadcastEngine::runSrcRfLoop() {
             sent_mask = 0;
             n_sent = 0;
             frame_open = true;
+            ctrl_sent = false;
         }
 
         // 4. Submit the next ready packet (radio idle)
@@ -567,9 +597,10 @@ void EspNowBroadcastEngine::runSrcRfLoop() {
                     }
                     m_src_tx_done_flag.store(false, std::memory_order_release);
                     int64_t ts = esp_timer_get_time();
-                    // Timestamp written immediately before the packet is handed to the radio (offset 4 in both types)
-                    uint32_t ts32 = static_cast<uint32_t>(ts);
-                    memcpy(buf + 4, &ts32, sizeof(ts32));
+                    // t_tx1_us already holds the frame time t0(N) (set in srcDoJob); the precise TX time the time
+                    // sync needs is the TX-done of the REQ_ACK packet, recorded when it completes
+                    inflight_kind = (pick == f->ack_ch) ? 1 : 0;
+                    inflight_frame = cur_no;
                     esp_err_t err = esp_now_send(s_broadcast_mac, buf, len);
                     m_acc_tx_call.add(static_cast<uint32_t>(esp_timer_get_time() - ts));
 
@@ -602,8 +633,24 @@ void EspNowBroadcastEngine::runSrcRfLoop() {
             }
         }
 
-        // 5. Frame complete: every packet submitted and the last one finished
-        if (f && frame_open && n_sent == SRC_NUM_PKTS && !busy) {
+        // 4b. Control frame (time sync estimates + playout parameters) every 10th frame, after the audio packets
+        const bool ctrl_due = (cur_no % SRC_CONTROL_EVERY_FRAMES) == 0;
+        if (f && frame_open && n_sent == SRC_NUM_PKTS && !busy && ctrl_due && !ctrl_sent &&
+            (now - f->t0_us) < SRC_TX_DEADLINE_US) {
+            srcBuildControl(m_ctrl_pkt);
+            m_src_tx_done_flag.store(false, std::memory_order_release);
+            const int64_t ts = esp_timer_get_time();
+            ctrl_sent = true;
+            if (esp_now_send(s_broadcast_mac, reinterpret_cast<const uint8_t*>(&m_ctrl_pkt), sizeof(m_ctrl_pkt)) == ESP_OK) {
+                busy = true;
+                t_submit = ts;
+                inflight_kind = 2;
+                m_src_tx_attempts_in_window++;
+            }
+        }
+
+        // 5. Frame complete: every packet submitted (and the control frame, if due) and the last one finished
+        if (f && frame_open && n_sent == SRC_NUM_PKTS && !busy && (!ctrl_due || ctrl_sent)) {
             m_acc_tx_last.add(static_cast<uint32_t>(t_last_done - f->t0_us));
             frame_open = false;
         }

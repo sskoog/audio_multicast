@@ -16,6 +16,14 @@ static IRAM_ATTR bool i2s_dma_tx_done_cb(i2s_chan_handle_t handle, i2s_event_dat
     return high_task_wakeup == pdTRUE;
 }
 
+static IRAM_ATTR bool i2s_dma_tx_q_ovf_cb(i2s_chan_handle_t handle, i2s_event_data_t *event, void *user_ctx) {
+    auto* driver = static_cast<I2sAudioDriver*>(user_ctx);
+    if (driver) {
+        driver->onSendQueueOverflowFromISR();
+    }
+    return false;
+}
+
 I2sAudioDriver::I2sAudioDriver(int bclk_pin, int ws_pin, int dout_pin, int din_pin, int gain_pin, int amp_mute_pin)
     : m_bclk_pin(bclk_pin), m_ws_pin(ws_pin), m_dout_pin(dout_pin), m_din_pin(din_pin), m_gain_pin(gain_pin), m_amp_mute_pin(amp_mute_pin) {
     m_dma_free_sem = xSemaphoreCreateBinary();
@@ -180,7 +188,7 @@ esp_err_t I2sAudioDriver::reconfigureAudioFormat(uint32_t sample_rate, i2s_data_
         .on_recv = nullptr,
         .on_recv_q_ovf = nullptr,
         .on_sent = i2s_dma_tx_done_cb,
-        .on_send_q_ovf = nullptr,
+        .on_send_q_ovf = i2s_dma_tx_q_ovf_cb,
     };
     i2s_channel_register_event_callback(m_tx_handle, &cbs, this);
 

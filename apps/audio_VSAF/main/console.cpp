@@ -402,12 +402,20 @@ void handle_ascii_command(const char* raw_line) {
             for (int i = 0; i < cnt; i++) {
                 const auto* p = s_unicast_engine->getPeer(i);
                 const char* st_str = !p->is_enabled ? "DISABLED" : (p->status == AudioNet::PeerStatus::ONLINE ? "ONLINE  " : "OFFLINE ");
-                print_console(" [%d] %-10s | CH: %u | %s | RTT: %3lu us (avg %3lu us) | PTP: %+5ld us | RSSI(U/D): %3d/%3d dBm | Sent: %lu | ACKs: %lu | ARQ: %lu/%lu | Fails: %lu\n",
+                AudioNet::EspNowBroadcastEngine::PtpChannelStatus ps{};
+                s_unicast_engine->getPtpStatus(static_cast<uint8_t>(i), ps);
+                char err_str[12];
+                if (ps.playout_err_us == AudioNet::VSAF_PLAYOUT_ERR_UNKNOWN) {
+                    snprintf(err_str, sizeof(err_str), "  -  ");
+                } else {
+                    snprintf(err_str, sizeof(err_str), "%+5d", ps.playout_err_us);
+                }
+                print_console(" [%d] %-10s | CH: %u | %s | RTT: %3lu us (avg %3lu us) | sync rtt %4u us, playout err %s us | RSSI(U/D): %3d/%3d dBm | Sent: %lu | ACKs: %lu | ARQ: %lu/%lu | Fails: %lu\n",
                               i, p->name,
                               p->channel_id, st_str,
                               (unsigned long)p->last_rtt_us,
                               (unsigned long)p->avg_rtt_us,
-                              (long)p->clock_offset_us,
+                              ps.valid ? ps.rtt_us : 0, err_str,
                               p->last_rssi, p->downlink_rssi,
                               (unsigned long)p->packets_sent,
                               (unsigned long)p->acks_received,
@@ -637,6 +645,98 @@ void handle_ascii_command(const char* raw_line) {
         }
         print_console("\n----- end of log ring -----\n");
 #endif
+    } else if (strcasecmp(line, "ptp") == 0) {
+        // Time sync status (SOURCE: per-channel estimates; SINK: offset in use and scheduled playout)
+        if (s_unicast_engine) {
+            int32_t dmin = 0, dmax = 0;
+            uint32_t dn = 0;
+            s_unicast_engine->getRxTsProbe(dmin, dmax, dn, true);
+            const system_config_t* ptp_cfg = get_system_config();
+            if (ptp_cfg && ptp_cfg->node_role == NODE_ROLE_SOURCE) {
+                print_console("\n[PTP] SOURCE: latency %lu us, control frame every %lu ms, frame-tick jitter vs 10 ms grid "
+                              "max %ld us since last 'ptp'\n",
+                              (unsigned long)s_unicast_engine->getPlayoutLatencyUs(), 100UL,
+                              (long)s_unicast_engine->takeSrcGridDevMax());
+                print_console("  ch valid  offset_us(SINK-SRC)  drift_ppm  rtt_us  win  samples  2step_miss  t1_miss  trim_us  playout_err_us\n");
+                for (uint8_t ch = 0; ch < AudioNet::MAX_SINK_NODES; ++ch) {
+                    AudioNet::EspNowBroadcastEngine::PtpChannelStatus ps{};
+                    s_unicast_engine->getPtpStatus(ch, ps);
+                    char err_str[12];
+                    if (ps.playout_err_us == AudioNet::VSAF_PLAYOUT_ERR_UNKNOWN) {
+                        snprintf(err_str, sizeof(err_str), "-");
+                    } else {
+                        snprintf(err_str, sizeof(err_str), "%+d", ps.playout_err_us);
+                    }
+                    print_console("  %u  %-5s %+19ld %+10.3f %7u %4u %8lu %11lu %8lu %8d %15s\n", ch, ps.valid ? "yes" : "no",
+                                  (long)ps.offset_us, ps.drift_ppb / 1000.0f, ps.rtt_us, ps.samples,
+                                  (unsigned long)ps.samples_total, (unsigned long)ps.twostep_miss,
+                                  (unsigned long)ps.t1_miss, ps.trim_us, err_str);
+                }
+            } else {
+                AudioNet::EspNowBroadcastEngine::SinkSyncStatus ss{};
+                s_unicast_engine->getSinkSyncStatus(ss, true);
+                print_console("\n[PTP] SINK: sync %s, playout %s | offset in use %+ld us, drift %+.3f ppm, sample rtt %u us, "
+                              "control age %lu ms (%lu frames)\n",
+                              ss.sync_valid ? "VALID" : "none", ss.aligned ? "ALIGNED" : "not aligned", (long)ss.offset_us,
+                              ss.drift_ppb / 1000.0f, ss.rtt_us, (unsigned long)ss.ctrl_age_ms, (unsigned long)ss.ctrl_frames);
+                print_console("[PTP] SINK: latency %lu us, trim %d us | playout error filtered %+ld us, max |raw| %ld us "
+                              "since last 'ptp' | coarse aligns %lu, fine corrections %lu\n",
+                              (unsigned long)ss.latency_us, ss.trim_us, (long)ss.err_filt_us, (long)ss.err_max_abs_us,
+                              (unsigned long)ss.coarse_aligns, (unsigned long)ss.fine_corrections);
+                for (uint32_t k = 0; k < 8; ++k) {
+                    const auto& ev = s_unicast_engine->m_coarse_ring[(s_unicast_engine->m_coarse_head + k) % 8];
+                    print_console("[PTP]   coarse ev: err %+ld us fifo %u dma_q %d item %u was_aligned %u after %u frames\n",
+                                  (long)ev.err_us, ev.fifo, ev.dma_queued, ev.has_item, ev.was_aligned, ev.frames_since);
+                }
+                print_console("[PTP]   dbg t %lld played %lld written %lld\n", (long long)s_unicast_engine->m_dbg_t.load(),
+                              (long long)s_unicast_engine->m_dbg_played.load(), (long long)s_unicast_engine->m_dbg_written.load());
+                print_console("[PTP]   dbg dma_q min %ld max %ld\n", (long)s_unicast_engine->m_dbg_q_min.exchange(1 << 30),
+                              (long)s_unicast_engine->m_dbg_q_max.exchange(-(1 << 30)));
+                print_console("[PTP]   dma rebases %lu\n", (unsigned long)s_unicast_engine->m_dma_rebase.load());
+                print_console("[PTP]   unsynced frames %lu\n", (unsigned long)s_unicast_engine->m_sync_unsynced_frames.load());
+                print_console("[PTP] SINK: coarse causes: timeline jump %lu, offset jump %lu, late-frame skip %lu, "
+                              "head drop %lu, silence pad %lu\n",
+                              (unsigned long)ss.why_jump, (unsigned long)ss.why_theta, (unsigned long)ss.why_skip,
+                              (unsigned long)ss.why_head, (unsigned long)ss.why_pad);
+            }
+            if (dn > 0) {
+                print_console("[PTP] RX timestamp probe: esp_timer - rx_ctrl.timestamp = %ld .. %ld us over %lu packets\n",
+                              (long)dmin, (long)dmax, (unsigned long)dn);
+            } else {
+                print_console("[PTP] RX timestamp probe: no packets\n");
+            }
+        }
+    } else if (strncasecmp(line, "trim ", 5) == 0) {
+        // SOURCE: per-channel playout trim "trim <ch> <us>" (sent to the SINKs in the control frame)
+        int ch = -1, us = 0;
+        if (sscanf(line + 5, "%d %d", &ch, &us) == 2 && ch >= 0 && ch < static_cast<int>(AudioNet::MAX_SINK_NODES) &&
+            s_unicast_engine) {
+            us = std::clamp(us, -30000, 30000);
+            s_unicast_engine->setChannelTrimUs(static_cast<uint8_t>(ch), static_cast<int16_t>(us));
+            print_console("[OK] Channel %d playout trim %+d us\n", ch, us);
+        } else {
+            print_console("[ERR] usage: trim <ch 0..5> <us>\n");
+        }
+    } else if (strncasecmp(line, "latency ", 8) == 0) {
+        // SOURCE: playout latency (frame time -> presentation time) in ms
+        int ms = atoi(line + 8);
+        if (ms >= 20 && ms <= 200 && s_unicast_engine) {
+            s_unicast_engine->setPlayoutLatencyUs(static_cast<uint32_t>(ms) * 1000U);
+            print_console("[OK] Playout latency %d ms\n", ms);
+        } else {
+            print_console("[ERR] usage: latency <20..200 ms>\n");
+        }
+    } else if (strncasecmp(line, "syncoff ", 8) == 0) {
+        if (s_unicast_engine) {
+            s_unicast_engine->m_sync_disable.store(atoi(line + 8) != 0);
+            print_console("[OK] syncoff %d\n", s_unicast_engine->m_sync_disable.load() ? 1 : 0);
+        }
+    } else if (strncasecmp(line, "syncprobe ", 10) == 0) {
+        // SINK: print [SYNC] self-test lines once per second (time base + playout of a common frame)
+        if (s_unicast_engine) {
+            s_unicast_engine->setSyncProbe(atoi(line + 10) != 0);
+            print_console("[OK] syncprobe %s\n", s_unicast_engine->getSyncProbe() ? "ON" : "OFF");
+        }
     } else if (strcasecmp(line, "usjdiag") == 0) {
         // USB-Serial-JTAG console health: this session and the session before the last reset
         print_usj_diag("this session", s_usj);

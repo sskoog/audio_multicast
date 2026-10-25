@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <climits>
 
 namespace AudioNet {
 
@@ -57,12 +58,17 @@ inline constexpr bool get_flags_req_ack(uint8_t flags) {
     return (flags & 0x80) != 0;
 }
 
+// Time base (VSAF 3.1): t_tx1_us of an audio packet is the SOURCE frame time t0(N) of its t0 frame: the low 32 bits
+// of the SOURCE esp_timer at that frame's 10 ms tick, identical in all 6 packets of the frame. The presentation time
+// of frame N is t0(N) + latency (control frame); the redundant frames t-k of a packet have t0 - k * 10 ms.
+// All timestamp arithmetic is modulo 2^32 (wraps every 71.6 min).
+
 // VSAF 3.0 Satellite Audio Broadcast Packet (Strictly 248 bytes, 32-bit word aligned)
 struct __attribute__((packed)) vsaf_audio_packet_t {
     uint16_t type_id;                             // 0x1337 (offset 0)
     uint8_t  packet_flags;                        // Packed config, target receiver, and req-ack (offset 2)
     uint8_t  seq;                                 // Monotonic 8-bit sequence number (offset 3)
-    uint32_t t_tx1_us;                            // Master microsecond timestamp (offset 4)
+    uint32_t t_tx1_us;                            // SOURCE frame time t0(N), see above (offset 4)
     uint8_t  data_t0[LC3_FRAME_OCTETS_HQ];        // Current frame t0: 120 bytes (offset 8)
     uint8_t  data_t_prev1[LC3_FRAME_OCTETS_RED];  // Redundant frame t-1: 60 bytes (offset 128)
     uint8_t  data_t_prev2[LC3_FRAME_OCTETS_RED];  // Redundant frame t-2: 60 bytes (offset 188)
@@ -74,7 +80,7 @@ struct __attribute__((packed)) vsaf_sub_packet_t {
     uint16_t type_id;                             // 0x1338 (offset 0)
     uint8_t  packet_flags;                        // Packed config, target receiver, and req-ack (offset 2)
     uint8_t  seq;                                 // Monotonic 8-bit sequence number (offset 3)
-    uint32_t t_tx1_us;                            // Master microsecond timestamp (offset 4)
+    uint32_t t_tx1_us;                            // SOURCE frame time t0(N), see above (offset 4)
     uint8_t  data_t0[LC3_FRAME_OCTETS_RED];       // Current Sub frame t0: 60 bytes (offset 8)
     uint8_t  data_t_prev1[LC3_FRAME_OCTETS_RED];  // Redundant Sub frame t-1: 60 bytes (offset 68)
     uint8_t  data_t_prev2[LC3_FRAME_OCTETS_RED];  // Redundant Sub frame t-2: 60 bytes (offset 128)
@@ -82,19 +88,51 @@ struct __attribute__((packed)) vsaf_sub_packet_t {
 };
 static_assert(sizeof(vsaf_sub_packet_t) == 248, "Subwoofer packet must be exactly 248 bytes");
 
-// VSAF 3.0 Round-Robin SINK Telemetry Reply (Strictly 16 bytes)
+// VSAF 3.1 Round-Robin SINK Telemetry Reply = PTP delay request (Strictly 20 bytes)
+// Time-sync exchange (two-step):
+//   t1 = SOURCE TX-done time of the REQ_ACK audio packet (kept in the SOURCE, indexed by seq)
+//   t2 = SINK receive time of that packet                      -> t_rx_us
+//   t3 = SINK submit time of this reply = t2 + t_dwell_us; the reply's real TX-done time is reported in the NEXT
+//        reply as prev_tx_delay_us (submit -> TX-done), which removes the random channel-access backoff
+//   t4 = SOURCE receive time of this reply
+//   offset (SINK - SOURCE) = ((t2 - t1) - (t4 - t3)) / 2,  round trip = (t2 - t1) + (t4 - t3)
+static constexpr uint8_t VSAF_TELEM_FLAG_PREV_DELAY_VALID = 0x01;
+static constexpr int16_t VSAF_PLAYOUT_ERR_UNKNOWN = INT16_MIN;
 struct __attribute__((packed)) vsaf_sink_telemetry_t {
     uint16_t type_id;                      // 0x1360
     uint8_t  sink_id;                      // Channel / SINK ID (0..5)
-    uint8_t  ack_seq;                      // Acknowledged audio sequence number
-    uint32_t t_tx1_echo;                   // Echoed t_tx1_us from master
-    uint16_t t_dwell_us;                   // SINK turnaround time: t_tx2 - t_rx1 (us)
+    uint8_t  ack_seq;                      // seq of the REQ_ACK packet this reply answers
+    uint32_t t_rx_us;                      // t2: SINK clock (low 32 bits) when that packet was received
+    uint16_t t_dwell_us;                   // t3 - t2: submit time of this reply relative to t2 (us)
     int8_t   downlink_rssi;                // Downlink RSSI measured by SINK (dBm)
     uint8_t  fifo_fill;                    // SINK audio FIFO fill level (0-100%)
-    uint16_t crc16;                        // Checksum over preceding 12 bytes
-    uint16_t reserved;                     // 32-bit alignment padding
+    uint8_t  prev_ack_seq;                 // ack_seq of the previous reply of this SINK
+    uint8_t  flags;                        // VSAF_TELEM_FLAG_*
+    uint16_t prev_tx_delay_us;             // previous reply: submit -> TX-done (us)
+    int16_t  playout_err_us;               // SINK playout error vs presentation time (+ = late), or UNKNOWN
+    uint16_t crc16;                        // Checksum over the preceding 18 bytes
 };
-static_assert(sizeof(vsaf_sink_telemetry_t) == 16, "Telemetry packet must be exactly 16 bytes");
+static_assert(sizeof(vsaf_sink_telemetry_t) == 20, "Telemetry packet must be exactly 20 bytes");
+
+// VSAF 3.1 Control frame (SOURCE -> all SINKs, broadcast every 100 ms): time sync + playout parameters.
+// For channel c with rtt_us[c] != 0: SINK clock - SOURCE clock at SOURCE time t is
+//   offset_us[c] + drift_ppb[c] * (t - t_ref_us) / 1e9
+// Presentation time of frame N on SINK c (SOURCE clock): t0(N) + latency_us + trim_us[c].
+static constexpr uint8_t VSAF_CONTROL_VERSION = 1;
+struct __attribute__((packed)) vsaf_control_t {
+    uint16_t type_id;                      // 0x1350
+    uint8_t  version;                      // VSAF_CONTROL_VERSION
+    uint8_t  seq;                          // control frame counter
+    uint32_t t_ref_us;                     // SOURCE time the offsets refer to
+    uint32_t latency_us;                   // playout latency added to the frame time
+    int32_t  offset_us[MAX_SINK_NODES];    // per channel: SINK clock - SOURCE clock at t_ref (modulo 2^32)
+    int32_t  drift_ppb[MAX_SINK_NODES];    // per channel: d(offset)/dt in parts per billion
+    uint16_t rtt_us[MAX_SINK_NODES];       // per channel: round trip of the best sample (0 = no estimate)
+    int16_t  trim_us[MAX_SINK_NODES];      // per channel: acoustic / pipeline trim added to the presentation time
+    uint16_t crc16;                        // Checksum over the preceding bytes
+    uint16_t reserved;
+};
+static_assert(sizeof(vsaf_control_t) == 88, "Control packet must be exactly 88 bytes");
 
 // Fast CCITT-16 CRC
 inline uint16_t calc_crc16(const uint8_t* data, size_t len) {
