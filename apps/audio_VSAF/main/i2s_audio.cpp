@@ -1,5 +1,7 @@
 #include "i2s_audio.hpp"
 #include "esp_log.h"
+#include "config.h"
+#include <algorithm>
 #include <cstring>
 
 static const char* TAG = "I2S_AUDIO";
@@ -170,11 +172,13 @@ esp_err_t I2sAudioDriver::reconfigureAudioFormat(uint32_t sample_rate, i2s_data_
         m_tx_handle = nullptr;
     }
 
-    // Dual-Descriptor DMA Configuration: Exactly 1 frame per descriptor
+    // Dual-descriptor DMA ring, each descriptor 1 / CONFIG_VSAF_DMA_DESC_PER_FRAME of an audio frame (5 ms by
+    // default). The SINK writes whole descriptors through its staging buffer, so they need not match LC3 frames.
+    const uint32_t desc_samples = std::max<uint32_t>(frame_samples / CONFIG_VSAF_DMA_DESC_PER_FRAME, 40);
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     chan_cfg.dma_desc_num = 2; // Strictly 2 descriptors (Dual-descriptor ping-pong)
-    chan_cfg.dma_frame_num = frame_samples;
-    m_dma_frame_samples = frame_samples;
+    chan_cfg.dma_frame_num = desc_samples;
+    m_dma_frame_samples = desc_samples;
     chan_cfg.auto_clear = true;
 
     esp_err_t ret = i2s_new_channel(&chan_cfg, &m_tx_handle, nullptr);

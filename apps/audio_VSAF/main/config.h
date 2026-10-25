@@ -67,7 +67,7 @@ extern "C" {
 
 #ifndef CONFIG_VSAF_PLAYOUT_LATENCY_US
 // Presentation time of frame N = SOURCE frame time t0(N) + this latency (+ per-channel trim). Must cover SOURCE
-// encode + TX (<= 9.5 ms), redundancy recovery (t-2 arrives ~20 ms after t0), decode and the 2-descriptor DMA queue.
+// encode + TX (<= 9.5 ms), redundancy recovery (t-2 arrives ~20 ms after t0), decode and the DMA queue (2 x 5 ms descriptors + staging, ~12 ms).
 // Sent to the SINKs in the control frame; the SOURCE console 'latency <ms>' changes it at runtime.
 #define CONFIG_VSAF_PLAYOUT_LATENCY_US 50000
 #endif
@@ -81,6 +81,19 @@ extern "C" {
 // SINK: fixed delay from the I2S output to the analog output (DAC filter), added to the predicted play time.
 // Not calibrated yet (needs an acoustic / line-in measurement); 0 on both DAC types.
 #define CONFIG_VSAF_DAC_DELAY_US 0
+#endif
+
+#ifndef CONFIG_VSAF_DMA_DESC_PER_FRAME
+// SINK: I2S DMA descriptors per 10 ms audio frame (2 descriptors in the ring either way). 2 = 5 ms descriptors:
+// the SINK decodes a frame only ~5-10 ms + staging before it plays instead of ~20-25 ms, which leaves that much
+// more of the playout latency for the radio (the t-2 / t-3 redundant copies arrive 20 / 30 ms after t0).
+// Output goes through a staging buffer, so descriptors need not line up with LC3 frames.
+#define CONFIG_VSAF_DMA_DESC_PER_FRAME 2
+#endif
+
+#ifndef CONFIG_VSAF_JIT_MARGIN_US
+// SINK: the wait for a late packet (FIFO empty) ends this long before the DMA queue runs dry (decode + write time)
+#define CONFIG_VSAF_JIT_MARGIN_US 2500
 #endif
 
 #ifndef CONFIG_VSAF_SCAN_DWELL_MS

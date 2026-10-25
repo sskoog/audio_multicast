@@ -27,6 +27,8 @@ Example:
 from __future__ import annotations
 
 import argparse
+import re
+import statistics
 import json
 import os
 import subprocess
@@ -122,7 +124,80 @@ def parse_sink_line(line: str) -> dict | None:
             row["fifo_avg"], row["drift_ppm"] = flt(drift[0]), flt(drift[3])
             row["fifo_min"] = int(drift[1]) if drift[1].isdigit() else None
             row["drift_adj"] = int(drift[2]) if drift[2].lstrip("+-").isdigit() else None
+    # Time-sync segment (VSAF 3.1): "LOCK    +5" / "SYNC  -  " / "FREE  -  " / " -    -  "
+    row["sync_state"] = row["sync_err_us"] = None
+    if len(seg) >= 11:
+        sy = seg[8].split()
+        if sy and sy[0] in ("LOCK", "SYNC", "FREE"):
+            row["sync_state"] = sy[0]
+            if len(sy) > 1 and sy[1].lstrip("+-").isdigit():
+                row["sync_err_us"] = int(sy[1])
     return row
+
+
+PLAY_RE = re.compile(r"\[SYNC\] play f=(\d+) m=(\d+) err=(-?\d+)")
+PTP_COUNT_RE = re.compile(r"coarse aligns (\d+), fine corrections (\d+)")
+SYNC_BUCKET_S = 600.0        # spread statistics per 10 min
+SYNC_SPREAD_LIMIT_US = 60.0  # GOALS.md: within one to a few samples (20-60 us)
+
+
+class SyncMonitor:
+    """
+    Cross-SINK sync accounting from the `[SYNC] play` probe lines (README section 6.4).
+
+    Every SINK reports, for the frame whose SOURCE frame time is a full second, the SOURCE-clock time its
+    first sample starts playing. Frames seen on two or more SINKs give one spread sample (max - min, us).
+    """
+
+    def __init__(self, latency_us: int = 50000) -> None:
+        self.latency_us = latency_us
+        self.frames: dict[int, dict[int, int]] = {}   # frame time -> {node: play - PT (us)}
+        self.frame_t_rel: dict[int, float] = {}       # frame time -> window time (s) of first report
+
+    def add(self, node: int, text: str, t_rel: float) -> None:
+        """Record one probe line (t_rel: s since the window opened)."""
+        m = PLAY_RE.search(text)
+        if not m:
+            return
+        f, master = int(m[1]), int(m[2])
+        d = (master - f) % 2**32
+        if d >= 2**31:
+            d -= 2**32
+        # Frame times repeat after the 71.6 min wrap: key on (frame, wrap epoch) via the window time
+        key = (f, int(t_rel // 3600))
+        self.frames.setdefault(key, {})[node] = d - self.latency_us
+        self.frame_t_rel.setdefault(key, t_rel)
+
+    def summary(self) -> dict:
+        """
+        Returns: {"frames": n, "spread_us": {n, mean, median, p95, max}, "buckets": [...],
+                  "per_node_mean_us": {node: mean}, "per_node_stdev_us": {node: stdev}}.
+        """
+        samples = sorted((self.frame_t_rel[k], max(v.values()) - min(v.values()))
+                         for k, v in self.frames.items() if len(v) >= 2)
+        per_node: dict[int, list] = {}
+        for v in self.frames.values():
+            for n, x in v.items():
+                per_node.setdefault(n, []).append(x)
+
+        def stats(xs: list) -> dict:
+            if not xs:
+                return {}
+            xs = sorted(xs)
+            return {"n": len(xs), "mean": round(statistics.mean(xs), 1), "median": statistics.median(xs),
+                    "p95": xs[min(len(xs) - 1, int(0.95 * len(xs)))], "max": xs[-1]}
+
+        buckets = []
+        if samples:
+            b = 0.0
+            while b <= samples[-1][0]:
+                xs = [sp for t, sp in samples if b <= t < b + SYNC_BUCKET_S]
+                if xs:
+                    buckets.append({"from_min": round(b / 60), **stats(xs)})
+                b += SYNC_BUCKET_S
+        return {"frames": len(samples), "spread_us": stats([sp for _, sp in samples]), "buckets": buckets,
+                "per_node_mean_us": {n: round(statistics.mean(x), 1) for n, x in per_node.items()},
+                "per_node_stdev_us": {n: round(statistics.pstdev(x), 1) for n, x in per_node.items()}}
 
 
 @dataclass
@@ -145,6 +220,10 @@ class SinkStats:
     fifo_avg: list = field(default_factory=list)   # per-second average buffered audio, FIFO + I2S DMA (frames)
     drift_adj_total: int = 0                       # net drift corrections in the window (+ insert / - drop)
     drift_ppm_last: float | None = None            # firmware estimate since STREAM start (+ = SINK clock fast)
+    sync_lock_secs: int = 0                        # streaming seconds with SYNC = LOCK
+    sync_unlocked_secs: int = 0                    # streaming seconds with SYNC / FREE
+    sync_err_max_abs: int = 0                      # largest |filtered playout error| while locked (us)
+    ptp_counts: list = field(default_factory=list)  # (coarse aligns, fine corrections) from `ptp` replies
     in_window: bool = False
 
     def update(self, row: dict, t_rel: float) -> None:
@@ -173,6 +252,12 @@ class SinkStats:
                 self.drift_adj_total += row["drift_adj"]
             if row.get("drift_ppm") is not None:
                 self.drift_ppm_last = row["drift_ppm"]
+            if row.get("sync_state") == "LOCK":
+                self.sync_lock_secs += 1
+                if row.get("sync_err_us") is not None:
+                    self.sync_err_max_abs = max(self.sync_err_max_abs, abs(row["sync_err_us"]))
+            elif row.get("sync_state") in ("SYNC", "FREE"):
+                self.sync_unlocked_secs += 1
         hidden_resync = False
         for c in COUNTERS:
             v = row[c]
@@ -218,6 +303,12 @@ class SinkStats:
             "fifo_min": self.fifo_min,
             "fifo_avg": round(sum(self.fifo_avg) / len(self.fifo_avg), 2) if self.fifo_avg else None,
             "drift_adj_total": self.drift_adj_total, "drift_ppm": self.drift_ppm_last,
+            "sync_lock_secs": self.sync_lock_secs, "sync_unlocked_secs": self.sync_unlocked_secs,
+            "sync_err_max_abs_us": self.sync_err_max_abs,
+            "coarse_aligns_in_window": (self.ptp_counts[-1][0] - self.ptp_counts[0][0])
+            if len(self.ptp_counts) >= 2 else None,
+            "fine_corrections_in_window": (self.ptp_counts[-1][1] - self.ptp_counts[0][1])
+            if len(self.ptp_counts) >= 2 else None,
         }
 
 
@@ -338,6 +429,8 @@ def main() -> int:
     ap.add_argument("--sinks", default=",".join(str(n) for n in DEFAULT_SINKS),
                     help="Comma-separated SINK node IDs (default 4,5,23,24).")
     ap.add_argument("--no-stream", action="store_true", help="Do not start the streamer (audio supplied externally).")
+    ap.add_argument("--no-sync", action="store_true", help="Do not run the time-sync probe / checks.")
+    ap.add_argument("--latency-ms", type=int, default=50, help="Playout latency set on the SOURCE (ms), for the probe.")
     ap.add_argument("--reanalyze", metavar="RUN_DIR", help="Recompute results from an earlier run's logs.")
     ap.add_argument("--window-start", type=float, help="With --reanalyze: window start in log time (s).")
     args = ap.parse_args()
@@ -353,6 +446,7 @@ def main() -> int:
     readers: dict[str, PortReader] = {}
     t_window = [None]  # wall time the window opened
     lock = threading.Lock()
+    sync = SyncMonitor(args.latency_ms * 1000)
 
     for node_s in args.sinks.split(","):
         node = int(node_s)
@@ -366,6 +460,15 @@ def main() -> int:
                 with lock:
                     rel = time.time() - t_window[0] if t_window[0] else 0.0
                     st.update(row, rel)
+            elif "[SYNC] play" in text or "coarse aligns" in text:
+                with lock:
+                    if not st.in_window:
+                        return
+                    rel = time.time() - t_window[0]
+                    sync.add(st.node, text, rel)
+                    m = PTP_COUNT_RE.search(text)
+                    if m:
+                        st.ptp_counts.append((int(m[1]), int(m[2])))
 
         readers[port] = PortReader(f"Node{node}", open_port(port), os.path.join(out_dir, f"node{node}_{port}.log"), on_line)
 
@@ -424,6 +527,10 @@ def main() -> int:
         for st in sinks.values():
             st.in_window = True
         source.in_window = True
+    if not args.no_sync:
+        for st in sinks.values():
+            readers[st.port].send("ptp")
+            readers[st.port].send("syncprobe 1")
     print(f"[WINDOW] open for {args.duration:.0f} s (counters cleared)")
 
     next_report = 60
@@ -436,6 +543,12 @@ def main() -> int:
                     parts = [f"N{s.node}:{s.last_state} plc={s.totals['plc']} red={s.totals['red']} "
                              f"udr={s.totals['udr']} pk/s={s.pkts_sum / s.pkts_secs if s.pkts_secs else 0:.1f}"
                              for s in sinks.values()]
+                if not args.no_sync:
+                    with lock:
+                        sp = sync.summary()["spread_us"]
+                        unl = sum(s.sync_unlocked_secs for s in sinks.values())
+                    parts.append(f"sync spread mean {sp.get('mean', '-')} max {sp.get('max', '-')} us, "
+                                 f"unlocked s {unl}")
                 print(f"[{elapsed / 60:4.1f} min] " + " | ".join(parts), flush=True)
             if streamer and streamer.poll() is not None:
                 print("[ERROR] streamer stopped during the window; see streamer.log")
@@ -444,6 +557,11 @@ def main() -> int:
         print("[ABORT] interrupted")
 
     window_s = time.time() - t_window[0]
+    if not args.no_sync:
+        for st in sinks.values():
+            readers[st.port].send("syncprobe 0")
+            readers[st.port].send("ptp")
+        time.sleep(2.5)
     for r in readers.values():
         r.stop_evt.set()
     if streamer and streamer.poll() is None:
@@ -455,6 +573,8 @@ def main() -> int:
     first_reader = readers[next(iter(sinks.values())).port]
     meta = {"timestamp": stamp, "file": args.file or "synthetic",
             "window_start_log_s": round(t_window[0] - first_reader.t0, 2), "source": source.summary()}
+    if not args.no_sync:
+        meta["sync"] = sync.summary()
     return finalize(out_dir, results, window_s, meta)
 
 
@@ -472,6 +592,13 @@ def finalize(out_dir: str, results: list, window_s: float, meta: dict) -> int:
     """
     passed = all(r["plc_total"] == 0 and not r["state_drops"] and r["streaming_seconds"] > 0.9 * window_s
                  for r in results)
+    sync = meta.get("sync")
+    sync_pass = None
+    if sync:
+        sync_pass = (bool(sync["buckets"]) and all(b["mean"] <= SYNC_SPREAD_LIMIT_US for b in sync["buckets"])
+                     and all(r.get("sync_unlocked_secs", 0) == 0 and not r.get("coarse_aligns_in_window")
+                             for r in results))
+        passed = passed and sync_pass
     report = {**meta, "window_s": round(window_s, 1), "pass": passed, "sinks": results}
     with open(os.path.join(out_dir, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
@@ -496,6 +623,22 @@ def finalize(out_dir: str, results: list, window_s: float, meta: dict) -> int:
         print(f"SOURCE {src['wifi_ch_phy']}: TX end avg {src['tx_end_ms_avg']:.2f} ms, worst 1 s avg "
               f"{src['tx_end_ms_max_of_1s_avgs']:.2f} ms, encode+DSP CPU {src['cpu_ms_per_core_avg']:.2f} ms/core/frame, "
               f"seconds < 590 pkt/s: {src['low_rate_seconds']}/{src['heartbeats']}  [{budget_note}]")
+    if sync:
+        sp = sync["spread_us"]
+        print(f"SYNC: {sync['frames']} common frames, SINK-to-SINK spread mean {sp.get('mean')} / median "
+              f"{sp.get('median')} / p95 {sp.get('p95')} / max {sp.get('max')} us  "
+              f"[{'ok' if sync_pass else 'FAIL'}: every 10-min mean <= {SYNC_SPREAD_LIMIT_US:.0f} us, "
+              f"always LOCK, no coarse realign]")
+        for b in sync["buckets"]:
+            print(f"  {b['from_min']:>3}-{b['from_min'] + 10:<3} min: n {b['n']:>3}  mean {b['mean']:>6}  "
+                  f"p95 {b['p95']:>4}  max {b['max']:>4} us")
+        for r in results:
+            n = r["node"]
+            mean = sync["per_node_mean_us"].get(n, sync["per_node_mean_us"].get(str(n)))
+            sd = sync["per_node_stdev_us"].get(n, sync["per_node_stdev_us"].get(str(n)))
+            print(f"  N{n}: play-PT mean {mean} us stdev {sd} us | lock {r.get('sync_lock_secs')} s, unlocked "
+                  f"{r.get('sync_unlocked_secs')} s, |e_filt| max {r.get('sync_err_max_abs_us')} us, coarse "
+                  f"{r.get('coarse_aligns_in_window')}, fine {r.get('fine_corrections_in_window')}")
     print(f"[LOG] {out_dir}")
     return 0 if passed else 1
 

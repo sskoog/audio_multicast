@@ -1311,7 +1311,7 @@ void EspNowBroadcastEngine::runSinkLoop() {
     // DMA staging: the I2S driver with 2 descriptors takes a fresh descriptor on every i2s_channel_write()
     // (its free-buffer queue holds one entry), so a short write leaves zeros at the end of a descriptor and a
     // long one spills into a nearly empty descriptor. All output therefore goes through this buffer and only
-    // whole descriptors (samples_per_frame) are written; a dropped / inserted sample then really shifts the
+    // whole descriptors (getDmaFrameSamples(), 5 ms by default) are written; a dropped / inserted sample then really shifts the
     // timeline by one sample. Queued audio = i2s_written + stage_n - played.
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
     static int32_t dac_stage[480 * 2];
@@ -1321,15 +1321,16 @@ void EspNowBroadcastEngine::runSinkLoop() {
     size_t   stage_n = 0;        // stereo frames waiting in dac_stage
     uint32_t q_ovf_seen = m_i2s_dac ? m_i2s_dac->getQueueOverflows() : 0;
     auto dac_push = [&](const auto* src, size_t n) {
+        const size_t desc = std::min<size_t>(m_i2s_dac ? m_i2s_dac->getDmaFrameSamples() : samples_per_frame, 480);
         while (n > 0 && m_i2s_dac) {
-            const size_t take = std::min(n, samples_per_frame - stage_n);
+            const size_t take = std::min(n, desc - stage_n);
             memcpy(&dac_stage[stage_n * 2], src, take * 2 * SAMPLE_SIZE);
             stage_n += take;
             src += take * 2;
             n -= take;
-            if (stage_n >= samples_per_frame) {
+            if (stage_n >= desc) {
                 size_t bytes_written = 0;
-                m_i2s_dac->write(dac_stage, samples_per_frame * SAMPLE_SIZE * 2, &bytes_written, 50);
+                m_i2s_dac->write(dac_stage, desc * SAMPLE_SIZE * 2, &bytes_written, 50);
                 i2s_written += static_cast<int64_t>(bytes_written / (SAMPLE_SIZE * 2));
                 stage_n = 0;
             }
@@ -1646,7 +1647,14 @@ void EspNowBroadcastEngine::runSinkLoop() {
 
         // JIT absorption: if FIFO was genuinely empty (and not a sequence gap), wait up to 6 ms for in-flight packet
         if (!has_item && !is_gap_plc) {
-            int64_t wait_until_us = esp_timer_get_time() + 6000;
+            // Wait at most 6 ms, and only while the DMA queue still has audio (minus decode + write time)
+            int64_t jit_us = 6000;
+            if (m_i2s_dac) {
+                const int64_t queued = i2s_written + static_cast<int64_t>(stage_n) - m_i2s_dac->getPlayedSamples();
+                const int64_t queued_us = (queued * 1000000) / static_cast<int64_t>(samples_per_frame * 100);
+                jit_us = std::clamp<int64_t>(queued_us - CONFIG_VSAF_JIT_MARGIN_US, 0, 6000);
+            }
+            int64_t wait_until_us = esp_timer_get_time() + jit_us;
             while (esp_timer_get_time() < wait_until_us) {
                 esp_rom_delay_us(50);
                 portENTER_CRITICAL(&m_sink_fifo_lock);
