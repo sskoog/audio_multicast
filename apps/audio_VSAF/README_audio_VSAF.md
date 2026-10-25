@@ -6,14 +6,15 @@ The **`audio_VSAF`** application distributes up to 6 audio channels (5.1) from o
 
 Main building blocks:
 
-1. **VSAF 3.0 multi-tier Unequal Error Protection (UEP)**: every 248-byte satellite packet (`0x1337`, ch 0..4) carries the current frame at HQ (120 B, 96 kbps @ 48 kHz) plus the two previous frames at MQ (60 B, 48 kbps). Subwoofer packets (`0x1338`, ch 5) carry 4 frames of 60 B @ 8 kHz. Up to 2 lost satellite packets in a row (3 for the sub) are recovered from later packets without concealment.
+1. **Multi-tier Unequal Error Protection (UEP)**: every 248-byte satellite packet (`0x1337`, ch 0..4) carries the current frame at HQ (120 B, 96 kbps @ 48 kHz) plus the two previous frames at MQ (60 B, 48 kbps). Subwoofer packets (`0x1338`, ch 5) carry 4 frames of 60 B @ 8 kHz. Up to 2 lost satellite packets in a row (3 for the sub) are recovered from later packets without concealment.
 2. **Dual-core SOURCE pipeline** (section 4): core 0 runs USB input + DSP and encodes, core 1 encodes and owns the radio. Encode work is a lock-free job queue shared by both cores. A dedicated RF task keeps exactly one packet in flight and never transmits after the 9.5 ms frame deadline.
 3. **Dual-rate LC3 encoding (`liblc3_dual`)** (section 5): HQ and MQ frames of a channel share one LC3 analysis; MQ only adds a quantization pass. Output is bit-exact with two separate encoders.
 4. **Commanded round-robin SINK telemetry**: bit 7 (`REQ_ACK`) of `packet_flags` grants exactly one SINK an uplink reply per 10 ms frame; that packet is sent last in the burst so the reply never collides with the downlink.
-5. **Self-healing radio**: TX-done timeouts, ESP-NOW queue exhaustion and implausible completions are detected and repaired by re-initialising ESP-NOW (section 4.4). Channel and PHY changes are applied only at frame boundaries with the radio idle.
+5. **Self-healing radio**: TX-done timeouts, ESP-NOW queue exhaustion and implausible completions are detected and repaired with an escalating recovery: ESP-NOW re-init, then a Wi-Fi driver restart, then a SOURCE reboot (section 4.4). Channel and PHY changes are applied only at frame boundaries with the radio idle.
 6. **Fixed channel 13 at boot** (`CONFIG_VSAF_PREFERRED_WIFI_CHANNEL`), boot survey off by default (`CONFIG_VSAF_BOOT_CHANNEL_SCAN`). SINKs start their search on the same channel and stream ~0.35-0.5 s after power-on. Default PHY HT20 MCS3, TX power 10 dBm on all nodes (`CONFIG_VSAF_TX_POWER_QDBM`).
-7. **Time-synchronized playout** (section 6): a PTP-like two-step exchange over the round-robin replies gives the SOURCE every SINK's clock offset and drift; a control frame every 100 ms distributes them. Each SINK plays frame N at `t0(N) + latency + trim` with single-sample corrections. Measured SINK-to-SINK spread ~25 us (self-reported, not yet acoustic).
-8. **Hardware timer pacing**: the 10 ms frame tick is an `esp_timer` periodic callback with direct task notifications, never FreeRTOS tick delays.
+7. **Time-synchronized playout** (section 6): a PTP-like two-step exchange over the round-robin replies gives the SOURCE every SINK's clock offset and drift; a control frame every 100 ms distributes them. Each SINK plays frame N at `t0(N) + latency + trim` with single-sample corrections, and holds the sync over 30 s of lost replies. Measured over 80 min: SINK-to-SINK spread 26.6 us mean (~1.3 samples), 0 PLC (self-reported, not yet acoustic).
+8. **SINK DMA staging**: SINK output is staged and written to the I2S DMA in whole 5 ms descriptors (2 in the ring), so single-sample edits really move the playout and only ~12 ms of audio waits in front of the DAC (section 5.3).
+9. **Hardware timer pacing**: the 10 ms frame tick is an `esp_timer` periodic callback with direct task notifications, never FreeRTOS tick delays.
 
 ```
                   +-----------------------------------------------------+
@@ -283,10 +284,10 @@ PCM and packet buffers are double-buffered by `frame_no & 1`. Before publishing 
 
 | Condition | Handling | Counter |
 | :--- | :--- | :--- |
-| `esp_now_send()` returns an error | Packet dropped, next one tried; 30 consecutive errors -> ESP-NOW re-init | `send_err`, `no_mem` (`txstat`) |
+| `esp_now_send()` returns an error | Packet dropped, next one tried; 30 consecutive errors -> `recoverEspNowTx()` | `send_err`, `no_mem` (`txstat`) |
 | TX-done status != success | Counted, burst continues | `tx_status_fail` |
 | No TX-done within 2.5 ms | Packet given up, burst continues; 5 in a row -> `handleTxSubsystemHang()` (log rate limited to 1/s) | `tx_done_timeouts` |
-| No successful completion for 0.5 s while casting | `recoverEspNowTx()`: `esp_now_deinit()` + init + peer re-add | `recoveries` |
+| No successful completion for 0.5 s while casting | `recoverEspNowTx()`, escalating (below): ESP-NOW re-init, Wi-Fi driver restart, reboot | `recoveries`, `Wi-Fi restarts`, `wedge reboots` |
 | All completions faster than 60 us for 0.5 s (wedged driver) | `recoverEspNowTx()` | `recoveries` |
 | Channel / PHY change requested (`wifich`, `phy`) | Deferred to the next frame boundary with no packet in flight (`applyPendingRadioChanges`) | - |
 
@@ -331,12 +332,12 @@ The SINK decoder adapts to the frame size per frame (120 B HQ vs 60 B redundancy
 
 Each SINK plays out on its own crystal, the SOURCE produces frames on its own. Without correction a SINK whose clock runs a few ppm fast slowly empties its FIFO (and a slow one fills it). Once the cushion is gone, every late or lost packet that redundancy would have repaired turns into a FIFO underrun + PLC (seen in the first 15-minute soak test, section 10).
 
-This FIFO-level control is the **fallback** when no time sync is available (no control frames for 1 s, or `syncoff 1`). With time sync, the scheduled playout of section 6.3 replaces it, using the same single-sample edits.
+This FIFO-level control is the **fallback** when no time sync is available (no valid control-frame data for 30 s, no sync after `CONFIG_VSAF_SYNC_WAIT_MS` at stream start, or `syncoff 1`). With time sync, the scheduled playout of section 6.3 replaces it, using the same single-sample edits.
 
 `runSinkLoop()` therefore holds the **total buffered audio** constant: frames in the FIFO plus samples still queued in the I2S DMA.
 1. After every frame pop: buffered = FIFO frames x 480 + (samples written to I2S + samples in the staging buffer - samples played). Samples played come from the DMA `on_sent` interrupt (completed descriptors, 240 samples = 5 ms by default, plus the part of the current descriptor since the last completion), so the measure is re-anchored by hardware every 5 ms and does not depend on an assumed sample rate. A DMA underrun (the driver's `on_send_q_ovf` event: a descriptor of zeros was played) adds one descriptor to the written count.
 2. The value is filtered with an EMA in Q16 fixed point (time constant 256 frames, ~2.6 s).
-3. 3 s after entering `STREAM` the filtered value becomes the target (at least 2 frames; typically ~4: 2 in the FIFO, ~2 in the DMA).
+3. 3 s after entering `STREAM` the filtered value becomes the target (at least 2 frames).
 4. If the filtered value is more than 0.5 frame below the target (SINK clock fast), one interpolated sample is inserted into the decoded frame (481 samples played); more than 0.5 frame above (SINK clock slow), two neighbours are merged (479 samples). The edit point is the smoothest spot of the frame (smallest sample-to-sample step), so a single sample in 480 is inaudible.
 5. At most one correction per 16 frames, i.e. up to ~130 ppm of correction range; ESP32 crystals differ by tens of ppm.
 6. Every (re-)entry into `STREAM` (power-on, SOURCE reboot, outage) resets the filter, relearns the target and restarts the `ppm` statistics.
@@ -389,15 +390,16 @@ For each popped frame (or concealed frame: its frame time continues the previous
 2. **Play time of the frame's first sample** = now + (samples queued in DMA + staging buffer) / fs + `CONFIG_VSAF_DAC_DELAY_US`.
 3. **Error** = play time - PT_local (+ = late).
 4. **Coarse** (start, timeline jump, |error| > 3 ms): late by a frame or more -> skip the frame; late less than a frame -> drop the first samples of the frame; early -> write silence before it (at most 100 ms).
-5. **Fine** (|error| <= 3 ms): EMA of the error (1/32, ~320 ms, Q8 fixed point, since the raw error has ~+/-100 us of interrupt / task-wake jitter). Above +3/4 sample: drop one sample; below -3/4 sample: insert one, at the smoothest point of the frame (same edit as section 5.3), at most one per 2 frames (~1000 ppm range).
+5. **Fine** (|error| <= 3 ms): EMA of the error (1/32, ~320 ms, Q8 fixed point, since the raw error has interrupt / task-wake jitter: max ~100 us per frame with 10 ms descriptors, 25-50 us with 5 ms descriptors). Above +3/4 sample: drop one sample; below -3/4 sample: insert one, at the smoothest point of the frame (same edit as section 5.3), at most one per 2 frames (~1000 ppm range).
 6. Without a valid sync the SINK falls back to the FIFO-level drift control of section 5.3. On entering STREAM with sync, the DMA is preloaded with silence and the first frame is placed by step 4.
 
 All output goes through the staging buffer of section 5.3, so each correction really moves the playout by the edited number of samples.
 
 ### 6.4 Verification (over USB, no acoustic measurement yet)
 
-- `ptp` on a SINK: filtered playout error and coarse / fine counters. Steady state on all 4 SINKs: filtered error within +/-13 us, no coarse realign after start-up, no DMA rebase.
+- `ptp` on a SINK: filtered playout error and coarse / fine counters. Steady state on all 4 SINKs: filtered error within +/-15 us, no coarse realign after start-up, no DMA rebase.
 - `syncprobe 1` on several SINKs prints, for the frame at each full SOURCE second, the time it starts playing converted back to the SOURCE clock. [tools/sync_probe.py](tools/sync_probe.py) turns the probe on for all SINKs at once and compares them per frame. 2026-10-25, 30 s, Nodes 4 / 5 / 23 / 24: per-frame spread of the four SINKs **25 us mean (~1.2 samples), 102 us max** (one raw-jitter outlier).
+- `soak_test.py` runs the same probe for the whole soak and checks the sync per 10-min block. 80-min soak, 2026-10-25: **26.6 us mean, 142 us max, 26-28 us in every block**, always LOCK, 0 coarse realigns, 0 PLC (section 10).
 - This checks the SINKs against each other *as each one measures itself*. It does not include: offset estimation bias (an asymmetric RX-callback latency between S3 and C6 shows up as a constant skew), the DAC pipeline (PCM5102A vs MAX98357A digital filter delay, I2S FIFO), and acoustic path differences. Those need the UMM-6 / line-in measurement; constant differences are then removed with `trim <ch> <us>` (or `CONFIG_VSAF_DAC_DELAY_US` per chip family).
 - RX timestamps: the RX callback time is used for t2 / t4. `rx_ctrl->timestamp` (hardware) is a different time base with a constant per-boot offset to `esp_timer` (S3 ~-232 ms, C6 ~+81 ms) and 175-200 us spread against the callback time, i.e. the callback jitter. The min-RTT filter already removes most of it; switching t2 / t4 to the hardware stamp + learned offset is a possible refinement.
 
@@ -446,7 +448,7 @@ How each node reads its console:
 
 | Command | Description |
 | :--- | :--- |
-| `txstat` | Channel (set / radio), PHY, TX power setting, recoveries, send errors (incl. `no_mem`, last error), TX-done timeouts, status failures, deadline drops. |
+| `txstat` | Channel (set / radio), PHY, TX power setting, recoveries (with Wi-Fi driver restarts and wedge reboots since power-on, section 4.4), send errors (incl. `no_mem`, last error), TX-done timeouts, status failures, deadline drops. |
 | `usjdiag` | USB-Serial-JTAG console health: console writes accepted / rejected (EIO = firmware believes no host is connected), bytes received, seconds connected / disconnected, connection changes. Kept in RTC memory: after a chip reset (not a power-on) the `previous session` line shows the counters of the session before the reset, e.g. of a stalled console. |
 
 ### 7.3 SOURCE timing and debug
@@ -467,7 +469,7 @@ How each node reads its console:
 
 | Command | Target | Description |
 | :--- | :--- | :--- |
-| `ptp` | Both | SOURCE: per channel valid, offset (SINK - SOURCE), drift (ppm), best RTT, samples in window / total, two-step and t1 misses, trim, reported playout error, plus frame-tick jitter. SINK: sync state, offset in use, drift, control-frame age, latency, trim, filtered / max playout error since the last `ptp`, coarse and fine correction counts with coarse causes, the last 8 coarse events, DMA queue min / max, DMA rebases, unsynced frames. Both: RX hardware-timestamp probe. |
+| `ptp` | Both | SOURCE: per channel valid, offset (SINK - SOURCE), drift (ppm), best RTT, samples in window / total, two-step and t1 misses, `holdover` (estimates served from an older sample, section 6.1), trim, reported playout error, plus frame-tick jitter. SINK: sync state, offset in use, drift, control-frame age, latency, trim, filtered / max playout error since the last `ptp`, coarse and fine correction counts with coarse causes, the last 8 coarse events, DMA queue min / max, DMA rebases, unsynced frames. Both: RX hardware-timestamp probe. |
 | `trim <ch> <us>` | SOURCE | Per-channel presentation-time trim (-30000..30000 us), sent in the control frame. + = that speaker plays later. |
 | `latency <ms>` | SOURCE | Playout latency 20..200 ms (default 50). A frame must arrive by ~latency - 12 ms after t0; t-1 / t-2 / t-3 copies arrive ~10 / 20 / 30 ms after t0, so below ~45 ms the t-3 sub copy and below ~35 ms t-2 come too late. |
 | `syncprobe 0\|1` | SINK | Print `[SYNC] rx` / `[SYNC] play` lines once per SOURCE second (see `tools/sync_probe.py`). |
@@ -498,6 +500,7 @@ Nodes print fixed-width 1 s heartbeats over USB serial. Test scripts parse these
 - `SYNC`: `LOCK` = playout on the presentation time (section 6.3), `SYNC` = sync valid but not yet aligned, `FREE` = no sync (FIFO-level fallback), `-` = not streaming. `e_us`: filtered playout error (+ = late).
 - `RED`: frames recovered from redundancy; `PLC`: concealed frames (each one counts against the zero-glitch target); `DMA` / `OVF` / `UDR`: I2S DMA underruns, FIFO overflows (drops above 18 frames), FIFO underruns. Running totals, printed modulo 1000 (`soak_test.py` unwraps them).
 - `buf`: buffered audio after each frame pop, FIFO + I2S DMA queue, 1 s average (frames; ~4 in steady state). `min`: lowest FIFO depth (FIFO only) in the last second.
+- `DRIFT CORR adj` / `ppm` belong to the FIFO-level fallback (section 5.3) and stay at `lrn` / `-` while the SINK is synchronized; the sync corrections are counted by `ptp` (fine corrections).
 - `DRIFT CORR adj`: net clock-drift corrections in the last second (+ inserted, - dropped samples; `lrn` while the target is being learned, `off` when disabled). `ppm`: SINK clock offset against the SOURCE since STREAM start, from the net corrections (+ = SINK clock fast).
 
 ---
@@ -518,9 +521,15 @@ powershell -ExecutionPolicy Bypass -File apps\audio_VSAF\tools\build_and_flash.p
 # Whole cluster: S3 + C6 built in parallel, then all detected nodes flashed concurrently
 powershell -ExecutionPolicy Bypass -File apps\audio_VSAF\tools\parallel_build_and_flash.ps1 [-BuildOnly | -FlashOnly] [-Targets s3] [-Nodes "16,4,5"]
 
-# Reliability soak test: music into Node 16 over USB, PASS = 0 PLC on every SINK
-.venv_audio_multicast\Scripts\python.exe apps\audio_VSAF\tools\soak_test.py --duration 900
+# Reliability + sync soak test: music into Node 16 over USB. PASS = 0 PLC and no dropout on every SINK, and
+# (unless --no-sync) SINK-to-SINK spread <= 60 us in every 10-min block, always LOCK, no coarse realign
+.venv_audio_multicast\Scripts\python.exe apps\audio_VSAF\tools\soak_test.py --duration 4800   # 80 min
+
+# Quick inter-SINK sync check (30 s, PASS = mean spread <= 60 us)
+.venv_audio_multicast\Scripts\python.exe apps\audio_VSAF\tools\sync_probe.py --duration 30
 ```
+
+The soak writes per-node logs and `summary.json` (incl. a `sync` block: spread per 10-min bucket, per-SINK play - PT mean / stdev, LOCK seconds, coarse / fine counts) to `apps/audio_VSAF/soak_logs/<timestamp>/`.
 
 Node 16 is flashed hands-free (`tools/s3_flash_and_reset.py` identifies it by MAC, reboots it into the ROM bootloader and flashes over COM16). See the `parallel-compile-and-flash`, `node16-flash-and-reset` and `vsaf2-soak-test` skills.
 
@@ -540,6 +549,18 @@ Node 16 has no PSRAM (512 KB SRAM), so internal RAM and the shared flash cache a
 | `CONFIG_VSAF_SCAN_DWELL_MS` / `CONFIG_VSAF_SCAN_HOLD_MS` (`config.h`, SINK) | 30 ms / 3000 ms | Channel search from the preferred channel upward, and the hold on the last channel after a stream loss (section 10). |
 
 Free internal heap with all pipeline tasks running: ~30 KB (largest block 16 KB).
+
+### 9.2 Time sync and SINK playout configuration (`config.h`)
+
+| Setting | Default | Meaning |
+| :--- | :--- | :--- |
+| `CONFIG_VSAF_PLAYOUT_LATENCY_US` | 50000 | Frame time -> presentation time; sent in the control frame, console `latency` changes it at runtime. |
+| `CONFIG_VSAF_SYNC_WAIT_MS` | 1500 | SINK: how long to wait for a control frame before starting unsynchronized (FIFO fallback). |
+| `CONFIG_VSAF_DAC_DELAY_US` | 0 | SINK: fixed I2S -> analog delay added to the predicted play time. Not calibrated yet. |
+| `CONFIG_VSAF_DMA_DESC_PER_FRAME` | 2 | SINK: I2S DMA descriptors per 10 ms frame (2 = 5 ms descriptors; always 2 in the ring). |
+| `CONFIG_VSAF_JIT_MARGIN_US` | 2500 | SINK: the wait for a late packet ends this long before the DMA queue runs dry. |
+
+Fixed in `vsaf_time_sync.cpp` / `runSinkLoop()`: 1 s min-RTT window, 30 s holdover (SOURCE estimate and SINK control data), 5 s drift baseline, 3 ms coarse threshold, 2 us/frame offset slew, 1 ms offset jump, fine EMA 1/32 with a +/-3/4-sample deadband.
 
 On the C6 (`sdkconfig.c6`) `CONFIG_LC3_CODE_IN_IRAM` is off: the C6 SINKs decode with Espressif's fixed-point codec and must not link liblc3 at all. All SOURCE-only liblc3 code (`encbench`) is compiled for the S3 only; a stray reference once pulled ~100 KB of LC3 code and tables into C6 internal RAM, and `esp_wifi_init()` then failed with `ESP_ERR_NO_MEM` in a boot loop.
 
@@ -718,11 +739,10 @@ Per SINK in run 4: mean playout offset against PT -0.7 to -4.3 us, stdev 10-15 u
 Open points: SOURCE TX-done stalls (the driver misses TX-done callbacks: `tx_done_timeouts` ~2.4/s on average, now and then 5 in a row = ~12 ms off air) are the remaining glitch source; a repeat with amplifiers on; acoustic skew measurement.
 
 ### Next steps
-- Decide on a deeper SINK FIFO target (latency vs. recovery) and re-run.
-- Check Node 24's placement / antenna (RSSI 8 dB worse than in the evening runs).
-- Log `txstat` periodically during soaks to classify SOURCE packet-rate dips.
-- Longer soak runs (1 h+, including a SINK that has streamed for a long time) to confirm zero PLC with drift compensation.
-- Understand the one-frame FIFO depth steps; measure the real per-SINK drift (e.g. a run with `driftcorr 0` and the FIFO slope, or SOURCE/SINK timestamps).
-- Measure end-to-end latency, inter-speaker skew and clock drift (GOALS.md priority 1).
+- Acoustic / line-in verification of the inter-speaker skew (UMM-6), then calibrate `trim` per channel and `CONFIG_VSAF_DAC_DELAY_US` (PCM5102A vs MAX98357A filter delay).
+- Measure end-to-end latency (GOALS.md priority 1); 50 ms playout latency plus USB input buffering.
+- SOURCE TX-done stalls (driver misses TX-done callbacks, ~12 ms off air when 5 in a row): the last remaining glitch source; root cause unknown.
+- Soak with the amplifiers on (supply / switching noise vs. radio).
+- Optional: hardware RX timestamps (`rx_ctrl->timestamp` + learned offset) for t2 / t4 to cut callback jitter.
 - Spatial upmix on the SOURCE: about half of each core is now free for it; `dspload` can rehearse the extra load.
 - Optional RAM: limit `liblc3_dual` to 10 ms frames (~8-12 KB of tables) and, if the runtime `sr` switch can go, to 48 kHz + 8 kHz.
