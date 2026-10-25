@@ -290,7 +290,9 @@ PCM and packet buffers are double-buffered by `frame_no & 1`. Before publishing 
 | All completions faster than 60 us for 0.5 s (wedged driver) | `recoverEspNowTx()` | `recoveries` |
 | Channel / PHY change requested (`wifich`, `phy`) | Deferred to the next frame boundary with no packet in flight (`applyPendingRadioChanges`) | - |
 
-`txfault` (console) breaks the TX path on purpose to test this recovery; it heals in well under 1 s.
+**Escalation (2026-10-25).** Each `recoverEspNowTx()` that is not followed by a single successful TX counts as a strike: strikes 1-2 re-init ESP-NOW, 3-5 restart the Wi-Fi driver (`esp_wifi_stop()` / `esp_wifi_start()`, then channel, protocol, TX power, ESP-NOW and PHY rate are re-applied: this frees the driver's TX buffers), strike 6 reboots the SOURCE (counted in RTC memory, `txstat` shows `wedge reboots since power-on`). One successful TX resets the strikes. Reason: in one 80-min soak the driver stopped delivering TX-done callbacks after 30 min, every `esp_now_send()` then returned `ESP_ERR_ESPNOW_NO_MEM`, and 59,285 ESP-NOW re-inits in 50 min never healed it.
+
+Test hooks: `txfault` breaks the TX path once (heals with an ESP-NOW re-init in well under 1 s). `txfault wifi` simulates the stuck NO_MEM state until a Wi-Fi restart (measured: back on air ~150 ms after the fault, SINK gap ~0.1 s). `txfault reboot` keeps it stuck through everything (SOURCE reboots, SINKs stream again ~0.8 s after the fault; the PC sees the USB audio device re-enumerate).
 
 ---
 
@@ -372,13 +374,13 @@ PT_local(N) = PT(N) + offset[ch](now)       (SINK clock)
 - **t1** is the TX-done callback time of the REQ_ACK packet (the radio has finished sending), stored per `seq` in a 256-entry table tagged with the frame number, so a late or duplicated reply cannot pick a wrong t1.
 - **t3** uses the real TX-done time of the reply: the SINK measures submit -> TX-done for each reply and sends it in its next reply (`prev_ack_seq`, `prev_tx_delay_us`). One exchange therefore completes when the next reply of the same SINK arrives (~60 ms later with 6 SINKs). This removes the random channel-access backoff (up to a few hundred us) from the upstream path.
 - Lost packets in either direction just lose that sample (counted as `2step_miss` / `t1_miss` in `ptp`). Nothing is retried.
-- Samples with 0 < rtt < 20 ms go into a 16-entry ring per channel. The estimate is the **minimum-RTT sample of the last 1 s** (least queuing), projected to "now" with the drift.
+- Samples with 0 < rtt < 20 ms go into a 16-entry ring per channel. The estimate is the **minimum-RTT sample of the last 1 s** (least queuing), projected to "now" with the drift. **Holdover:** if no sample is in the 1 s window (all replies of a SINK lost, e.g. heavy air congestion), the newest sample up to 30 s old is used, projected with the drift (which is not updated from it); `ptp` counts this in the `holdover` column. With a drift estimate good to ~0.1 ppm the projection stays within ~3 us over 30 s.
 - **Drift** (ppb) is the slope of the best-sample offset over a baseline of at least 5 s (EMA 1/4, capped at +/-200 ppm). It lets the SINK extrapolate between control frames and over lost ones.
 - Measured: best-sample RTT 1..60 us; offset jitter between estimates within a few us; drift -2..+8 ppm between the nodes.
 
 ### 6.2 Distribution
 
-Every 100 ms the SOURCE broadcasts the control frame (section 3.5) with offset, drift, RTT and trim for all 6 channels plus the latency. A SINK takes the entry of its own channel. It treats the sync as valid while the last control frame is less than 1 s old: up to 9 control frames in a row may be lost.
+Every 100 ms the SOURCE broadcasts the control frame (section 3.5) with offset, drift, RTT and trim for all 6 channels plus the latency. A SINK takes the entry of its own channel. It treats the sync as valid while the last control frame is less than 30 s old (projected with the drift; up to 1 s before 2026-10-25, which let a 5 s congestion burst drop Node 24 to unsynced playout for 1 s). When a SINK loses the stream (back to `SCANNING`) it discards the sync and waits for a fresh control frame, since the SOURCE may have rebooted with a new time base.
 
 ### 6.3 SINK playout scheduler (`runSinkLoop()`)
 
@@ -459,6 +461,7 @@ How each node reads its console:
 | `dspload <us>` | Add a synthetic busy-wait to the DSP stage (headroom test for the future spatial upmix, 0..9000 us). |
 | `enccores 1\|2` | Debug: encode on core 0 only (frames are cut at 8 ms so the task watchdog stays fed) or on both cores. |
 | `txfault` | Break the ESP-NOW TX path at the next frame boundary to test self-healing. |
+| `txfault wifi` / `txfault reboot` | Simulate a stuck driver (every send = NO_MEM) that only a Wi-Fi restart / a reboot clears, to test the recovery escalation (section 4.4). |
 
 ### 7.4 Time sync (section 6)
 
@@ -698,6 +701,21 @@ Results (Nodes 4, 5, 23, 24, music over USB, 50 ms latency):
 | 15-min soak (`soak_test.py`) | **PASS: 0 PLC, 0 underruns, 0 DMA underruns** on all 4 SINKs; packet loss 0.1-0.34 %, all recovered from redundancy; SOURCE TX end avg 4.56 ms |
 
 Caveats: the spread is each SINK's own estimate (common SOURCE clock); it excludes offset-estimation bias between chip families, DAC filter delay (PCM5102A vs MAX98357A) and acoustics. Next: acoustic / line-in skew measurement with the UMM-6, then calibrate `trim` / `CONFIG_VSAF_DAC_DELAY_US`. The soak table's `ADJ` / `ppm` columns come from the FIFO fallback and read `+0` / `nan` while synced.
+
+### 2026-10-25 (evening): 80-minute soaks with time sync
+
+All runs: music over USB, Nodes 4 / 5 / 23 / 24 on channels 0 / 1 / 2 / 5 (the SOURCE encodes and sends all 6 channels), amplifiers off, 50 ms latency. `soak_test.py` now also checks the sync (probe spread per 10 min, always LOCK, no coarse realign).
+
+| Run | Change | PLC (80 min) | Sync spread mean / max | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| 1 | 10 ms DMA descriptors | 4 (N4: 3, N5: 1), all FIFO underruns | 24.7 / 121 us | Frames popped ~27 ms before PT: t-2 / t-3 copies arrived too late during congestion bursts |
+| 2 | 5 ms descriptors (`CONFIG_VSAF_DMA_DESC_PER_FRAME` 2), bounded JIT wait | 0 in the first 30.7 min | 23.7 / 93 us | SOURCE TX wedge at 30.7 min (stuck `ESP_ERR_ESPNOW_NO_MEM`), never recovered by ESP-NOW re-inits -> escalation added |
+| 3 | + TX recovery escalation | 1 (N23, during a 12 ms SOURCE TX-done stall) | 26.1 / 112 us | 5 s congestion burst: no replies from ch 1 / 5 for > 1 s -> N24 unsynced 1 s -> holdover added |
+| 4 | + 30 s sync holdover | **0 (PASS)** | **26.6 / 142 us**, every 10-min block 26-28 us | 0 underruns, 0 TX recoveries, always LOCK, 0 coarse realigns; packet loss 0.14-0.30 %, all recovered from redundancy |
+
+Per SINK in run 4: mean playout offset against PT -0.7 to -4.3 us, stdev 10-15 us, filtered error within +/-15 us; best two-step RTT 9-72 us; drift +1.9 to +7.0 ppm against the SOURCE.
+
+Open points: SOURCE TX-done stalls (the driver misses TX-done callbacks: `tx_done_timeouts` ~2.4/s on average, now and then 5 in a row = ~12 ms off air) are the remaining glitch source; a repeat with amplifiers on; acoustic skew measurement.
 
 ### Next steps
 - Decide on a deeper SINK FIFO target (latency vs. recovery) and re-run.

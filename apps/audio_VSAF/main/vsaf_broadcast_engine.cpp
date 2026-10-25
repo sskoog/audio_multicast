@@ -9,6 +9,8 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_heap_caps.h"
+#include "esp_attr.h"
+#include "esp_system.h"
 #include <cmath>
 #include <algorithm>
 #include <cstdint>
@@ -307,14 +309,79 @@ esp_err_t EspNowBroadcastEngine::initEspNowLayer() {
  *
  * @param why Reason string for the log (input).
  */
+// Survives esp_restart() (not power-on): counts reboots forced by an unrecoverable TX wedge
+static RTC_NOINIT_ATTR uint32_t s_wedge_reboot_magic;
+static RTC_NOINIT_ATTR uint32_t s_wedge_reboots;
+static constexpr uint32_t WEDGE_MAGIC = 0x7EDCE001;
+
+uint32_t EspNowBroadcastEngine::getTxWedgeReboots() {
+    return s_wedge_reboot_magic == WEDGE_MAGIC ? s_wedge_reboots : 0;
+}
+
+/**
+ * @brief Restart the Wi-Fi driver (stop + start) and re-apply all radio settings and ESP-NOW.
+ *
+ * Frees the driver's TX buffers, which an ESP-NOW deinit / init does not: seen 2026-10-25 after 30 min of
+ * streaming, the driver stopped delivering TX-done callbacks, every esp_now_send() then returned
+ * ESP_ERR_ESPNOW_NO_MEM and 59,000 ESP-NOW re-inits in 50 min did not help.
+ *
+ * @return ESP_OK, or the first failing esp_wifi / esp_now error.
+ */
+esp_err_t EspNowBroadcastEngine::restartWifiRadio() {
+    m_wifi_restarts++;
+    if (m_sim_wedge.load(std::memory_order_relaxed) == 1) {
+        m_sim_wedge.store(0, std::memory_order_relaxed);  // test hook: this level heals on a Wi-Fi restart
+    }
+    esp_now_deinit();
+    esp_err_t err = esp_wifi_stop();
+    if (err == ESP_OK) err = esp_wifi_start();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Wi-Fi restart failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    esp_wifi_set_ps(WIFI_PS_NONE);
+    esp_wifi_set_channel(m_wifi_channel, WIFI_SECOND_CHAN_NONE);
+#if defined(CONFIG_IDF_TARGET_ESP32C6)
+    esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N | WIFI_PROTOCOL_11AX);
+#else
+    esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
+#endif
+    setWifiTxPower(m_tx_power_req_qdbm.load(std::memory_order_relaxed));
+    err = initEspNowLayer();
+    if (err == ESP_OK) {
+        setWifiPhyRate(m_tx_phy_mode, m_tx_phy_rate);
+    }
+    return err;
+}
+
 void EspNowBroadcastEngine::recoverEspNowTx(const char* why) {
     m_tx_recoveries++;
-    ESP_LOGE(TAG, "ESP-NOW TX path wedged (%s): re-initializing ESP-NOW (recovery #%lu)",
-             why, (unsigned long)m_tx_recoveries.load(std::memory_order_relaxed));
-    esp_now_deinit();
-    if (initEspNowLayer() == ESP_OK) {
-        setWifiPhyRate(m_tx_phy_mode, m_tx_phy_rate);
-        esp_wifi_set_channel(m_wifi_channel, WIFI_SECOND_CHAN_NONE);
+    // Escalate while recoveries do not bring back a single successful TX:
+    //   strikes 1-2: ESP-NOW re-init, 3-5: Wi-Fi driver restart, 6: reboot (SINKs hold the channel for
+    //   CONFIG_VSAF_SCAN_HOLD_MS = 3 s and the SOURCE is back on air well within that)
+    m_tx_strikes = m_tx_ok_since_recovery ? 1 : m_tx_strikes + 1;
+    m_tx_ok_since_recovery = false;
+    if (m_tx_strikes >= 6) {
+        ESP_LOGE(TAG, "ESP-NOW TX path wedged (%s): Wi-Fi restarts did not help, rebooting the SOURCE", why);
+        if (s_wedge_reboot_magic != WEDGE_MAGIC) {
+            s_wedge_reboot_magic = WEDGE_MAGIC;
+            s_wedge_reboots = 0;
+        }
+        s_wedge_reboots++;
+        vTaskDelay(pdMS_TO_TICKS(20));  // let the log line out
+        esp_restart();
+    } else if (m_tx_strikes >= 3) {
+        ESP_LOGE(TAG, "ESP-NOW TX path wedged (%s): restarting the Wi-Fi driver (recovery #%lu, strike %lu)",
+                 why, (unsigned long)m_tx_recoveries.load(std::memory_order_relaxed), (unsigned long)m_tx_strikes);
+        restartWifiRadio();
+    } else {
+        ESP_LOGE(TAG, "ESP-NOW TX path wedged (%s): re-initializing ESP-NOW (recovery #%lu, strike %lu)",
+                 why, (unsigned long)m_tx_recoveries.load(std::memory_order_relaxed), (unsigned long)m_tx_strikes);
+        esp_now_deinit();
+        if (initEspNowLayer() == ESP_OK) {
+            setWifiPhyRate(m_tx_phy_mode, m_tx_phy_rate);
+            esp_wifi_set_channel(m_wifi_channel, WIFI_SECOND_CHAN_NONE);
+        }
     }
     if (s_tx_done_sem) {
         xSemaphoreTake(s_tx_done_sem, 0);
@@ -487,6 +554,13 @@ esp_err_t EspNowBroadcastEngine::stop() {
  */
 void EspNowBroadcastEngine::transitionTo(NetworkState new_state) {
     m_state.store(new_state, std::memory_order_release);
+    if (new_state == NetworkState::SCANNING) {
+        // Stream lost: the time sync is held over for 30 s while streaming, but after an outage the SOURCE may
+        // have rebooted (new time base), so wait for a fresh control frame
+        portENTER_CRITICAL(&m_sync_mux);
+        m_sync.valid = false;
+        portEXIT_CRITICAL(&m_sync_mux);
+    }
 
     // Dynamic Wi-Fi Power Save Management:
     // - IDLE, OFF: WIFI_PS_MIN_MODEM (default modem sleep when inactive or paused)

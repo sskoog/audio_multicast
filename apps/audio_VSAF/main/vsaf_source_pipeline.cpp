@@ -504,6 +504,7 @@ void EspNowBroadcastEngine::runSrcRfLoop() {
                 }
                 if (m_src_tx_status.load(std::memory_order_relaxed) == ESP_NOW_SEND_SUCCESS) {
                     m_tx_ok_in_window++;
+                    m_tx_ok_since_recovery = true;
                 } else {
                     m_tx_fail_count++;
                 }
@@ -601,7 +602,9 @@ void EspNowBroadcastEngine::runSrcRfLoop() {
                     // sync needs is the TX-done of the REQ_ACK packet, recorded when it completes
                     inflight_kind = (pick == f->ack_ch) ? 1 : 0;
                     inflight_frame = cur_no;
-                    esp_err_t err = esp_now_send(s_broadcast_mac, buf, len);
+                    // m_sim_wedge: test hook ('txfault wifi|reboot'), mimics the driver's stuck NO_MEM state
+                    esp_err_t err = m_sim_wedge.load(std::memory_order_relaxed) ? ESP_ERR_ESPNOW_NO_MEM
+                                                                                : esp_now_send(s_broadcast_mac, buf, len);
                     m_acc_tx_call.add(static_cast<uint32_t>(esp_timer_get_time() - ts));
 
                     sent_mask |= static_cast<uint8_t>(1u << pick);
@@ -641,7 +644,8 @@ void EspNowBroadcastEngine::runSrcRfLoop() {
             m_src_tx_done_flag.store(false, std::memory_order_release);
             const int64_t ts = esp_timer_get_time();
             ctrl_sent = true;
-            if (esp_now_send(s_broadcast_mac, reinterpret_cast<const uint8_t*>(&m_ctrl_pkt), sizeof(m_ctrl_pkt)) == ESP_OK) {
+            if (!m_sim_wedge.load(std::memory_order_relaxed) &&
+                esp_now_send(s_broadcast_mac, reinterpret_cast<const uint8_t*>(&m_ctrl_pkt), sizeof(m_ctrl_pkt)) == ESP_OK) {
                 busy = true;
                 t_submit = ts;
                 inflight_kind = 2;

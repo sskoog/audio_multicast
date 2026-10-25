@@ -34,7 +34,11 @@ constexpr uint32_t PTP_WINDOW_US = 1000000;        // samples older than this ar
 constexpr int32_t  PTP_MAX_RTT_US = 20000;         // implausible samples are dropped
 constexpr int32_t  PTP_DRIFT_BASELINE_US = 5000000; // drift is measured over at least 5 s
 constexpr int64_t  PTP_MAX_DRIFT_PPB = 200000;     // 200 ppm: anything larger is a glitch
-constexpr int64_t  SINK_SYNC_MAX_AGE_US = 1000000; // control frames every 100 ms; 1 s without -> sync lost
+constexpr uint32_t PTP_HOLDOVER_US = 30000000;     // no fresh sample: project the newest one with the drift
+constexpr int64_t  SINK_SYNC_MAX_AGE_US = 30000000; // holdover on the last control frame (drift-projected)
+// Holdover accuracy: a drift estimate good to ~0.1 ppm keeps the projection within ~3 us over 30 s. Seen
+// 2026-10-25: 5 s of heavy air congestion cost ch 1 / ch 5 all replies for > 1 s; with a 1 s limit the SOURCE
+// marked them invalid and Node 24 dropped to unsynced playout for 1 s.
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -120,13 +124,30 @@ bool EspNowBroadcastEngine::ptpBest(PtpChannel& c, uint32_t now32, int32_t& thet
             best = i;
         }
     }
+    bool holdover = false;
     if (best < 0) {
-        return false;
+        // Holdover: newest sample within PTP_HOLDOVER_US, only with a drift estimate to project it
+        for (int i = 0; i < c.count; ++i) {
+            const int32_t age = static_cast<int32_t>(now32 - c.s[i].t_ref);
+            if (age < 0 || age > static_cast<int32_t>(PTP_HOLDOVER_US)) {
+                continue;
+            }
+            if (best < 0 || static_cast<int32_t>(c.s[i].t_ref - c.s[best].t_ref) > 0) {
+                best = i;
+            }
+        }
+        if (best < 0 || !c.drift_valid) {
+            return false;
+        }
+        holdover = true;
+        c.holdover_uses++;
     }
     const PtpSample& b = c.s[best];
 
-    // Drift: slope of the best offset over >= 5 s, smoothed
-    if (!c.drift_ref_valid) {
+    // Drift: slope of the best offset over >= 5 s, smoothed (not from a held-over sample)
+    if (holdover) {
+        // keep the drift estimate as it is
+    } else if (!c.drift_ref_valid) {
         c.drift_ref_valid = true;
         c.drift_ref_t = b.t_ref;
         c.drift_ref_theta = b.theta;
@@ -197,6 +218,7 @@ void EspNowBroadcastEngine::getPtpStatus(uint8_t ch, PtpChannelStatus& out) {
     out.samples_total = c.samples_total;
     out.twostep_miss = c.twostep_miss;
     out.t1_miss = c.t1_miss;
+    out.holdover_uses = c.holdover_uses;
     out.playout_err_us = c.playout_err_us;
     portEXIT_CRITICAL(&m_ptp_mux);
     out.trim_us = m_trim_us[ch].load(std::memory_order_relaxed);

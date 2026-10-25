@@ -276,7 +276,11 @@ public:
     esp_err_t requestWifiChannel(uint8_t channel);
     esp_err_t requestWifiPhyRate(wifi_phy_mode_t phymode, wifi_phy_rate_t rate);
     uint32_t  getTxRecoveryCount() const { return m_tx_recoveries.load(std::memory_order_relaxed); }
+    uint32_t  getWifiRestartCount() const { return m_wifi_restarts.load(std::memory_order_relaxed); }
+    static uint32_t getTxWedgeReboots();   // SOURCE reboots forced by an unrecoverable TX wedge (RTC memory)
     void      requestTxFaultInjection() { m_debug_break_tx.store(true, std::memory_order_release); } // test only
+    // Test only: simulate a stuck driver (every send = NO_MEM). 1 = cleared by a Wi-Fi restart, 2 = never
+    void      simulateTxWedge(int level) { m_sim_wedge.store(level, std::memory_order_release); }
     uint8_t getWifiChannel() const { return m_wifi_channel; }
     bool isChannelLocked() const { return m_channel_locked.load(std::memory_order_acquire); }
     void lockChannel(bool locked) { m_channel_locked.store(locked, std::memory_order_release); }
@@ -466,6 +470,7 @@ public:
         uint32_t samples_total;    // all two-step samples
         uint32_t twostep_miss;     // replies whose previous exchange could not be completed
         uint32_t t1_miss;          // replies without a matching t1 (REQ_ACK TX-done) record
+        uint32_t holdover_uses;    // estimates served from the newest sample (no fresh one in the 1 s window)
         int16_t  playout_err_us;   // last playout error reported by the SINK
         int16_t  trim_us;
     };
@@ -641,7 +646,7 @@ private:
         int32_t   drift_ref_theta = 0;
         bool      drift_valid = false;
         int32_t   drift_ppb = 0;
-        uint32_t  samples_total = 0, twostep_miss = 0, t1_miss = 0;
+        uint32_t  samples_total = 0, twostep_miss = 0, t1_miss = 0, holdover_uses = 0;
         int16_t   playout_err_us = VSAF_PLAYOUT_ERR_UNKNOWN;
     };
     PtpChannel                 m_ptp[MAX_SINK_NODES];
@@ -764,6 +769,12 @@ private: // SOURCE: max |tick - grid| (us) since last read
     uint32_t                   m_tx_ok_in_window{0};
     uint32_t                   m_tx_window_frames{0};
     std::atomic<uint32_t>      m_tx_recoveries{0};
+    std::atomic<uint32_t>      m_wifi_restarts{0};
+    std::atomic<int>           m_sim_wedge{0};
+    // Escalation (src_rf task only): recoveries in a row without any successful TX in between
+    uint32_t                   m_tx_strikes = 0;
+    bool                       m_tx_ok_since_recovery = true;
+    esp_err_t restartWifiRadio();
     esp_err_t initEspNowLayer();
     void recoverEspNowTx(const char* why);
     void applyPendingRadioChanges();

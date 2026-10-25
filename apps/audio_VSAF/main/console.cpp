@@ -657,7 +657,7 @@ void handle_ascii_command(const char* raw_line) {
                               "max %ld us since last 'ptp'\n",
                               (unsigned long)s_unicast_engine->getPlayoutLatencyUs(), 100UL,
                               (long)s_unicast_engine->takeSrcGridDevMax());
-                print_console("  ch valid  offset_us(SINK-SRC)  drift_ppm  rtt_us  win  samples  2step_miss  t1_miss  trim_us  playout_err_us\n");
+                print_console("  ch valid  offset_us(SINK-SRC)  drift_ppm  rtt_us  win  samples  2step_miss  t1_miss  holdover  trim_us  playout_err_us\n");
                 for (uint8_t ch = 0; ch < AudioNet::MAX_SINK_NODES; ++ch) {
                     AudioNet::EspNowBroadcastEngine::PtpChannelStatus ps{};
                     s_unicast_engine->getPtpStatus(ch, ps);
@@ -667,10 +667,10 @@ void handle_ascii_command(const char* raw_line) {
                     } else {
                         snprintf(err_str, sizeof(err_str), "%+d", ps.playout_err_us);
                     }
-                    print_console("  %u  %-5s %+19ld %+10.3f %7u %4u %8lu %11lu %8lu %8d %15s\n", ch, ps.valid ? "yes" : "no",
+                    print_console("  %u  %-5s %+19ld %+10.3f %7u %4u %8lu %11lu %8lu %9lu %8d %15s\n", ch, ps.valid ? "yes" : "no",
                                   (long)ps.offset_us, ps.drift_ppb / 1000.0f, ps.rtt_us, ps.samples,
                                   (unsigned long)ps.samples_total, (unsigned long)ps.twostep_miss,
-                                  (unsigned long)ps.t1_miss, ps.trim_us, err_str);
+                                  (unsigned long)ps.t1_miss, (unsigned long)ps.holdover_uses, ps.trim_us, err_str);
                 }
             } else {
                 AudioNet::EspNowBroadcastEngine::SinkSyncStatus ss{};
@@ -797,6 +797,15 @@ void handle_ascii_command(const char* raw_line) {
             s_unicast_engine->setEncoderCores(static_cast<uint32_t>(n));
             print_console("[OK] LC3 encoder cores: %lu\n", (unsigned long)s_unicast_engine->getEncoderCores());
         }
+    } else if (strcasecmp(line, "txfault wifi") == 0 || strcasecmp(line, "txfault reboot") == 0) {
+        // Test hook: every send fails with NO_MEM until a Wi-Fi restart ('wifi') or never ('reboot'),
+        // to exercise the recovery escalation ESP-NOW re-init -> Wi-Fi restart -> reboot
+        if (s_unicast_engine) {
+            const bool wifi = strcasecmp(line + 8, "wifi") == 0;
+            s_unicast_engine->simulateTxWedge(wifi ? 1 : 2);
+            print_console("[OK] Simulated TX wedge (%s): expect 2 ESP-NOW re-inits, then %s\n", line + 8,
+                          wifi ? "a Wi-Fi restart that heals it" : "3 Wi-Fi restarts and a reboot");
+        }
     } else if (strcasecmp(line, "txfault") == 0) {
         // Test hook: deinit ESP-NOW at the next frame boundary; the TX health check must recover within ~1 s
         if (s_unicast_engine) {
@@ -813,7 +822,10 @@ void handle_ascii_command(const char* raw_line) {
             print_console("[TXSTAT] ch set=%u radio=%u | phy=%s | txpwr=%.2f dBm (setting; radio quantizes it)\n",
                           s_unicast_engine->getWifiChannel(), primary, s_unicast_engine->getWifiPhyRateString(),
                           s_unicast_engine->getWifiTxPower() / 4.0f);
-            print_console("[TXSTAT] recoveries=%lu\n", (unsigned long)s_unicast_engine->getTxRecoveryCount());
+            print_console("[TXSTAT] recoveries=%lu (Wi-Fi restarts %lu, wedge reboots since power-on %lu)\n",
+                          (unsigned long)s_unicast_engine->getTxRecoveryCount(),
+                          (unsigned long)s_unicast_engine->getWifiRestartCount(),
+                          (unsigned long)AudioNet::EspNowBroadcastEngine::getTxWedgeReboots());
             print_console("[TXSTAT] send_err=%lu (no_mem=%lu, last=%s) tx_done_timeouts=%lu tx_status_fail=%lu deadline_drops=%lu\n",
                           (unsigned long)s_unicast_engine->getTxMacErrorCount(),
                           (unsigned long)s_unicast_engine->getTxNoMemCount(),
