@@ -60,7 +60,7 @@ APP_DIR = os.path.dirname(TOOLS_DIR)
 REPO_ROOT = os.path.dirname(os.path.dirname(APP_DIR))
 
 # node_id -> (port, label); matches AGENTS.md hardware registry
-DEFAULT_SINKS = {4: ("COM4", "L  ch0"), 5: ("COM5", "R  ch1"), 23: ("COM23", "C  ch2"), 24: ("COM24", "Sub ch5")}
+DEFAULT_SINKS = {4: ("COM4", "L  ch0"), 5: ("COM5", "R  ch1"), 23: ("COM23", "C  ch2"), 24: ("COM24", "LS ch3")}
 SOURCE_PORT = "COM116"
 FRAMES_PER_S = 100  # 10 ms frames
 SINK_STATES = {"IDLE", "SCAN", "PREF", "STRM", "CAST"}

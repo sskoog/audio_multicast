@@ -59,7 +59,7 @@ static constexpr KnownNodeDescriptor KNOWN_NODE_LIBRARY[] = {
     { {0xE8, 0x3D, 0xC1, 0xFB, 0xE8, 0x3C},  4, 0, "Left",            "XIAO ESP32-S3 PCM5102A"  },
     { {0xE8, 0x3D, 0xC1, 0xFC, 0x8B, 0x50},  5, 1, "Right",           "XIAO ESP32-S3 PCM5102A"  },
     { {0xB0, 0xA6, 0x04, 0x99, 0x38, 0x44}, 23, 2, "Center",          "Waveshare ESP32-C6-Zero" },
-    { {0xB0, 0xA6, 0x04, 0x99, 0x18, 0xE4}, 24, 5, "Subwoofer",       "Waveshare ESP32-C6-Zero" },
+    { {0xB0, 0xA6, 0x04, 0x99, 0x18, 0xE4}, 24, 3, "Surround Left",   "Waveshare ESP32-C6-Zero" },  // was the Ch 5 sub until 2026-10-25
     { {0x98, 0xA3, 0x16, 0x9D, 0x57, 0xEC}, 21, 2, "Center",          "ESP32-C6-WROOM-1 DevKit" },
     { {0xE8, 0x3D, 0xC1, 0xFB, 0xDC, 0xC4}, 25, 3, "Surround Left",   "Heemol ESP32-C6 Mini"    },
     { {0x98, 0xA3, 0x16, 0xAC, 0x13, 0x38}, 26, 4, "Surround Right",  "Heemol ESP32-C6 Mini"    },
@@ -381,25 +381,27 @@ extern "C" void app_main(void) {
                      base_mac[0], base_mac[1], base_mac[2], base_mac[3], base_mac[4], base_mac[5], cfg->default_channel);
         }
 
-        // Apply node-specific software post-gain attenuation and 24-bit depth for PCM5102A DAC nodes.
-        // Per-node calibration compensates for hardware gain and driver impedance differences.
-        if (cfg->is_pcm5102a) {
-            float postgain_db = -20.0f; // Default for PCM5102A nodes
-            if (matched_node) {
-                switch (matched_node->node_id) {
-                    case 4:  postgain_db = -20.0f; break; // Node 4 (Left):  baseline reference
-                    case 5:  postgain_db =  -9.0f; break; // Node 5 (Right): +11 dB vs Node 4 (hardware is quieter)
-                    default: break;
-                }
+        // Per-node software post-gain: matches the acoustic level of all speakers (DACs, amplifiers, gain straps and
+        // drivers differ). SPL calibration 2026-10-25 (TRS TA650A, dB-A, slow; `caltone pink -30`, volume 100 %):
+        // level at 0 dB post-gain N4 91.3, N5 79.5, N23 58.1, N24 57.5 dBA with MAX98357A GAIN at 3 dB (N23: one 65.0
+        // reading was an outlier); check pass 56.9-57.5 dBA. Then all nodes +6 dB: C6 MAX98357A GAIN 3 -> 12 dB with
+        // 3 dB less software gain, S3 nodes +6 dB. Valid for the drivers connected then (N4: one driver of pipe D,
+        // N5: both drivers of pipe C, N23: one 4-ohm driver in pipe A, N24: one 4-ohm driver in pipe E).
+        float postgain_db = cfg->is_pcm5102a ? -34.0f : 0.0f; // uncalibrated default: quiet on PCM5102A + TPA3118
+        if (matched_node) {
+            switch (matched_node->node_id) {
+                case 4:  postgain_db = -27.8f; break; // S3 PCM5102A + TPA3118
+                case 5:  postgain_db = -16.0f; break; // S3 PCM5102A + TPA3118
+                case 23: postgain_db =  -3.6f; break; // C6 MAX98357A, HW gain 12 dB (from measurements 1 + 3)
+                case 24: postgain_db =  -3.0f; break; // C6 MAX98357A, HW gain 12 dB (reference: quietest node)
+                default: break;
             }
-            s_unicast_engine->setPostGainDb(postgain_db);
-            s_unicast_engine->setBitDepth(24);
-            ESP_LOGI(TAG, "PCM5102A DAC detected (Node %d): software post-gain %.1f dB, 24-bit depth",
-                     matched_node ? matched_node->node_id : -1, postgain_db);
-        } else {
-            s_unicast_engine->setPostGainDb(0.0f);
-            s_unicast_engine->setBitDepth(16);
         }
+        s_unicast_engine->setPostGainDb(postgain_db);
+        s_unicast_engine->setBitDepth(cfg->is_pcm5102a ? 24 : 16);
+        ESP_LOGI(TAG, "%s DAC (Node %d): software post-gain %.1f dB, %d-bit",
+                 cfg->is_pcm5102a ? "PCM5102A" : "MAX98357A", matched_node ? matched_node->node_id : -1, postgain_db,
+                 cfg->is_pcm5102a ? 24 : 16);
     } else if (cfg->node_role == NODE_ROLE_SOURCE) {
         // Initialize USB Audio + CDC for SOURCE
         usb_audio_init();

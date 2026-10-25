@@ -1,3 +1,4 @@
+#include <math.h>
 #include "usb_audio.hpp"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -155,6 +156,24 @@ static const tusb_desc_device_t s_device_descriptor = {
 
 static int8_t s_mute[3] = {0, 0, 0}; // master, ch1, ch2
 static int16_t s_volume[3] = {0, 0, 0}; // master, ch1, ch2 (in 1/256 dB)
+
+// Host volume / mute -> linear gain per channel (read by the SOURCE DSP stage once per frame). The controls are
+// written from the TinyUSB task; single aligned 8 / 16-bit stores, so a torn read cannot happen.
+static float fu_gain(int ch) {
+    if (s_mute[0] || s_mute[ch]) {
+        return 0.0f;
+    }
+    const float db = (static_cast<float>(s_volume[0]) + static_cast<float>(s_volume[ch])) / 256.0f;
+    if (db <= -90.0f) {
+        return 0.0f;
+    }
+    return db >= 0.0f ? 1.0f : powf(10.0f, db / 20.0f);
+}
+
+extern "C" void usb_audio_get_gain(float* gain_l, float* gain_r) {
+    *gain_l = fu_gain(1);
+    *gain_r = fu_gain(2);
+}
 static uint32_t s_current_sample_rate = 48000;
 
 extern "C" bool tud_audio_set_req_entity_cb(uint8_t rhport, tusb_control_request_t const *p_request, uint8_t *pBuff) {

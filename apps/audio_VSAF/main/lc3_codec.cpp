@@ -181,8 +181,11 @@ esp_err_t Lc3CodecEngine::initDecoder(uint32_t sample_rate_hz, uint8_t channels,
         .channel = m_channels,
         .bits_per_sample = 16,
         .frame_dms = static_cast<uint8_t>(m_frame_duration_us / 100), // 75 for 7.5ms, 100 for 10ms
-        .nbyte = m_octets_per_frame,
-        .is_cbr = true,
+        // VBR: each call decodes in_raw.len bytes, so HQ (120 B), redundancy and sub (60 B) frames all decode.
+        // With is_cbr = true every frame had to be exactly nbyte long: all 60 B frames failed and came out as
+        // concealment (the C6 sub never played; C6 satellite redundancy frames were not real recoveries).
+        .nbyte = std::max<uint16_t>(m_octets_per_frame, 120),
+        .is_cbr = false,
         .len_prefixed = false,
         .enable_plc = true,
     };
@@ -416,6 +419,11 @@ esp_err_t Lc3CodecEngine::decodeFrame(const uint8_t* in_lc3_buf, size_t in_bytes
     esp_audio_dec_info_t dec_info;
     esp_audio_err_t ret = esp_lc3_dec_decode(m_dec_handle, &in_raw, &out_f, &dec_info);
     if (ret != ESP_AUDIO_ERR_OK) {
+        static uint32_t s_dec_errors = 0;
+        if (!is_plc && (s_dec_errors++ % 1000) == 0) {
+            ESP_LOGW(TAG, "LC3 decode error %d (%u bytes, %lu Hz): concealed (%lu errors so far)", (int)ret,
+                     (unsigned)in_bytes, (unsigned long)m_sample_rate, (unsigned long)s_dec_errors);
+        }
         // Fallback PLC
         if (!is_plc) {
             incrementPlcCount();

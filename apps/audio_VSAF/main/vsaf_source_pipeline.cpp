@@ -211,13 +211,27 @@ void EspNowBroadcastEngine::srcRunDsp(SrcFrame& f) {
     }
     const bool stereo = m_is_stereo || m_tone_test_mode;
 
+    // USB host volume / mute (Windows sends it as hardware volume and does not scale the PCM), ramped linearly
+    // over the frame to avoid zipper noise. Not applied to the internal test signals.
+    static float s_vol_l = 1.0f, s_vol_r = 1.0f;
+    float tgt_l = 1.0f, tgt_r = 1.0f;
+    if (!m_tone_test_mode) {
+        usb_audio_get_gain(&tgt_l, &tgt_r);
+    }
+    const float step_l = (tgt_l - s_vol_l) / static_cast<float>(samples);
+    const float step_r = (tgt_r - s_vol_r) / static_cast<float>(samples);
+
     for (size_t i = 0; i < samples; ++i) {
-        float l = static_cast<float>(m_pcm_stereo_in[i * 2]);
-        float r = stereo ? static_cast<float>(m_pcm_stereo_in[i * 2 + 1]) : l;
+        s_vol_l += step_l;
+        s_vol_r += step_r;
+        float l = static_cast<float>(m_pcm_stereo_in[i * 2]) * s_vol_l;
+        float r = (stereo ? static_cast<float>(m_pcm_stereo_in[i * 2 + 1]) : static_cast<float>(m_pcm_stereo_in[i * 2])) * s_vol_r;
         s_stereo_in_f32[i * 2] = l;
         s_stereo_in_f32[i * 2 + 1] = r;
         s_mono_in_f32[i] = 0.5f * (l + r);
     }
+    s_vol_l = tgt_l;  // exact target after the ramp (no float drift)
+    s_vol_r = tgt_r;
     m_hpf_stereo.processStereo(s_stereo_in_f32, s_stereo_hp_f32, static_cast<int>(samples));
     m_sub_decimator.process(s_mono_in_f32, s_sub_8k_f32);
 
@@ -227,11 +241,22 @@ void EspNowBroadcastEngine::srcRunDsp(SrcFrame& f) {
         left[i] = static_cast<int16_t>(std::clamp(s_stereo_hp_f32[i * 2], -32768.0f, 32767.0f));
         right[i] = static_cast<int16_t>(std::clamp(s_stereo_hp_f32[i * 2 + 1], -32768.0f, 32767.0f));
     }
+    const bool cal = m_cal_on.load(std::memory_order_acquire);
+    if (cal) {
+        // Calibration signal (caltone): same band-limited signal on every satellite, own band on the sub
+        Audio::CalSignal& cs = m_cal[m_cal_active.load(std::memory_order_acquire)];
+        cs.satFrame(left, samples);
+        memcpy(right, left, samples * sizeof(int16_t));
+    }
     memcpy(m_src_pcm_sat[par][2], left, samples * sizeof(int16_t));  // Center (placeholder)
     memcpy(m_src_pcm_sat[par][3], left, samples * sizeof(int16_t));  // Surround L (placeholder)
     memcpy(m_src_pcm_sat[par][4], right, samples * sizeof(int16_t)); // Surround R (placeholder)
-    for (size_t i = 0; i < 80; ++i) {
-        m_src_pcm_sub[par][i] = static_cast<int16_t>(std::clamp(s_sub_8k_f32[i], -32768.0f, 32767.0f));
+    if (cal) {
+        m_cal[m_cal_active.load(std::memory_order_acquire)].subFrame(m_src_pcm_sub[par], 80);
+    } else {
+        for (size_t i = 0; i < 80; ++i) {
+            m_src_pcm_sub[par][i] = static_cast<int16_t>(std::clamp(s_sub_8k_f32[i], -32768.0f, 32767.0f));
+        }
     }
 
     uint32_t extra = m_src_dsp_extra_us.load(std::memory_order_relaxed);

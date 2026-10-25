@@ -442,6 +442,40 @@ void handle_ascii_command(const char* raw_line) {
             s_unicast_engine->transitionTo(AudioNet::NetworkState::IDLE);
             print_console("[OK] Transitioned to IDLE (streaming paused)\n");
         }
+    } else if (strncasecmp(line, "caltone", 7) == 0) {
+        // SOURCE: calibration signal for SPL level matching.
+        // caltone off | caltone pink [rms_dBFS] | caltone sine [rms_dBFS] [sat_Hz] [sub_Hz]
+        if (s_unicast_engine) {
+            char mode_s[8] = "";
+            float db = -20.0f, sat_hz = 1000.0f, sub_hz = 63.0f;
+            const int n = sscanf(line + 7, "%7s %f %f %f", mode_s, &db, &sat_hz, &sub_hz);
+            db = std::clamp(db, -60.0f, -6.0f);
+            sat_hz = std::clamp(sat_hz, 100.0f, 10000.0f);
+            sub_hz = std::clamp(sub_hz, 20.0f, 100.0f);
+            Audio::CalSignal::Mode m = Audio::CalSignal::Mode::OFF;
+            if (n >= 1 && strcasecmp(mode_s, "pink") == 0) {
+                m = Audio::CalSignal::Mode::PINK;
+            } else if (n >= 1 && strcasecmp(mode_s, "sine") == 0) {
+                m = Audio::CalSignal::Mode::SINE;
+            } else if (n >= 1 && strcasecmp(mode_s, "off") != 0) {
+                print_console("[ERR] usage: caltone off | pink [rms_dBFS] | sine [rms_dBFS] [sat_Hz] [sub_Hz]\n");
+                return;
+            }
+            s_unicast_engine->setCalSignal(m, db, sat_hz, sub_hz);
+            if (m == Audio::CalSignal::Mode::OFF) {
+                s_unicast_engine->setToneTestMode(false);
+                print_console("[OK] Calibration signal OFF (program input again)\n");
+            } else {
+                // Keep the SOURCE casting even without USB audio
+                s_unicast_engine->setToneTestMode(true);
+                s_unicast_engine->transitionTo(AudioNet::NetworkState::CAST);
+                if (m == Audio::CalSignal::Mode::PINK) {
+                    print_console("[OK] Calibration: pink noise %+.1f dBFS RMS, satellites 500-2000 Hz, sub 40-100 Hz\n", db);
+                } else {
+                    print_console("[OK] Calibration: sine %+.1f dBFS RMS, satellites %.0f Hz, sub %.0f Hz\n", db, sat_hz, sub_hz);
+                }
+            }
+        }
     } else if (strncasecmp(line, "tone", 4) == 0 || strncasecmp(line, "synth", 5) == 0) {
         if (s_unicast_engine) {
             if (strcasestr(line, "on")) {

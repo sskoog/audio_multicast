@@ -20,6 +20,6 @@ trigger: always_on
 
 4. **Per-Node Audio Gain Calibration**:
    - SINK nodes with the same DAC hardware may exhibit volume differences due to component tolerances (amplifier gain, driver impedance).
-   - Per-node software post-gain calibration is implemented in `main.cpp` via a `switch` on `matched_node->node_id` inside the `is_pcm5102a` block.
+   - Per-node software post-gain calibration is implemented in `main.cpp` via a `switch` on `matched_node->node_id` (all DAC types: PCM5102A and MAX98357A). Measure with the SOURCE `caltone pink` signal and an SPL meter; values and method are in AGENTS.md.
    - When adding new SINK nodes, measure relative volume and add calibration entries to the switch statement.
    - The boot log prints the applied post-gain value per node for verification.

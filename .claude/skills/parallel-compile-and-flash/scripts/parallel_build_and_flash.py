@@ -36,7 +36,7 @@ KNOWN_NODES = {
     20: {"chip": "esp32c6", "role": "SINK",   "name": "Node 20 (C6 LCD Console)",        "default_port": "COM20"},
     21: {"chip": "esp32c6", "role": "SINK",   "name": "Node 21 (C6 DevKit / Host)",       "default_port": "COM21", "app_port": "COM121"},
     23: {"chip": "esp32c6", "role": "SINK",   "name": "Node 23 (C6 SINK Center Ch 2)",   "default_port": "COM23"},
-    24: {"chip": "esp32c6", "role": "SINK",   "name": "Node 24 (C6 SINK Sub Ch 5)",      "default_port": "COM24"},
+    24: {"chip": "esp32c6", "role": "SINK",   "name": "Node 24 (C6 SINK LSur Ch 3)",     "default_port": "COM24"},
     25: {"chip": "esp32c6", "role": "SINK",   "name": "Node 25 (C6 Surround Left Ch 3)", "default_port": "COM25"},
     26: {"chip": "esp32c6", "role": "SINK",   "name": "Node 26 (C6 Surround Right Ch 4)","default_port": "COM26"},
 }

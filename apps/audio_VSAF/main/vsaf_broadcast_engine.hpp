@@ -1,5 +1,6 @@
 #pragma once
 
+#include "cal_signal.hpp"
 #include "config.h"
 #include "vsaf_protocol.hpp"
 #include "lc3_codec.hpp"
@@ -313,6 +314,18 @@ public:
     const char* getWifiPhyRateString() const;
     bool hasLocalAudioOutput() const { return (m_i2s_dac != nullptr && m_node_role == NODE_ROLE_SINK); }
     void setToneTestMode(bool enable) { m_tone_test_mode = enable; }
+    /**
+     * @brief SOURCE calibration signal (console `caltone`): replaces the program input on all channels.
+     * Configures the idle instance and switches to it, so the DSP stage never sees a half-configured one.
+     */
+    void setCalSignal(Audio::CalSignal::Mode mode, float rms_dbfs, float sat_hz, float sub_hz) {
+        const uint8_t idle = static_cast<uint8_t>(m_cal_active.load(std::memory_order_acquire) ^ 1);
+        m_cal[idle].configure(mode, rms_dbfs, sat_hz, sub_hz);
+        m_cal_active.store(idle, std::memory_order_release);
+        m_cal_on.store(mode != Audio::CalSignal::Mode::OFF, std::memory_order_release);
+    }
+    const Audio::CalSignal& getCalSignal() const { return m_cal[m_cal_active.load(std::memory_order_acquire)]; }
+    bool isCalSignalOn() const { return m_cal_on.load(std::memory_order_acquire); }
     bool isToneTestMode() const { return m_tone_test_mode; }
 
     // Audio Metering
@@ -727,6 +740,9 @@ private: // SOURCE: max |tick - grid| (us) since last read
     std::atomic<bool>          m_running{false};
     StreamTelemetry            m_telemetry;
     bool                       m_tone_test_mode;
+    Audio::CalSignal           m_cal[2];
+    std::atomic<uint8_t>       m_cal_active{0};
+    std::atomic<bool>          m_cal_on{false};
     bool                       m_is_stereo;
 
     wifi_phy_mode_t            m_tx_phy_mode;
