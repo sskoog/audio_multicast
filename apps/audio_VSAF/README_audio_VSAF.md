@@ -314,6 +314,7 @@ Each SINK plays out on its own crystal, the SOURCE produces frames on its own. W
 3. 3 s after entering `STREAM` the filtered value becomes the target (at least 2 frames; typically ~4: 2 in the FIFO, ~2 in the DMA).
 4. If the filtered value is more than 0.5 frame below the target (SINK clock fast), one interpolated sample is inserted into the decoded frame (481 samples played); more than 0.5 frame above (SINK clock slow), two neighbours are merged (479 samples). The edit point is the smoothest spot of the frame (smallest sample-to-sample step), so a single sample in 480 is inaudible.
 5. At most one correction per 16 frames, i.e. up to ~130 ppm of correction range; ESP32 crystals differ by tens of ppm.
+6. Every (re-)entry into `STREAM` (power-on, SOURCE reboot, outage) resets the filter, relearns the target and restarts the `ppm` statistics.
 
 `i2s_channel_write()` streams across the two DMA descriptors, so 479 / 481-sample writes need no change to the I2S setup. They do shift the write phase against the descriptors, which moves up to a whole frame between the DMA queue and the FIFO. That is why the controller must not look at the FIFO depth alone: the first version did, and every single inserted sample made the FIFO depth jump by one frame (section 10). The net number of corrections divided by the samples played is the SINK's clock offset against the SOURCE, printed in the heartbeat as `ppm` (positive = SINK clock fast). `driftcorr 0` disables the correction to observe the free-running drift.
 
@@ -604,10 +605,18 @@ New default for all nodes: 10 dBm requested (`CONFIG_VSAF_TX_POWER_QDBM` = 40), 
 
 **Console findings and fixes.**
 - The S3 SINKs (Nodes 4, 5) accepted no console input, because on the S3 the USB-Serial-JTAG console is a secondary, output-only console. Fixed: the CLI task reads the USB-Serial-JTAG RX FIFO directly on S3 SINKs (section 7).
-- Node 24's console once stopped in both directions after repeated USB replugs, while audio kept working. esptool could still use the same port, and a chip reset cleared it, so the host side was alive. The leading suspect is ESP-IDF's "host connected" flag (both `read()` and `write()` fail with EIO while it is false), but the stall has not been reproduced yet. `usjdiag` (section 7.2) now records the evidence across a reset; a replug experiment is pending.
+- Node 24's console once stopped in both directions after repeated USB replugs, while audio kept working. esptool could still use the same port, and a chip reset cleared it, so the host side was alive. The leading suspect is ESP-IDF's "host connected" flag (both `read()` and `write()` fail with EIO while it is false). `usjdiag` (section 7.2) now records the evidence across a reset.
+- **Replug experiment (Node 24, 2026-10-25): the stall did not reproduce.**
+
+  | Round | Action | Result |
+  | :--- | :--- | :--- |
+  | A | 3 quick replugs within ~5 s | Console OK at once, 0 rejected writes, connected the whole session |
+  | B | One slow replug (~5 s unplugged) | Console OK at once, 0 rejected writes |
+  | C | Replug while a program held COM24 open | The open handle failed (Windows error 22) and never delivered again, as expected; COM24 was back 8.9 s after the unplug and a reopened port delivered the fresh boot log |
+
+  Conclusion: replugging alone, quick or slow or with the port held open, is handled correctly by the firmware console path and by Windows. The original stall needed another condition, e.g. power lost again mid-boot or several programs (Device Manager, test scripts) touching the port at the same time. Topic parked. If a console goes silent again: open the port, try a host-side reopen / DTR toggle, then reset the chip (RTS) and run `usjdiag`; its `previous session` line shows whether the firmware believed no host was connected (`fail(EIO)` > 0, a device-side cause) or wrote normally while the data was lost on the host.
 
 ### Next steps
-- Reproduce the C6 console stall with a replug experiment and fix it based on the `usjdiag` evidence.
 - Decide on a deeper SINK FIFO target (latency vs. recovery) and re-run.
 - Check Node 24's placement / antenna (RSSI 8 dB worse than in the evening runs).
 - Log `txstat` periodically during soaks to classify SOURCE packet-rate dips.
