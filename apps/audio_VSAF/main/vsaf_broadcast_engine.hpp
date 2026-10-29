@@ -391,6 +391,7 @@ public:
     uint32_t getAndResetDmaUnderrunCount() { return m_i2s_dac ? m_i2s_dac->getAndResetUnderrunCount() : 0; }
     uint32_t getDmaUnderrunCount() const { return m_i2s_dac ? m_i2s_dac->getUnderrunCount() : 0; }
     uint8_t  getHardwareGainDb() const { return m_i2s_dac ? m_i2s_dac->getHardwareGainDb() : 0; }
+    Hardware::I2sAudioDriver* getI2sDac() { return m_i2s_dac; }  // console I2S experiments (i2sdrive / i2sclk)
     void     setHardwareGain(Hardware::Max98357Gain gain) { if (m_i2s_dac) m_i2s_dac->setHardwareGain(gain); }
     uint32_t getPlcCount() const { return m_plc_count.load(std::memory_order_relaxed); }
     uint32_t getAndResetPlcCount() { return m_plc_count.exchange(0, std::memory_order_relaxed); }
@@ -710,6 +711,16 @@ public:
     // THD+N self-test (console `thdn`): state 0 idle, 1 measuring (SINK task owns the meters), 2 done
     Audio::ThdnMeter      m_thdn_dec, m_thdn_out;
     std::atomic<int>      m_thdn_state{0};
+    // I2S capture test words (console i2scap): when set, the SINK outputs these instead of audio
+    std::atomic<bool>     m_test_words{false};
+    // Decoder comparison capture (console deccmp): state 0 idle, 1 capturing, 2 done
+    static constexpr int  DECCMP_FRAMES = 40;
+    uint8_t             (*m_deccmp_buf)[120] = nullptr;  // heap, only while deccmp runs
+    int                   m_deccmp_n = 0;
+    uint8_t               m_deccmp_last_seq = 0;
+    std::atomic<int>      m_deccmp_state{0};
+    static constexpr int16_t TEST_WORD_L = 0x4B2D;
+    static constexpr int16_t TEST_WORD_R = 0x1E87;
     uint32_t              m_thdn_target_frames = 0;
     uint32_t              m_thdn_skipped = 0;     // frames not used at the output tap (sample edits, coarse)
     std::atomic<uint32_t> m_dma_rebase{0};

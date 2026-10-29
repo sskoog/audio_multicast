@@ -2,6 +2,9 @@
 #include "config.h"
 #include "vsaf_broadcast_engine.hpp"
 #include "usb_audio.hpp"
+#include "driver/pulse_cnt.h"
+#include "esp_cpu.h"
+#include "esp_private/esp_clk.h"
 // #include "lc3_benchmark.hpp" (Disabled)
 #include "driver/uart.h"
 #include "driver/usb_serial_jtag.h"
@@ -442,6 +445,299 @@ void handle_ascii_command(const char* raw_line) {
             s_unicast_engine->transitionTo(AudioNet::NetworkState::IDLE);
             print_console("[OK] Transitioned to IDLE (streaming paused)\n");
         }
+    } else if (strncasecmp(line, "i2sfmt", 6) == 0 || strncasecmp(line, "i2sbclk", 7) == 0 ||
+               strncasecmp(line, "i2sws", 5) == 0) {
+        // SINK test hooks: i2sfmt <i2s|lj>, i2sbclk <norm|inv>, i2sws <norm|inv>; no argument = show
+        auto* dac = s_unicast_engine ? s_unicast_engine->getI2sDac() : nullptr;
+        if (!dac) {
+            print_console("[ERR] no I2S DAC on this node\n");
+        } else {
+            bool shift = dac->getBitShift(), binv = dac->getBclkInv(), winv = dac->getWsInv();
+            const char* arg = strchr(line, ' ');
+            bool ok = true, change = false;
+            if (arg) {
+                while (*arg == ' ') ++arg;
+                change = *arg != 0;
+            }
+            if (change) {
+                if (strncasecmp(line, "i2sfmt", 6) == 0) {
+                    if (strcasecmp(arg, "i2s") == 0) shift = true;
+                    else if (strcasecmp(arg, "lj") == 0) shift = false;
+                    else ok = false;
+                } else {
+                    bool* f = (strncasecmp(line, "i2sbclk", 7) == 0) ? &binv : &winv;
+                    if (strcasecmp(arg, "norm") == 0) *f = false;
+                    else if (strcasecmp(arg, "inv") == 0) *f = true;
+                    else ok = false;
+                }
+                if (!ok || dac->setLinkFormat(shift, binv, winv) != ESP_OK) {
+                    print_console("[ERR] usage: i2sfmt <i2s|lj> | i2sbclk <norm|inv> | i2sws <norm|inv>\n");
+                    ok = false;
+                }
+            }
+            if (ok) {
+                print_console("[%s] I2S link: %s, BCLK %s, WS %s\n", change ? "OK" : "I2S",
+                              dac->getBitShift() ? "Philips I2S" : "left-justified",
+                              dac->getBclkInv() ? "inverted" : "normal", dac->getWsInv() ? "inverted" : "normal");
+            }
+        }
+    } else if (strcasecmp(line, "deccmp") == 0) {
+        // C6 SINK: capture consecutive HQ frames of the live stream, decode them with Espressif LC3 and liblc3
+        if (!s_unicast_engine) return;
+        auto* e = s_unicast_engine;
+        e->m_deccmp_buf = static_cast<uint8_t(*)[120]>(
+            heap_caps_malloc(AudioNet::EspNowBroadcastEngine::DECCMP_FRAMES * 120, MALLOC_CAP_8BIT));
+        if (!e->m_deccmp_buf) {
+            print_console("[DECCMP] out of memory\n");
+            return;
+        }
+        e->m_deccmp_n = 0;
+        e->m_deccmp_state.store(1, std::memory_order_release);
+        for (int i = 0; i < 60 && e->m_deccmp_state.load(std::memory_order_acquire) != 2; ++i) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        if (e->m_deccmp_state.load(std::memory_order_acquire) != 2) {
+            e->m_deccmp_state.store(0);
+            vTaskDelay(pdMS_TO_TICKS(20));  // the SINK task may still be inside the capture block
+            heap_caps_free(e->m_deccmp_buf);
+            e->m_deccmp_buf = nullptr;
+            print_console("[DECCMP] capture timeout (%d consecutive HQ frames so far; not streaming?)\n", e->m_deccmp_n);
+            return;
+        }
+        e->m_deccmp_state.store(0);
+        // Decode the captured frames with a fresh Espressif decoder in an 8 KB task and dump frame + PCM as hex
+        // lines ([DF] k <240 hex> / [DP] k <1920 hex>, little-endian int16); tools compare against liblc3 on the PC.
+        struct Job {
+            const uint8_t* frames;
+            esp_err_t err;
+            TaskHandle_t waiter;
+        };
+        static Job job;
+        job = {};
+        job.frames = &e->m_deccmp_buf[0][0];
+        job.err = ESP_FAIL;
+        job.waiter = xTaskGetCurrentTaskHandle();
+        auto worker = [](void* arg) {
+            Job* j = static_cast<Job*>(arg);
+            auto cb = [](int idx, const uint8_t* f, const int16_t* pcm, void*) {
+                static char line[2000];
+                static const char* hx = "0123456789abcdef";
+                int p = snprintf(line, sizeof(line), "[DF] %d ", idx);
+                for (int i = 0; i < 120; ++i) {
+                    line[p++] = hx[f[i] >> 4];
+                    line[p++] = hx[f[i] & 15];
+                }
+                line[p++] = '\n';
+                line[p] = 0;
+                print_console("%s", line);
+                vTaskDelay(pdMS_TO_TICKS(5));
+                // print_console() formats into 512 bytes: 4 lines of 120 samples each ([DP] k part <480 hex>)
+                const uint8_t* b = reinterpret_cast<const uint8_t*>(pcm);
+                for (int part = 0; part < 4; ++part) {
+                    p = snprintf(line, sizeof(line), "[DP] %d %d ", idx, part);
+                    for (int i = part * 240; i < (part + 1) * 240; ++i) {
+                        line[p++] = hx[b[i] >> 4];
+                        line[p++] = hx[b[i] & 15];
+                    }
+                    line[p++] = '\n';
+                    line[p] = 0;
+                    print_console("%s", line);
+                    vTaskDelay(pdMS_TO_TICKS(5));
+                }
+            };
+            j->err = Codec::Lc3CodecEngine::espDecodeFrames(j->frames, AudioNet::EspNowBroadcastEngine::DECCMP_FRAMES, 120,
+                                                             cb, nullptr);
+            xTaskNotifyGive(j->waiter);
+            vTaskDelete(nullptr);
+        };
+        if (xTaskCreate(worker, "deccmp", 8192, &job, 1, nullptr) != pdPASS) {
+            heap_caps_free(e->m_deccmp_buf);
+            e->m_deccmp_buf = nullptr;
+            print_console("[DECCMP] cannot create worker task\n");
+            return;
+        }
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(30000));
+        heap_caps_free(e->m_deccmp_buf);
+        e->m_deccmp_buf = nullptr;
+        print_console("[DECCMP] dump %s (%d frames)\n", job.err == ESP_OK ? "done" : esp_err_to_name(job.err),
+                      AudioNet::EspNowBroadcastEngine::DECCMP_FRAMES);
+    } else if (strcasecmp(line, "clkmeas") == 0) {
+        // CPU clock (reported and measured) and the real I2S BCLK / LRCLK frequencies, counted in hardware (PCNT)
+        const int cpu_rep = esp_clk_cpu_freq();
+        const int64_t t0 = esp_timer_get_time();
+        const uint32_t c0 = esp_cpu_get_cycle_count();
+        while (esp_timer_get_time() - t0 < 200000) {
+        }
+        const uint32_t c1 = esp_cpu_get_cycle_count();
+        const int64_t t1 = esp_timer_get_time();
+        const double cpu_meas = static_cast<double>(c1 - c0) * 1e6 / static_cast<double>(t1 - t0);
+        print_console("[CLK] CPU reported %d Hz, measured %.0f Hz (cycle counter vs esp_timer, 200 ms) | APB %d Hz, XTAL %d Hz\n",
+                      cpu_rep, cpu_meas, esp_clk_apb_freq(), esp_clk_xtal_freq());
+        auto* dac = s_unicast_engine ? s_unicast_engine->getI2sDac() : nullptr;
+        if (!dac) {
+            print_console("[CLK] no I2S DAC on this node\n");
+            return;
+        }
+        // Two PCNT units count rising edges of BCLK and WS at the same time (pads read back the driven level)
+        pcnt_unit_handle_t ub = nullptr, uw = nullptr;
+        pcnt_channel_handle_t cb = nullptr, cw = nullptr;
+        pcnt_unit_config_t ucfg = {};
+        ucfg.low_limit = -1;
+        ucfg.high_limit = 32767;
+        bool ok = pcnt_new_unit(&ucfg, &ub) == ESP_OK && pcnt_new_unit(&ucfg, &uw) == ESP_OK;
+        pcnt_chan_config_t ccb = {};
+        ccb.edge_gpio_num = dac->bclkPin();
+        ccb.level_gpio_num = -1;
+        pcnt_chan_config_t ccw = ccb;
+        ccw.edge_gpio_num = dac->wsPin();
+        ok = ok && pcnt_new_channel(ub, &ccb, &cb) == ESP_OK && pcnt_new_channel(uw, &ccw, &cw) == ESP_OK;
+        ok = ok && pcnt_channel_set_edge_action(cb, PCNT_CHANNEL_EDGE_ACTION_INCREASE, PCNT_CHANNEL_EDGE_ACTION_HOLD) == ESP_OK;
+        ok = ok && pcnt_channel_set_edge_action(cw, PCNT_CHANNEL_EDGE_ACTION_INCREASE, PCNT_CHANNEL_EDGE_ACTION_HOLD) == ESP_OK;
+        ok = ok && pcnt_unit_enable(ub) == ESP_OK && pcnt_unit_enable(uw) == ESP_OK;
+        if (ok) {
+            double fb_sum = 0, fw_sum = 0, r_min = 1e9, r_max = 0;
+            const int reps = 20;
+            for (int r = 0; r < reps; ++r) {
+                pcnt_unit_clear_count(ub);
+                pcnt_unit_clear_count(uw);
+                const int64_t s0 = esp_timer_get_time();
+                pcnt_unit_start(ub);
+                pcnt_unit_start(uw);
+                while (esp_timer_get_time() - s0 < 10000) {
+                }
+                pcnt_unit_stop(ub);
+                pcnt_unit_stop(uw);
+                const int64_t s1 = esp_timer_get_time();
+                int nb = 0, nw = 0;
+                pcnt_unit_get_count(ub, &nb);
+                pcnt_unit_get_count(uw, &nw);
+                const double dt = static_cast<double>(s1 - s0) * 1e-6;
+                fb_sum += nb / dt;
+                fw_sum += nw / dt;
+                if (nw > 0) {
+                    const double ratio = static_cast<double>(nb) / nw;
+                    r_min = std::min(r_min, ratio);
+                    r_max = std::max(r_max, ratio);
+                }
+            }
+            print_console("[CLK] I2S measured over %d x 10 ms: BCLK %.0f Hz, LRCLK %.1f Hz, BCLK/LRCLK %.2f .. %.2f "
+                          "(expected %u x fs; slot %u bit)\n",
+                          reps, fb_sum / reps, fw_sum / reps, r_min, r_max,
+                          dac->getDmaBytesPerSample() == 2 ? 32U : (dac->getDmaBytesPerSample() == 3 ? 48U : 64U),
+                          static_cast<unsigned>(dac->getDmaBytesPerSample() * 8));
+        } else {
+            print_console("[CLK] PCNT setup failed\n");
+        }
+        if (ub) { pcnt_unit_disable(ub); }
+        if (uw) { pcnt_unit_disable(uw); }
+        if (cb) pcnt_del_channel(cb);
+        if (cw) pcnt_del_channel(cw);
+        if (ub) pcnt_del_unit(ub);
+        if (uw) pcnt_del_unit(uw);
+        dac->setDriveStrength(dac->getDriveStrength());  // re-assert the I2S pads after PCNT touched them
+    } else if (strcasecmp(line, "i2scap") == 0) {
+        // SINK (16-bit I2S): capture BCLK / WS / DOUT with the CPU and decode where the test words sit on the wire
+        auto* dac = s_unicast_engine ? s_unicast_engine->getI2sDac() : nullptr;
+        if (!dac) {
+            print_console("[ERR] no I2S DAC on this node\n");
+            return;
+        }
+        static uint32_t cap[3000];
+        float ns = 0;
+        s_unicast_engine->m_test_words.store(true);
+        vTaskDelay(pdMS_TO_TICKS(60));  // test words reach the DMA (staging + 2 descriptors)
+        dac->captureGpio(cap, 3000, &ns);
+        s_unicast_engine->m_test_words.store(false);
+        const uint32_t mb = 1u << dac->bclkPin(), mw = 1u << dac->wsPin(), md = 1u << dac->doutPin();
+        // Rising BCLK edges: WS and DOUT as sampled there (the DAC samples on the rising edge)
+        static uint8_t ws_at[700], d_at[700];
+        int ne = 0, min_hi = 1 << 30, min_lo = 1 << 30, run = 0;
+        bool prev_b = cap[0] & mb;
+        for (int i = 1; i < 3000 && ne < 700; ++i) {
+            const bool b = cap[i] & mb;
+            ++run;
+            if (b != prev_b) {
+                if (prev_b) min_hi = std::min(min_hi, run); else min_lo = std::min(min_lo, run);
+                run = 0;
+                if (b) {  // rising edge: take WS / DOUT just before the edge (stable, setup side)
+                    ws_at[ne] = (cap[i - 1] & mw) ? 1 : 0;
+                    d_at[ne] = (cap[i - 1] & md) ? 1 : 0;
+                    ne++;
+                }
+            }
+            prev_b = b;
+        }
+        print_console("[I2SCAP] %.1f ns/sample, %d rising BCLK edges, shortest BCLK high/low %d/%d samples (%.0f/%.0f ns)\n",
+                      ns, ne, min_hi, min_lo, min_hi * ns, min_lo * ns);
+        // Find the test words relative to each WS transition
+        auto word_at = [&](int k) {
+            uint32_t w = 0;
+            for (int j = 0; j < 16; ++j) w = (w << 1) | d_at[k + j];
+            return static_cast<uint16_t>(w);
+        };
+        int shown = 0;
+        for (int k = 1; k + 20 < ne && shown < 4; ++k) {
+            if (ws_at[k] == ws_at[k - 1]) continue;
+            char bits[24] = {};
+            for (int j = 0; j < 20; ++j) bits[j] = d_at[k + j] ? '1' : '0';
+            const uint16_t want = ws_at[k] ? static_cast<uint16_t>(AudioNet::EspNowBroadcastEngine::TEST_WORD_R)
+                                           : static_cast<uint16_t>(AudioNet::EspNowBroadcastEngine::TEST_WORD_L);
+            int off = -1;
+            for (int o = 0; o <= 3; ++o) {
+                if (word_at(k + o) == want) { off = o; break; }
+            }
+            print_console("[I2SCAP] WS->%d (%s slot): bits from 1st rising edge: %s | expected %04X at offset %d "
+                          "(1 = Philips I2S, 0 = left-justified, -1 = not found)\n",
+                          ws_at[k], ws_at[k] ? "right" : "left", bits, want, off);
+            shown++;
+        }
+    } else if (strncasecmp(line, "i2sdrive", 8) == 0) {
+        // SINK: I2S pad drive strength 0..3 (~5 / 10 / 20 / 40 mA); no argument = show
+        auto* dac = s_unicast_engine ? s_unicast_engine->getI2sDac() : nullptr;
+        int lvl = -1;
+        if (!dac) {
+            print_console("[ERR] no I2S DAC on this node\n");
+        } else if (sscanf(line + 8, "%d", &lvl) == 1) {
+            if (dac->setDriveStrength(lvl) == ESP_OK) {
+                print_console("[OK] I2S drive strength %d (~%d mA)\n", lvl, 5 << lvl);
+            } else {
+                print_console("[ERR] usage: i2sdrive <0..3>\n");
+            }
+        } else {
+            print_console("[I2S] drive strength %d (~%d mA)\n", dac->getDriveStrength(), 5 << dac->getDriveStrength());
+        }
+    } else if (strncasecmp(line, "i2sclk", 6) == 0) {
+        // SINK: I2S clock source and MCLK multiple, e.g. "i2sclk 240 384"; no argument = show
+        auto* dac = s_unicast_engine ? s_unicast_engine->getI2sDac() : nullptr;
+        char src_s[8] = "";
+        int mult = 256;
+        const int n = sscanf(line + 6, "%7s %d", src_s, &mult);
+        if (!dac) {
+            print_console("[ERR] no I2S DAC on this node\n");
+        } else if (n >= 1) {
+            i2s_clock_src_t src = I2S_CLK_SRC_DEFAULT;
+            bool ok = true;
+            if (strcasecmp(src_s, "160") == 0) {
+                src = I2S_CLK_SRC_PLL_160M;
+#if defined(CONFIG_IDF_TARGET_ESP32C6)
+            } else if (strcasecmp(src_s, "240") == 0) {
+                src = I2S_CLK_SRC_PLL_240M;
+#endif
+            } else if (strcasecmp(src_s, "xtal") == 0) {
+                src = I2S_CLK_SRC_XTAL;
+            } else {
+                ok = false;
+            }
+            if (mult != 256 && mult != 384 && mult != 512) ok = false;
+            if (ok && dac->setClock(src, static_cast<i2s_mclk_multiple_t>(mult)) == ESP_OK) {
+                print_console("[OK] I2S clock %s, MCLK %d x fs\n", src_s, mult);
+            } else {
+                print_console("[ERR] usage: i2sclk <160|240|xtal> [256|384|512] (240: C6 only)\n");
+            }
+        } else {
+            print_console("[I2S] clock source %d, MCLK %d x fs\n", static_cast<int>(dac->getClockSource()),
+                          static_cast<int>(dac->getMclkMultiple()));
+        }
     } else if (strncasecmp(line, "thdn", 4) == 0) {
         // SINK: THD+N of a sine (play `caltone sine <dBFS> <hz>` on the SOURCE first). thdn [hz] [seconds]
         if (s_unicast_engine) {
@@ -462,8 +758,8 @@ void handle_ascii_command(const char* raw_line) {
             }
             const bool done = e->m_thdn_state.load(std::memory_order_acquire) == 2;
             e->m_thdn_state.store(0, std::memory_order_release);
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
-            const double fs = 8388607.0;  // S3: both taps 24-bit
+#if VSAF_SINK_PCM32
+            const double fs = 8388607.0;  // 32-bit sample path: both taps 24-bit
 #else
             const double fs = 32767.0;    // C6: both taps 16-bit
 #endif

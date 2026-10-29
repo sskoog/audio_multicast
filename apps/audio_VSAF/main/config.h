@@ -83,6 +83,26 @@ extern "C" {
 #define CONFIG_VSAF_DAC_DELAY_US 0
 #endif
 
+#ifndef CONFIG_VSAF_C6_DAC_BITS
+// C6 SINKs (MAX98357A): DAC word length 16 or 24. 24: the LC3 decoder outputs 32-bit PCM and the SINK uses the
+// same 32-bit sample path as the S3 nodes.
+#define CONFIG_VSAF_C6_DAC_BITS 24
+#endif
+
+#ifndef CONFIG_VSAF_C6_I2S_SLOT_BITS
+// C6 SINKs with 24-bit DAC words: I2S slot width. 24: BCLK = 48 x fs (2.304 MHz at 48 kHz), 3-byte samples in DMA,
+// MCLK = 384 x fs; 32: BCLK = 64 x fs (3.072 MHz), like the S3 / PCM5102A nodes. The MAX98357A accepts BCLK =
+// 32, 48 or 64 x fs; long jumper wires favour the lower clock.
+#define CONFIG_VSAF_C6_I2S_SLOT_BITS 24
+#endif
+
+// SINK sample path width: 32-bit (24-bit audio) on the S3 and on 24-bit C6 nodes, 16-bit otherwise
+#if defined(CONFIG_IDF_TARGET_ESP32S3) || (defined(CONFIG_IDF_TARGET_ESP32C6) && CONFIG_VSAF_C6_DAC_BITS == 24)
+#define VSAF_SINK_PCM32 1
+#else
+#define VSAF_SINK_PCM32 0
+#endif
+
 #ifndef CONFIG_VSAF_APPLY_USB_HOST_VOLUME
 // SOURCE: apply the UAC1 feature-unit volume / mute from the USB host. Windows treats the device as having
 // hardware volume: it sends the slider as SET_CUR requests and does not scale the PCM itself.

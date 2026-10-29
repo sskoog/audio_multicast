@@ -1351,7 +1351,7 @@ void EspNowBroadcastEngine::sinkTaskTrampoline(void* arg) {
 void EspNowBroadcastEngine::runSinkLoop() {
     ESP_LOGI(TAG, "SINK Audio Decoder & I2S Task started on Core 0");
 
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#if VSAF_SINK_PCM32
     // One extra sample: drift compensation may play 481 samples from a 480-sample frame
     static int32_t pcm_mono[480 + 1];
     static int32_t pcm_stereo[(480 + 1) * 2];
@@ -1377,7 +1377,7 @@ void EspNowBroadcastEngine::runSinkLoop() {
     size_t samples_per_frame = (m_telemetry.sample_rate * 10) / 1000;
     // Scheduled playout (time sync): every frame's first sample is placed on its presentation time
     // t_frame + latency + trim (SOURCE clock) converted with the offset from the control frames
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#if VSAF_SINK_PCM32
     static int32_t zero_stereo[480 * 2] = {};
 #else
     static int16_t zero_stereo[480 * 2] = {};
@@ -1387,13 +1387,43 @@ void EspNowBroadcastEngine::runSinkLoop() {
     // long one spills into a nearly empty descriptor. All output therefore goes through this buffer and only
     // whole descriptors (getDmaFrameSamples(), 5 ms by default) are written; a dropped / inserted sample then really shifts the
     // timeline by one sample. Queued audio = i2s_written + stage_n - played.
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#if VSAF_SINK_PCM32
     static int32_t dac_stage[480 * 2];
 #else
     static int16_t dac_stage[480 * 2];
 #endif
     size_t   stage_n = 0;        // stereo frames waiting in dac_stage
     uint32_t q_ovf_seen = m_i2s_dac ? m_i2s_dac->getQueueOverflows() : 0;
+    // Write / preload whole stereo frames to the I2S DMA in the driver's format: SAMPLE_SIZE bytes per sample, or
+    // 3-byte little-endian samples for 24-bit slots (the 32-bit samples hold 24-bit audio in bits 31..8).
+    // Returns the stereo frames accepted.
+    static uint8_t dma_pack[480 * 2 * 3];
+    auto dma_out = [&](const void* stereo, size_t frames, bool preload) -> int64_t {
+        if (!m_i2s_dac || frames == 0) return 0;
+        const void* buf = stereo;
+        size_t frame_bytes = SAMPLE_SIZE * 2;
+#if VSAF_SINK_PCM32
+        if (m_i2s_dac->getDmaBytesPerSample() == 3) {
+            frames = std::min<size_t>(frames, 480);
+            const int32_t* s32 = static_cast<const int32_t*>(stereo);
+            for (size_t i = 0; i < frames * 2; ++i) {
+                const uint32_t v = static_cast<uint32_t>(s32[i]);
+                dma_pack[i * 3] = static_cast<uint8_t>(v >> 8);
+                dma_pack[i * 3 + 1] = static_cast<uint8_t>(v >> 16);
+                dma_pack[i * 3 + 2] = static_cast<uint8_t>(v >> 24);
+            }
+            buf = dma_pack;
+            frame_bytes = 6;
+        }
+#endif
+        size_t bytes_written = 0;
+        if (preload) {
+            m_i2s_dac->preload(buf, frames * frame_bytes, &bytes_written);
+        } else {
+            m_i2s_dac->write(buf, frames * frame_bytes, &bytes_written, 50);
+        }
+        return static_cast<int64_t>(bytes_written / frame_bytes);
+    };
     auto dac_push = [&](const auto* src, size_t n) {
         const size_t desc = std::min<size_t>(m_i2s_dac ? m_i2s_dac->getDmaFrameSamples() : samples_per_frame, 480);
         while (n > 0 && m_i2s_dac) {
@@ -1403,9 +1433,7 @@ void EspNowBroadcastEngine::runSinkLoop() {
             src += take * 2;
             n -= take;
             if (stage_n >= desc) {
-                size_t bytes_written = 0;
-                m_i2s_dac->write(dac_stage, desc * SAMPLE_SIZE * 2, &bytes_written, 50);
-                i2s_written += static_cast<int64_t>(bytes_written / (SAMPLE_SIZE * 2));
+                i2s_written += dma_out(dac_stage, desc, false);
                 stage_n = 0;
             }
         }
@@ -1528,9 +1556,7 @@ void EspNowBroadcastEngine::runSinkLoop() {
             if (pf_synced) {
                 // Scheduled playout: start the DAC on silence, the first frame is placed on its presentation time
                 for (int d = 0; d < 2 && m_i2s_dac; ++d) {
-                    size_t bytes_written = 0;
-                    m_i2s_dac->preload(zero_stereo, samples_per_frame * SAMPLE_SIZE * 2, &bytes_written);
-                    i2s_written += static_cast<int64_t>(bytes_written / (SAMPLE_SIZE * 2));
+                    i2s_written += dma_out(zero_stereo, samples_per_frame, true);
                 }
                 m_has_expected_seq = false;
             } else {
@@ -1562,7 +1588,7 @@ void EspNowBroadcastEngine::runSinkLoop() {
                 }
                 float total_gain_db = m_current_gain_db + m_post_gain_db;
                 float gain = (m_current_gain_db <= -90.0f) ? 0.0f : std::pow(10.0f, total_gain_db / 20.0f);
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#if VSAF_SINK_PCM32
                 for (size_t i = 0; i < samples_per_frame; ++i) {
                     int64_t val = static_cast<int64_t>(pcm_mono[i] * gain);
                     if (val > 8388607) val = 8388607;
@@ -1582,9 +1608,7 @@ void EspNowBroadcastEngine::runSinkLoop() {
                 }
 #endif
                 if (m_i2s_dac) {
-                    size_t bytes_written = 0;
-                    m_i2s_dac->preload(pcm_stereo, samples_per_frame * SAMPLE_SIZE * 2, &bytes_written);
-                    i2s_written += static_cast<int64_t>(bytes_written / (SAMPLE_SIZE * 2));
+                    i2s_written += dma_out(pcm_stereo, samples_per_frame, true);
                 }
             }
 
@@ -1616,7 +1640,7 @@ void EspNowBroadcastEngine::runSinkLoop() {
                 }
                 float total_gain_db = m_current_gain_db + m_post_gain_db;
                 float gain = (m_current_gain_db <= -90.0f) ? 0.0f : std::pow(10.0f, total_gain_db / 20.0f);
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#if VSAF_SINK_PCM32
                 for (size_t i = 0; i < samples_per_frame; ++i) {
                     int64_t val = static_cast<int64_t>(pcm_mono[i] * gain);
                     if (val > 8388607) val = 8388607;
@@ -1636,9 +1660,7 @@ void EspNowBroadcastEngine::runSinkLoop() {
                 }
 #endif
                 if (m_i2s_dac) {
-                    size_t bytes_written = 0;
-                    m_i2s_dac->preload(pcm_stereo, samples_per_frame * SAMPLE_SIZE * 2, &bytes_written);
-                    i2s_written += static_cast<int64_t>(bytes_written / (SAMPLE_SIZE * 2));
+                    i2s_written += dma_out(pcm_stereo, samples_per_frame, true);
                 }
                 m_expected_seq = item2.seq + 1;
                 m_has_expected_seq = true;
@@ -1830,11 +1852,24 @@ void EspNowBroadcastEngine::runSinkLoop() {
         float dec_ms = (esp_timer_get_time() - dec_t0) / 1000.0f;
         m_codec_duration_buf.push(dec_ms);
         m_audio_meter.pushFramePcm(pcm_mono, samples_per_frame);
+        // Decoder comparison capture: consecutive 120-byte HQ frames only (restart on a gap or a redundant frame)
+        if (m_deccmp_state.load(std::memory_order_acquire) == 1 && m_deccmp_buf) {
+            if (has_item && !item.is_redundant && item.len == 120 &&
+                (m_deccmp_n == 0 || static_cast<uint8_t>(item.seq - m_deccmp_last_seq) == 1)) {
+                memcpy(m_deccmp_buf[m_deccmp_n], item.data, 120);
+                m_deccmp_last_seq = item.seq;
+                if (++m_deccmp_n >= DECCMP_FRAMES) {
+                    m_deccmp_state.store(2, std::memory_order_release);
+                }
+            } else {
+                m_deccmp_n = 0;
+            }
+        }
         // THD+N self-test, tap 1: decoder output of HQ frames (before sample edits and gain)
         const bool thdn_frame = m_thdn_state.load(std::memory_order_acquire) == 1 && has_item && !item.is_redundant &&
                                 actual_samples == 480 && samples_per_frame == 480;
         if (thdn_frame) {
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#if VSAF_SINK_PCM32
             m_thdn_dec.addFrame(pcm_mono, 1, 0);  // 24-bit in int32
 #else
             m_thdn_dec.addFrame(pcm_mono, 1, 0);  // 16-bit
@@ -2057,11 +2092,26 @@ void EspNowBroadcastEngine::runSinkLoop() {
             skip_head = 0;
         }
 
+        // Volume ramp: the current gain follows the target (console vol / mute, setVolume) by <= 1 dB per 10 ms
+        // frame (100 dB/s); on the way to mute it drops to silence below -60 dB. Before 2026-10-29 nothing moved
+        // m_current_gain_db except setVolume(..., instant = true), so 'vol' and 'mute' had no effect on SINKs.
+        {
+            const float tgt = m_target_gain_db;
+            float cur = m_current_gain_db;
+            if (tgt <= -90.0f && cur <= -60.0f) {
+                cur = tgt;
+            } else if (cur < tgt) {
+                cur = std::min(tgt, (cur <= -90.0f ? -60.0f : cur) + 1.0f);
+            } else if (cur > tgt) {
+                cur = std::max(tgt, cur - 1.0f);
+            }
+            m_current_gain_db = cur;
+        }
         // Mono to Stereo duplication for I2S DAC (from skip_head on)
         float total_gain_db = m_current_gain_db + m_post_gain_db;
         float gain = (m_current_gain_db <= -90.0f) ? 0.0f : std::pow(10.0f, total_gain_db / 20.0f);
         const size_t n_out = out_samples - skip_head;
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#if VSAF_SINK_PCM32
         for (size_t i = 0; i < n_out; ++i) {
             int64_t val = static_cast<int64_t>(pcm_mono[i + skip_head] * gain);
             if (val > 8388607) val = 8388607;
@@ -2079,12 +2129,18 @@ void EspNowBroadcastEngine::runSinkLoop() {
             pcm_stereo[i * 2]     = sample;
             pcm_stereo[i * 2 + 1] = sample;
         }
+        if (m_test_words.load(std::memory_order_relaxed)) {
+            for (size_t i = 0; i < n_out; ++i) {
+                pcm_stereo[i * 2] = TEST_WORD_L;
+                pcm_stereo[i * 2 + 1] = TEST_WORD_R;
+            }
+        }
 #endif
         if (m_i2s_dac) {
             // THD+N self-test, tap 2: the samples handed to I2S (after gain and clamping), unedited frames only
             if (thdn_frame) {
                 if (n_out == 480 && skip_head == 0) {
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#if VSAF_SINK_PCM32
                     m_thdn_out.addFrame(pcm_stereo, 2, 8);  // 24-bit << 8 in int32 -> 24-bit
 #else
                     m_thdn_out.addFrame(pcm_stereo, 2, 0);

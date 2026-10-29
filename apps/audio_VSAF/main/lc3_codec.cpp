@@ -1,4 +1,5 @@
 #include "lc3_codec.hpp"
+#include "config.h"
 #include "esp_log.h"
 #include "lc3.h"
 #include "esp_heap_caps.h"
@@ -179,7 +180,7 @@ esp_err_t Lc3CodecEngine::initDecoder(uint32_t sample_rate_hz, uint8_t channels,
     esp_lc3_dec_cfg_t dec_cfg = {
         .sample_rate = m_sample_rate,
         .channel = m_channels,
-        .bits_per_sample = 16,
+        .bits_per_sample = VSAF_SINK_PCM32 ? 32 : 16,  // 32-bit output carries the full precision for 24-bit DACs
         .frame_dms = static_cast<uint8_t>(m_frame_duration_us / 100), // 75 for 7.5ms, 100 for 10ms
         // VBR: each call decodes in_raw.len bytes, so HQ (120 B), redundancy and sub (60 B) frames all decode.
         // With is_cbr = true every frame had to be exactly nbyte long: all 60 B frames failed and came out as
@@ -389,56 +390,7 @@ esp_err_t Lc3CodecEngine::decodeFrame(const uint8_t* in_lc3_buf, size_t in_bytes
     *actual_pcm_samples = required_samples;
     return ESP_OK;
 #else
-    if (!m_decoder_ready || !m_dec_handle) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    size_t required_samples = calculateRequiredPcmSamples(m_sample_rate, m_frame_duration_us);
-    if (max_pcm_samples < required_samples) {
-        return ESP_ERR_NO_MEM;
-    }
-
-    bool is_plc = (in_lc3_buf == nullptr || in_bytes == 0);
-    if (is_plc) {
-        incrementPlcCount();
-    }
-
-    esp_audio_dec_in_raw_t in_raw = {
-        .buffer = const_cast<uint8_t*>(in_lc3_buf),
-        .len = static_cast<uint32_t>(in_bytes),
-        .frame_recover = is_plc ? ESP_AUDIO_DEC_RECOVERY_PLC : ESP_AUDIO_DEC_RECOVERY_NONE,
-    };
-
-    esp_audio_dec_out_frame_t out_f = {
-        .buffer = reinterpret_cast<uint8_t*>(pcm_out),
-        .len = static_cast<uint32_t>(max_pcm_samples * sizeof(int16_t)),
-        .needed_size = 0,
-        .decoded_size = 0,
-    };
-
-    esp_audio_dec_info_t dec_info;
-    esp_audio_err_t ret = esp_lc3_dec_decode(m_dec_handle, &in_raw, &out_f, &dec_info);
-    if (ret != ESP_AUDIO_ERR_OK) {
-        static uint32_t s_dec_errors = 0;
-        if (!is_plc && (s_dec_errors++ % 1000) == 0) {
-            ESP_LOGW(TAG, "LC3 decode error %d (%u bytes, %lu Hz): concealed (%lu errors so far)", (int)ret,
-                     (unsigned)in_bytes, (unsigned long)m_sample_rate, (unsigned long)s_dec_errors);
-        }
-        // Fallback PLC
-        if (!is_plc) {
-            incrementPlcCount();
-        }
-        in_raw.buffer = nullptr;
-        in_raw.len = 0;
-        in_raw.frame_recover = ESP_AUDIO_DEC_RECOVERY_PLC;
-        esp_lc3_dec_decode(m_dec_handle, &in_raw, &out_f, &dec_info);
-    }
-
-    *actual_pcm_samples = out_f.decoded_size / sizeof(int16_t);
-    if (*actual_pcm_samples == 0) {
-        *actual_pcm_samples = required_samples;
-    }
-    return ESP_OK;
+    return decodeEsp(in_lc3_buf, in_bytes, pcm_out, max_pcm_samples, sizeof(int16_t), actual_pcm_samples);
 #endif
 }
 
@@ -486,6 +438,15 @@ esp_err_t Lc3CodecEngine::decodeFrame(const uint8_t* in_lc3_buf, size_t in_bytes
 
     *actual_pcm_samples = required_samples;
     return ESP_OK;
+#elif VSAF_SINK_PCM32
+    // Decoder opened at 32 bits: full-scale int32 -> 24-bit audio in the low bits (same layout as liblc3 S24)
+    esp_err_t err = decodeEsp(in_lc3_buf, in_bytes, pcm_out, max_pcm_samples, sizeof(int32_t), actual_pcm_samples);
+    if (err == ESP_OK) {
+        for (size_t i = 0; i < *actual_pcm_samples; ++i) {
+            pcm_out[i] >>= 8;
+        }
+    }
+    return err;
 #else
     static int16_t tmp_16[480];
     esp_err_t err = decodeFrame(in_lc3_buf, in_bytes, tmp_16, 480, actual_pcm_samples, stream_sample_rate, stream_duration_us);
@@ -497,6 +458,102 @@ esp_err_t Lc3CodecEngine::decodeFrame(const uint8_t* in_lc3_buf, size_t in_bytes
     return err;
 #endif
 }
+#if !defined(CONFIG_IDF_TARGET_ESP32S3)
+esp_err_t Lc3CodecEngine::decodeEsp(const uint8_t* in_lc3_buf, size_t in_bytes, void* out, size_t max_pcm_samples,
+                                    size_t bytes_per_sample, size_t* actual_pcm_samples) {
+    if (!m_decoder_ready || !m_dec_handle) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    size_t required_samples = calculateRequiredPcmSamples(m_sample_rate, m_frame_duration_us);
+    if (max_pcm_samples < required_samples) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    bool is_plc = (in_lc3_buf == nullptr || in_bytes == 0);
+    if (is_plc) {
+        incrementPlcCount();
+    }
+
+    esp_audio_dec_in_raw_t in_raw = {
+        .buffer = const_cast<uint8_t*>(in_lc3_buf),
+        .len = static_cast<uint32_t>(in_bytes),
+        .frame_recover = is_plc ? ESP_AUDIO_DEC_RECOVERY_PLC : ESP_AUDIO_DEC_RECOVERY_NONE,
+    };
+
+    esp_audio_dec_out_frame_t out_f = {
+        .buffer = reinterpret_cast<uint8_t*>(out),
+        .len = static_cast<uint32_t>(max_pcm_samples * bytes_per_sample),
+        .needed_size = 0,
+        .decoded_size = 0,
+    };
+
+    esp_audio_dec_info_t dec_info;
+    esp_audio_err_t ret = esp_lc3_dec_decode(m_dec_handle, &in_raw, &out_f, &dec_info);
+    if (ret != ESP_AUDIO_ERR_OK) {
+        static uint32_t s_dec_errors = 0;
+        if (!is_plc && (s_dec_errors++ % 1000) == 0) {
+            ESP_LOGW(TAG, "LC3 decode error %d (%u bytes, %lu Hz): concealed (%lu errors so far)", (int)ret,
+                     (unsigned)in_bytes, (unsigned long)m_sample_rate, (unsigned long)s_dec_errors);
+        }
+        // Fallback PLC
+        if (!is_plc) {
+            incrementPlcCount();
+        }
+        in_raw.buffer = nullptr;
+        in_raw.len = 0;
+        in_raw.frame_recover = ESP_AUDIO_DEC_RECOVERY_PLC;
+        esp_lc3_dec_decode(m_dec_handle, &in_raw, &out_f, &dec_info);
+    }
+
+    *actual_pcm_samples = out_f.decoded_size / bytes_per_sample;
+    if (*actual_pcm_samples == 0) {
+        *actual_pcm_samples = required_samples;
+    }
+    return ESP_OK;
+}
+#endif
+
+
+esp_err_t Lc3CodecEngine::espDecodeFrames(const uint8_t* frames, int n, int nbytes,
+                                          void (*cb)(int k, const uint8_t* frame, const int16_t* pcm, void* ctx),
+                                          void* ctx) {
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+    (void)frames; (void)n; (void)nbytes; (void)cb; (void)ctx;
+    return ESP_ERR_NOT_SUPPORTED;
+#else
+    esp_lc3_dec_cfg_t cfg = {};
+    cfg.sample_rate = 48000;
+    cfg.channel = 1;
+    cfg.bits_per_sample = 16;
+    cfg.frame_dms = 100;
+    cfg.nbyte = 120;
+    cfg.is_cbr = false;
+    cfg.len_prefixed = false;
+    cfg.enable_plc = true;
+    void* esp = nullptr;
+    if (esp_lc3_dec_open(&cfg, sizeof(cfg), &esp) != ESP_AUDIO_ERR_OK || !esp) {
+        return ESP_ERR_NO_MEM;
+    }
+    static int16_t pcm[480];
+    for (int k = 0; k < n; ++k) {
+        const uint8_t* f = frames + static_cast<size_t>(k) * nbytes;
+        esp_audio_dec_in_raw_t in = {};
+        in.buffer = const_cast<uint8_t*>(f);
+        in.len = static_cast<uint32_t>(nbytes);
+        in.frame_recover = ESP_AUDIO_DEC_RECOVERY_NONE;
+        esp_audio_dec_out_frame_t o = {};
+        o.buffer = reinterpret_cast<uint8_t*>(pcm);
+        o.len = sizeof(pcm);
+        esp_audio_dec_info_t info;
+        if (esp_lc3_dec_decode(esp, &in, &o, &info) != ESP_AUDIO_ERR_OK) {
+            memset(pcm, 0, sizeof(pcm));
+        }
+        cb(k, f, pcm, ctx);
+    }
+    esp_lc3_dec_close(esp);
+    return ESP_OK;
+#endif
+}
 
 } // namespace Codec
-

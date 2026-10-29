@@ -1,6 +1,9 @@
 #include "i2s_audio.hpp"
 #include "esp_log.h"
 #include "config.h"
+#include "soc/gpio_reg.h"
+#include "esp_cpu.h"
+#include "esp_clk_tree.h"
 #include <algorithm>
 #include <cstring>
 
@@ -47,14 +50,15 @@ I2sAudioDriver::~I2sAudioDriver() {
 }
 
 void I2sAudioDriver::configurePinElectricalProperties() {
-    auto configure_pin = [](int pin, bool is_output) {
+    const gpio_drive_cap_t cap = static_cast<gpio_drive_cap_t>(m_drive);
+    auto configure_pin = [cap](int pin, bool is_output) {
         if (pin < 0) return;
         gpio_num_t gpio = static_cast<gpio_num_t>(pin);
         // Enable internal pull-down resistor to prevent line floating during idle/init
         gpio_set_pull_mode(gpio, GPIO_PULLDOWN_ONLY);
         if (is_output) {
-            // Set pad drive strength to 20 mA (GPIO_DRIVE_CAP_2) for fast, crisp square clock/data edges
-            gpio_set_drive_capability(gpio, GPIO_DRIVE_CAP_2);
+            // Pad drive strength (default GPIO_DRIVE_CAP_2, ~20 mA; console i2sdrive changes it)
+            gpio_set_drive_capability(gpio, cap);
         }
     };
 
@@ -64,8 +68,8 @@ void I2sAudioDriver::configurePinElectricalProperties() {
     if (m_din_pin >= 0) {
         configure_pin(m_din_pin, false);
     }
-    ESP_LOGI(TAG, "I2S electrical properties applied: Pull-down enabled, Drive strength set to 20 mA (GPIO_DRIVE_CAP_2) on BCLK=%d, WS=%d, DOUT=%d",
-             m_bclk_pin, m_ws_pin, m_dout_pin);
+    ESP_LOGI(TAG, "I2S electrical properties applied: Pull-down enabled, drive strength %d on BCLK=%d, WS=%d, DOUT=%d",
+             m_drive, m_bclk_pin, m_ws_pin, m_dout_pin);
 }
 
 void I2sAudioDriver::setHardwareGain(Max98357Gain gain) {
@@ -205,42 +209,15 @@ esp_err_t I2sAudioDriver::reconfigureAudioFormat(uint32_t sample_rate, i2s_data_
     };
     i2s_channel_register_event_callback(m_tx_handle, &cbs, this);
 
-    // Philips I2S Slot Configuration:
-    // For 16-bit: 16-bit data width & 16-bit slot width (2 bytes per sample in DMA).
-    // For 24-bit / 32-bit: 32-bit data width & 32-bit slot width (4 bytes per sample in DMA, MSB-aligned).
-    i2s_data_bit_width_t hw_data_bit_width = (bits_per_sample == I2S_DATA_BIT_WIDTH_16BIT) ? 
-                                             I2S_DATA_BIT_WIDTH_16BIT : I2S_DATA_BIT_WIDTH_32BIT;
-    i2s_slot_bit_width_t slot_bit_width = (bits_per_sample == I2S_DATA_BIT_WIDTH_16BIT) ? 
-                                           I2S_SLOT_BIT_WIDTH_16BIT : I2S_SLOT_BIT_WIDTH_32BIT;
-    uint32_t ws_width = (bits_per_sample == I2S_DATA_BIT_WIDTH_16BIT) ? 16 : 32;
-
-    i2s_std_config_t std_cfg = {
-        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate),
-        .slot_cfg = {
-            .data_bit_width = hw_data_bit_width,
-            .slot_bit_width = slot_bit_width,
-            .slot_mode = slot_mode,
-            .slot_mask = (slot_mode == I2S_SLOT_MODE_MONO) ? I2S_STD_SLOT_LEFT : I2S_STD_SLOT_BOTH,
-            .ws_width = ws_width,
-            .ws_pol = false,
-            .bit_shift = true,      // Standard Philips 1-bit delay
-            .left_align = true,     // MSB first aligned
-            .big_endian = false,
-            .bit_order_lsb = false, // MSB transmitted first on wire
-        },
-        .gpio_cfg = {
-            .mclk = I2S_GPIO_UNUSED,
-            .bclk = static_cast<gpio_num_t>(m_bclk_pin),
-            .ws = static_cast<gpio_num_t>(m_ws_pin),
-            .dout = static_cast<gpio_num_t>(m_dout_pin),
-            .din = static_cast<gpio_num_t>(m_din_pin),
-            .invert_flags = {
-                .mclk_inv = false,
-                .bclk_inv = false,
-                .ws_inv = false,
-            },
-        },
-    };
+    i2s_std_config_t std_cfg = {};
+    std_cfg.clk_cfg.sample_rate_hz = sample_rate;
+    std_cfg.clk_cfg.clk_src = m_clk_src;
+    std_cfg.clk_cfg.mclk_multiple = m_mclk_mult;
+    m_bits_per_sample = bits_per_sample;  // makeSlotConfig() reads it
+    m_slot_mode = slot_mode;
+    m_dma_bytes_per_sample = (bits_per_sample == I2S_DATA_BIT_WIDTH_16BIT) ? 2 : (m_slot24 ? 3 : 4);
+    std_cfg.slot_cfg = makeSlotConfig();
+    std_cfg.gpio_cfg = makeGpioConfig();
 
     ret = i2s_channel_init_std_mode(m_tx_handle, &std_cfg);
     if (ret == ESP_OK) {
@@ -252,7 +229,7 @@ esp_err_t I2sAudioDriver::reconfigureAudioFormat(uint32_t sample_rate, i2s_data_
         m_is_running = false;
         ESP_LOGI(TAG, "I2S Philips Master Configured: Fs=%lu Hz, %u-bit (Slot: %u-bit), %s, Frame=%lu samples (%.1f ms), GAIN=%ddB",
                  (unsigned long)m_sample_rate, static_cast<uint8_t>(m_bits_per_sample), 
-                 (m_bits_per_sample == I2S_DATA_BIT_WIDTH_16BIT) ? 16 : 32,
+                 (m_bits_per_sample == I2S_DATA_BIT_WIDTH_16BIT) ? 16 : (m_slot24 ? 24 : 32),
                  (m_slot_mode == I2S_SLOT_MODE_STEREO) ? "Stereo" : "Mono",
                  (unsigned long)frame_samples, m_frame_duration_us / 1000.0f, getHardwareGainDb());
     } else {
@@ -260,6 +237,114 @@ esp_err_t I2sAudioDriver::reconfigureAudioFormat(uint32_t sample_rate, i2s_data_
     }
 
     return ret;
+}
+
+i2s_std_slot_config_t I2sAudioDriver::makeSlotConfig() const {
+    // Philips I2S slot configuration:
+    // 16-bit: 16-bit data and slot width (2 bytes per sample in DMA, BCLK = 32 x fs).
+    // 24 / 32-bit: 32-bit data and slot width (4 bytes per sample in DMA, MSB-aligned, BCLK = 64 x fs).
+    // 24-bit data in 24-bit slots (m_slot24): BCLK = 48 x fs, 3 bytes per sample in DMA.
+    const bool b16 = (m_bits_per_sample == I2S_DATA_BIT_WIDTH_16BIT);
+    const bool s24 = !b16 && m_slot24;
+    i2s_std_slot_config_t slot = {};
+    slot.data_bit_width = b16 ? I2S_DATA_BIT_WIDTH_16BIT : (s24 ? I2S_DATA_BIT_WIDTH_24BIT : I2S_DATA_BIT_WIDTH_32BIT);
+    slot.slot_bit_width = b16 ? I2S_SLOT_BIT_WIDTH_16BIT : (s24 ? I2S_SLOT_BIT_WIDTH_24BIT : I2S_SLOT_BIT_WIDTH_32BIT);
+    slot.slot_mode = m_slot_mode;
+    slot.slot_mask = (m_slot_mode == I2S_SLOT_MODE_MONO) ? I2S_STD_SLOT_LEFT : I2S_STD_SLOT_BOTH;
+    slot.ws_width = b16 ? 16 : (s24 ? 24 : 32);
+    slot.ws_pol = false;
+    slot.bit_shift = m_bit_shift;  // true: Philips 1-bit delay; false: left-justified
+    slot.left_align = true;        // MSB first aligned
+    slot.big_endian = false;
+    slot.bit_order_lsb = false;    // MSB transmitted first on wire
+    return slot;
+}
+
+i2s_std_gpio_config_t I2sAudioDriver::makeGpioConfig() const {
+    i2s_std_gpio_config_t g = {};
+    g.mclk = I2S_GPIO_UNUSED;
+    g.bclk = static_cast<gpio_num_t>(m_bclk_pin);
+    g.ws = static_cast<gpio_num_t>(m_ws_pin);
+    g.dout = static_cast<gpio_num_t>(m_dout_pin);
+    g.din = static_cast<gpio_num_t>(m_din_pin);
+    g.invert_flags.mclk_inv = false;
+    g.invert_flags.bclk_inv = m_bclk_inv;
+    g.invert_flags.ws_inv = m_ws_inv;
+    return g;
+}
+
+esp_err_t I2sAudioDriver::setLinkFormat(bool bit_shift, bool bclk_inv, bool ws_inv) {
+    if (!m_tx_handle) return ESP_ERR_INVALID_STATE;
+    const bool was_running = m_is_running;
+    if (was_running) {
+        i2s_channel_disable(m_tx_handle);
+    }
+    m_bit_shift = bit_shift;
+    m_bclk_inv = bclk_inv;
+    m_ws_inv = ws_inv;
+    const i2s_std_slot_config_t slot = makeSlotConfig();
+    const i2s_std_gpio_config_t g = makeGpioConfig();
+    esp_err_t err = i2s_channel_reconfig_std_slot(m_tx_handle, &slot);
+    if (err == ESP_OK) err = i2s_channel_reconfig_std_gpio(m_tx_handle, &g);
+    configurePinElectricalProperties();  // gpio reconfig resets the pads
+    if (was_running) {
+        i2s_channel_enable(m_tx_handle);
+    }
+    ESP_LOGI(TAG, "I2S link format: %s, BCLK %s, WS %s: %s", bit_shift ? "Philips I2S" : "left-justified",
+             bclk_inv ? "inverted" : "normal", ws_inv ? "inverted" : "normal", esp_err_to_name(err));
+    return err;
+}
+
+void I2sAudioDriver::captureGpio(uint32_t* buf, size_t n, float* ns_per_sample) {
+    for (int pin : {m_bclk_pin, m_ws_pin, m_dout_pin}) {
+        if (pin >= 0) gpio_input_enable(static_cast<gpio_num_t>(pin));  // read back the driven level
+    }
+    static portMUX_TYPE s_cap_mux = portMUX_INITIALIZER_UNLOCKED;
+    portENTER_CRITICAL(&s_cap_mux);
+    const uint32_t c0 = esp_cpu_get_cycle_count();
+    for (size_t i = 0; i < n; ++i) {
+        buf[i] = REG_READ(GPIO_IN_REG);
+    }
+    const uint32_t c1 = esp_cpu_get_cycle_count();
+    portEXIT_CRITICAL(&s_cap_mux);
+    uint32_t cpu_hz = 0;
+    esp_clk_tree_src_get_freq_hz(SOC_MOD_CLK_CPU, ESP_CLK_TREE_SRC_FREQ_PRECISION_CACHED, &cpu_hz);
+    *ns_per_sample = cpu_hz ? static_cast<float>(c1 - c0) * 1e9f / cpu_hz / n : 0.0f;
+}
+
+esp_err_t I2sAudioDriver::setDriveStrength(int level) {
+    if (level < 0 || level > 3) return ESP_ERR_INVALID_ARG;
+    m_drive = level;
+    for (int pin : {m_bclk_pin, m_ws_pin, m_dout_pin}) {
+        if (pin >= 0) {
+            gpio_set_drive_capability(static_cast<gpio_num_t>(pin), static_cast<gpio_drive_cap_t>(level));
+        }
+    }
+    ESP_LOGI(TAG, "I2S pad drive strength %d on BCLK=%d, WS=%d, DOUT=%d", level, m_bclk_pin, m_ws_pin, m_dout_pin);
+    return ESP_OK;
+}
+
+esp_err_t I2sAudioDriver::setClock(i2s_clock_src_t src, i2s_mclk_multiple_t mclk_multiple) {
+    if (!m_tx_handle) return ESP_ERR_INVALID_STATE;
+    const bool was_running = m_is_running;
+    if (was_running) {
+        i2s_channel_disable(m_tx_handle);  // amp stays unmuted: a short gap only
+    }
+    i2s_std_clk_config_t clk = {};
+    clk.sample_rate_hz = m_sample_rate;
+    clk.clk_src = src;
+    clk.mclk_multiple = mclk_multiple;
+    esp_err_t err = i2s_channel_reconfig_std_clock(m_tx_handle, &clk);
+    if (err == ESP_OK) {
+        m_clk_src = src;
+        m_mclk_mult = mclk_multiple;
+    }
+    if (was_running) {
+        i2s_channel_enable(m_tx_handle);
+    }
+    ESP_LOGI(TAG, "I2S clock source %d, MCLK %d x fs: %s", static_cast<int>(src), static_cast<int>(mclk_multiple),
+             esp_err_to_name(err));
+    return err;
 }
 
 esp_err_t I2sAudioDriver::reconfigureSampleRate(uint32_t sample_rate, uint32_t frame_duration_us) {

@@ -353,7 +353,11 @@ extern "C" void app_main(void) {
             cfg->is_pcm5102a ? -1 : 0,
             cfg->amp_mute_gpio
         );
-        i2s_data_bit_width_t bit_width = cfg->is_pcm5102a ? I2S_DATA_BIT_WIDTH_24BIT : I2S_DATA_BIT_WIDTH_16BIT;
+        i2s_data_bit_width_t bit_width = (cfg->is_pcm5102a || VSAF_SINK_PCM32) ? I2S_DATA_BIT_WIDTH_24BIT
+                                                                                : I2S_DATA_BIT_WIDTH_16BIT;
+#if defined(CONFIG_IDF_TARGET_ESP32C6)
+        s_i2s_dac->setSlot24(CONFIG_VSAF_C6_I2S_SLOT_BITS == 24);
+#endif
         s_i2s_dac->init(CONFIG_ESPNOW_SAMPLE_RATE_HZ, 10000, bit_width, I2S_SLOT_MODE_STEREO);
         if (!cfg->is_pcm5102a && cfg->max98357a_gain_db >= 0) {
             s_i2s_dac->setHardwareGain(static_cast<Hardware::Max98357Gain>(cfg->max98357a_gain_db));
@@ -398,10 +402,10 @@ extern "C" void app_main(void) {
             }
         }
         s_unicast_engine->setPostGainDb(postgain_db);
-        s_unicast_engine->setBitDepth(cfg->is_pcm5102a ? 24 : 16);
+        s_unicast_engine->setBitDepth((cfg->is_pcm5102a || VSAF_SINK_PCM32) ? 24 : 16);
         ESP_LOGI(TAG, "%s DAC (Node %d): software post-gain %.1f dB, %d-bit",
                  cfg->is_pcm5102a ? "PCM5102A" : "MAX98357A", matched_node ? matched_node->node_id : -1, postgain_db,
-                 cfg->is_pcm5102a ? 24 : 16);
+                 (cfg->is_pcm5102a || VSAF_SINK_PCM32) ? 24 : 16);
     } else if (cfg->node_role == NODE_ROLE_SOURCE) {
         // Initialize USB Audio + CDC for SOURCE
         usb_audio_init();

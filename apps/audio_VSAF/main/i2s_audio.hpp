@@ -107,6 +107,48 @@ public:
     uint32_t getQueueOverflows() const { return m_q_ovf.load(std::memory_order_relaxed); }
     uint32_t getDmaFrameSamples() const { return m_dma_frame_samples; }
 
+    /**
+     * @brief Set the pad drive strength of BCLK / WS / DOUT (0..3 = ~5 / 10 / 20 / 40 mA). Lower = slower edges,
+     * less ringing on long wires. Applied at once and kept across re-initialisation.
+     */
+    esp_err_t setDriveStrength(int level);
+    int getDriveStrength() const { return m_drive; }
+
+    /**
+     * @brief Change the I2S clock source and MCLK multiple while streaming: disables the channel briefly
+     * (a short gap; the SINK realigns), reconfigures the clock, re-enables it.
+     * @param src  I2S clock source (e.g. I2S_CLK_SRC_PLL_160M).
+     * @param mclk_multiple MCLK = mclk_multiple x fs (256 / 384 / 512).
+     */
+    esp_err_t setClock(i2s_clock_src_t src, i2s_mclk_multiple_t mclk_multiple);
+    i2s_clock_src_t getClockSource() const { return m_clk_src; }
+
+    /**
+     * @brief Change the serial link format while streaming (test hook, console i2sfmt / i2sbclk / i2sws):
+     * bit_shift = Philips I2S 1-bit delay (false = left-justified), bclk_inv / ws_inv invert those pins.
+     */
+    esp_err_t setLinkFormat(bool bit_shift, bool bclk_inv, bool ws_inv);
+    bool getBitShift() const { return m_bit_shift; }
+    bool getBclkInv() const { return m_bclk_inv; }
+    bool getWsInv() const { return m_ws_inv; }
+
+    /**
+     * @brief Sample the GPIO input register in a tight loop with interrupts off (on-chip logic analyser for the
+     * I2S lines; the pads' input buffers are enabled, outputs keep running).
+     * @param buf  Output: raw GPIO_IN values.
+     * @param n    Number of samples.
+     * @param ns_per_sample  Output: measured sample period (ns).
+     */
+    void captureGpio(uint32_t* buf, size_t n, float* ns_per_sample);
+    /** @brief Bytes per sample in the DMA buffer: 2 (16-bit), 3 (24-bit slots), 4 (32-bit slots). */
+    uint32_t getDmaBytesPerSample() const { return m_dma_bytes_per_sample; }
+    /** @brief Use 24-bit slots (BCLK = 48 x fs) instead of 32-bit slots for 24-bit data; set before init(). */
+    void setSlot24(bool on) { m_slot24 = on; if (on) m_mclk_mult = I2S_MCLK_MULTIPLE_384; }
+    int bclkPin() const { return m_bclk_pin; }
+    int wsPin() const { return m_ws_pin; }
+    int doutPin() const { return m_dout_pin; }
+    i2s_mclk_multiple_t getMclkMultiple() const { return m_mclk_mult; }
+
     bool isRunning() const { return m_is_running; }
     bool isInitialized() const { return m_tx_handle != nullptr; }
 
@@ -138,6 +180,16 @@ private:
     uint32_t m_desc_sent = 0;
     uint32_t m_last_sent_us = 0;
     uint32_t m_dma_frame_samples = 480;
+    int m_drive = 2;  // GPIO_DRIVE_CAP_2 (ESP-IDF default)
+    i2s_clock_src_t m_clk_src = I2S_CLK_SRC_DEFAULT;
+    i2s_mclk_multiple_t m_mclk_mult = I2S_MCLK_MULTIPLE_256;
+    bool m_bit_shift = true;   // Philips I2S (1 BCLK delay after the WS edge)
+    bool m_slot24 = false;     // 24-bit data in 24-bit slots (BCLK 48 x fs, 3-byte DMA samples)
+    uint32_t m_dma_bytes_per_sample = 2;
+    bool m_bclk_inv = false;
+    bool m_ws_inv = false;
+    i2s_std_slot_config_t makeSlotConfig() const;
+    i2s_std_gpio_config_t makeGpioConfig() const;
     std::atomic<uint32_t> m_q_ovf{0};
 };
 

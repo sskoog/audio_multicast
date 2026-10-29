@@ -113,7 +113,22 @@ public:
     static constexpr size_t ENC_MQ_BASE = 5;
     static constexpr size_t SUB_ENCODER_INDEX = 10;
 
+    /**
+     * @brief Decode n LC3 frames (nbytes each, 48 kHz / 10 ms) with a fresh Espressif decoder at 16 bit and hand
+     * each frame and its PCM to cb (test, console deccmp; the PC compares against liblc3). C6 only.
+     */
+    static esp_err_t espDecodeFrames(const uint8_t* frames, int n, int nbytes,
+                                     void (*cb)(int k, const uint8_t* frame, const int16_t* pcm, void* ctx), void* ctx);
+
 private:
+#if !defined(CONFIG_IDF_TARGET_ESP32S3)
+    /**
+     * @brief Decode one frame (or PLC with in_lc3_buf == nullptr) with the Espressif decoder into out.
+     * @param bytes_per_sample 2 (decoder opened at 16 bit) or 4 (32 bit), must match the open configuration.
+     */
+    esp_err_t decodeEsp(const uint8_t* in_lc3_buf, size_t in_bytes, void* out, size_t max_pcm_samples,
+                        size_t bytes_per_sample, size_t* actual_pcm_samples);
+#endif
     void* m_enc_handle = nullptr;
     void* m_dec_handle = nullptr;
     void* m_google_encoder[NUM_ENCODERS] = {};
