@@ -1,3 +1,4 @@
+#include "vsaf_params.hpp"
 #include "diagnostics.hpp"
 #include "console.hpp"
 #include "config.h"
@@ -110,9 +111,15 @@ void SystemDiagnostics::tick() {
 
         // Direct pipeline duration CPU load calculation (zero hooks, zero locks, zero scheduler suspension)
         int cpu_load_pct = 0;
+        AudioNet::Params::StatusSnapshot snap = {};  // published below for the parameter table
+        snap.temp_c = temp_c;
         if (cfg->node_role == NODE_ROLE_SOURCE) {
             float dsp_ms = 0.0f, enc_main_ms = 0.0f, enc_red_ms = 0.0f, tx_ms = 0.0f;
             m_unicast_engine.getStageDurationStats(dsp_ms, enc_main_ms, enc_red_ms, tx_ms);
+            snap.dsp_ms = dsp_ms;
+            snap.enc_hq_ms = enc_main_ms;
+            snap.enc_mq_ms = enc_red_ms;
+            snap.tx_end_ms = tx_ms;
             // CPU = DSP + all encodes over both cores. The 4th stage value is the frame's TX end offset (not CPU):
             // the RF task sleeps between events instead of busy-waiting.
             (void)tx_ms;
@@ -129,6 +136,7 @@ void SystemDiagnostics::tick() {
         if (cpu_load_pct < 0) cpu_load_pct = 0;
         if (cpu_load_pct > 100) cpu_load_pct = 100;
         m_cpu_pct = cpu_load_pct;
+        snap.cpu_pct = static_cast<float>(cpu_load_pct);
 
         if (cfg->node_role == NODE_ROLE_SINK &&
             m_unicast_engine.getState() == AudioNet::NetworkState::STREAM &&
@@ -137,6 +145,7 @@ void SystemDiagnostics::tick() {
         }
 
         float rms_db = is_audio_active ? m_unicast_engine.getAudioFrameRMS_dBFS() : -INFINITY;
+        snap.rms_dbfs = (std::isinf(rms_db) || rms_db < -100.0f) ? -100.0f : rms_db;
         float peak_db = is_audio_active ? m_unicast_engine.getAudioPeak_dBFS() : -INFINITY;
 
         char rms_str[8], peak_str[8];
@@ -236,8 +245,11 @@ void SystemDiagnostics::tick() {
                 const auto* p = m_unicast_engine.getPeer(i);
                 if (p && p->is_enabled && p->status == AudioNet::PeerStatus::ONLINE) {
                     online_nodes++;
+                    snap.peers_mask |= static_cast<uint8_t>(1u << i);
                 }
             }
+            snap.peers_online = static_cast<uint8_t>(online_nodes);
+            snap.tx_pkts_s = static_cast<float>(tx_pkts_sec);
 
             // Calculate expected replies in 1-second window:
             // Broadcast transmits tx_pkts_sec packets across 6 channels (tx_pkts_sec / 6.0 sweeps/sec).
@@ -278,6 +290,7 @@ void SystemDiagnostics::tick() {
             snprintf(mid_block, sizeof(mid_block),
                      "  %-6.6s    %4.4s  %4.4s  %4.4s  %5.5s ",
                      input_str, tx_pkts_str, ack_pct_str, ack_fails_str, tx_tot_str);
+            AudioNet::Params::publishStatus(snap);
         } else {
             // SINK specifics: Target Channel string
             snprintf(role_col_str, sizeof(role_col_str), "%-6.6s", getChannelStr(m_unicast_engine.getTargetChannel()));

@@ -4,6 +4,7 @@
 #include "tone_generator.hpp"
 #include "i2s_audio.hpp"
 #include "vsaf_broadcast_engine.hpp"
+#include "vsaf_params.hpp"
 #include "status_led.hpp"
 #include "button.hpp"
 #include "diagnostics.hpp"
@@ -413,6 +414,7 @@ extern "C" void app_main(void) {
 
     // Console first (log hook + RAM log ring + CLI task), so a misbehaving engine start can still be
     // inspected over COM116 ('log', 'mem'). On Node 16 nothing else can show boot output.
+    AudioNet::Params::bindEngine(s_unicast_engine);  // parameter table (console param, later USB HID)
     console_init(s_unicast_engine);
 
     // 7. Configure non-blocking VFS for USB-Serial-JTAG and install UART0 driver

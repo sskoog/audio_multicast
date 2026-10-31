@@ -328,6 +328,9 @@ public:
     const Audio::CalSignal& getCalSignal() const { return m_cal[m_cal_active.load(std::memory_order_acquire)]; }
     bool isCalSignalOn() const { return m_cal_on.load(std::memory_order_acquire); }
     bool isToneTestMode() const { return m_tone_test_mode; }
+    /** @brief SOURCE master volume (dB, -96 = mute .. 0), applied in the DSP stage to all channels (ramped). */
+    void setMasterGainDb(float db) { m_master_gain_db.store(std::clamp(db, -96.0f, 0.0f), std::memory_order_relaxed); }
+    float getMasterGainDb() const { return m_master_gain_db.load(std::memory_order_relaxed); }
 
     // Audio Metering
     int16_t getAudioFrameRMS_int16() { return m_audio_meter.getAudioFrameRMS_int16(); }
@@ -612,10 +615,21 @@ private:
     std::atomic<uint32_t>      m_src_pub_frame_no{0};                    // last frame published by core 0
     int64_t                    m_src_grid_epoch_us = -1;                 // first frame tick (grid origin)
     std::atomic<int64_t>       m_src_tick_us{0};                         // time of the last frame-timer tick
-    int16_t                    m_src_pcm_sat[2][NUM_SATELLITE_CHANNELS][480];
-    int16_t                    m_src_pcm_sub[2][80];
-    vsaf_audio_packet_t        m_src_pkt_sat[2][NUM_SATELLITE_CHANNELS];
-    vsaf_sub_packet_t          m_src_pkt_sub[2];
+    // SOURCE pipeline buffers: one block from internal RAM, allocated in start() before the pipeline tasks
+    // (SOURCE only, never inside the frame loop). As members / statics they took ~27 KB on every SINK too.
+    struct SrcBuffers {
+        int16_t             pcm_sat[2][NUM_SATELLITE_CHANNELS][480];  // per frame parity: encoder input
+        int16_t             pcm_sub[2][80];
+        vsaf_audio_packet_t pkt_sat[2][NUM_SATELLITE_CHANNELS];       // per frame parity: packets being built / sent
+        vsaf_sub_packet_t   pkt_sub[2];
+        int16_t             pcm_stereo_in[480 * 2];                   // USB (or synth) input frame
+        int16_t             tone_mono[480];
+        float               stereo_in_f32[480 * 2];                   // DSP stage
+        float               stereo_hp_f32[480 * 2];
+        float               mono_in_f32[480];
+        float               sub_8k_f32[80];
+    };
+    SrcBuffers*                m_src = nullptr;
     uint8_t                    m_src_mq[3][NUM_SATELLITE_CHANNELS][LC3_FRAME_OCTETS_RED]; // MQ(frame) by frame_no % 3
     std::atomic<uint32_t>      m_src_mq_tag[3][NUM_SATELLITE_CHANNELS] = {};               // frame_no that wrote it
     uint8_t                    m_src_sub_hist[4][LC3_FRAME_OCTETS_SUB];                     // sub t0 by frame_no % 4
@@ -709,7 +723,8 @@ public:
     std::atomic<int64_t>  m_dbg_played{0}, m_dbg_written{0}, m_dbg_t{0};
     std::atomic<bool>     m_sync_disable{false};
     // THD+N self-test (console `thdn`): state 0 idle, 1 measuring (SINK task owns the meters), 2 done
-    Audio::ThdnMeter      m_thdn_dec, m_thdn_out;
+    Audio::ThdnMeter*     m_thdn_dec = nullptr;  // heap, only while 'thdn' runs (7.7 KB of tables)
+    Audio::ThdnMeter*     m_thdn_out = nullptr;
     std::atomic<int>      m_thdn_state{0};
     // I2S capture test words (console i2scap): when set, the SINK outputs these instead of audio
     std::atomic<bool>     m_test_words{false};
@@ -760,6 +775,7 @@ private: // SOURCE: max |tick - grid| (us) since last read
     Audio::CalSignal           m_cal[2];
     std::atomic<uint8_t>       m_cal_active{0};
     std::atomic<bool>          m_cal_on{false};
+    std::atomic<float>         m_master_gain_db{0.0f};
     bool                       m_is_stereo;
 
     wifi_phy_mode_t            m_tx_phy_mode;
@@ -822,7 +838,6 @@ private: // SOURCE: max |tick - grid| (us) since last read
     void handleTxSubsystemHang();
 
     // Single interleaved stereo PCM input capture buffer (480 stereo samples = 960 int16_t = 10 ms @ 48 kHz stereo)
-    int16_t                    m_pcm_stereo_in[480 * 2];
     size_t                     m_pcm_in_samples{480};
 
     // Filtered PCM Channel Buffers

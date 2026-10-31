@@ -10,6 +10,7 @@ set(srcs
     "vsaf_broadcast_engine.cpp"
     "vsaf_source_pipeline.cpp"
     "vsaf_time_sync.cpp"
+    "vsaf_params.cpp"
     "diagnostics.cpp"
     # "lc3_benchmark.cpp" (Disabled)
 )

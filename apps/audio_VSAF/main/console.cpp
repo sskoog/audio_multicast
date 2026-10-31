@@ -2,6 +2,8 @@
 #include "config.h"
 #include "vsaf_broadcast_engine.hpp"
 #include "usb_audio.hpp"
+#include "vsaf_params.hpp"
+#include <new>
 #include "driver/pulse_cnt.h"
 #include "esp_cpu.h"
 #include "esp_private/esp_clk.h"
@@ -481,6 +483,55 @@ void handle_ascii_command(const char* raw_line) {
                               dac->getBclkInv() ? "inverted" : "normal", dac->getWsInv() ? "inverted" : "normal");
             }
         }
+    } else if (strncasecmp(line, "param", 5) == 0 && (line[5] == ' ' || line[5] == 0)) {
+        // Parameter table (vsaf_params.hpp): param list | param get <name|id> | param set <name|id> <value>
+        // Replies are one tagged line each: [PARAM] key=value ... (machine-readable)
+        namespace P = AudioNet::Params;
+        char verb[8] = "", key[40] = "", val[24] = "";
+        const int n = sscanf(line + 5, "%7s %39s %23s", verb, key, val);
+        auto print_desc = [](const P::Desc& d) {
+            float v = 0;
+            P::get(d.id, v);
+            char vs[24], mins[16], maxs[16], defs[24];
+            P::formatValue(d, v, vs, sizeof(vs));
+            P::formatValue(d, d.min, mins, sizeof(mins));
+            P::formatValue(d, d.max, maxs, sizeof(maxs));
+            P::formatValue(d, d.def, defs, sizeof(defs));
+            const char* type = d.type == P::Type::INT ? "int" : (d.type == P::Type::FLOAT ? "float" : "enum");
+            print_console("[PARAM] id=0x%04X name=%s value=%s unit=%s type=%s access=%s min=%s max=%s def=%s\n",
+                          d.id, d.name, vs, d.unit[0] ? d.unit : "-", type, d.access == P::Access::RW ? "rw" : "ro",
+                          mins, maxs, defs);
+        };
+        if (n < 1 || strcasecmp(verb, "list") == 0) {
+            const P::StatusSnapshot st = P::latestStatus();
+            print_console("[PARAM] count=%u status_seq=%lu\n", (unsigned)P::count(), (unsigned long)st.seq);
+            for (size_t i = 0; i < P::count(); ++i) {
+                print_desc(P::descAt(i));
+            }
+        } else if (strcasecmp(verb, "get") == 0 && n >= 2) {
+            const P::Desc* d = P::findByText(key);
+            if (d) {
+                print_desc(*d);
+            } else {
+                print_console("[PARAM] error=unknown key=%s\n", key);
+            }
+        } else if (strcasecmp(verb, "set") == 0 && n >= 3) {
+            const P::Desc* d = P::findByText(key);
+            float req = 0, applied = 0;
+            if (!d) {
+                print_console("[PARAM] error=unknown key=%s\n", key);
+            } else if (!P::parseValue(*d, val, req)) {
+                print_console("[PARAM] id=0x%04X name=%s error=invalid value=%s\n", d->id, d->name, val);
+            } else {
+                const P::SetStatus st = P::set(d->id, req, applied);
+                char as[24];
+                P::formatValue(*d, applied, as, sizeof(as));
+                print_console("[PARAM] id=0x%04X name=%s set=%s applied=%s status=%s\n", d->id, d->name, val,
+                              (st == P::SetStatus::OK || st == P::SetStatus::CLAMPED) ? as : "-", P::setStatusName(st));
+            }
+        } else {
+            print_console("[PARAM] usage: param list | param get <name|id> | param set <name|id> <value>\n");
+        }
     } else if (strcasecmp(line, "deccmp") == 0) {
         // C6 SINK: capture consecutive HQ frames of the live stream, decode them with Espressif LC3 and liblc3
         if (!s_unicast_engine) return;
@@ -520,7 +571,7 @@ void handle_ascii_command(const char* raw_line) {
         auto worker = [](void* arg) {
             Job* j = static_cast<Job*>(arg);
             auto cb = [](int idx, const uint8_t* f, const int16_t* pcm, void*) {
-                static char line[2000];
+                static char line[520];  // [DF] 240 hex / [DP] 480 hex + header
                 static const char* hx = "0123456789abcdef";
                 int p = snprintf(line, sizeof(line), "[DF] %d ", idx);
                 for (int i = 0; i < 120; ++i) {
@@ -642,7 +693,16 @@ void handle_ascii_command(const char* raw_line) {
             print_console("[ERR] no I2S DAC on this node\n");
             return;
         }
-        static uint32_t cap[3000];
+        uint32_t* cap = static_cast<uint32_t*>(heap_caps_malloc(3000 * sizeof(uint32_t), MALLOC_CAP_8BIT));
+        uint8_t* ws_at = static_cast<uint8_t*>(heap_caps_malloc(700, MALLOC_CAP_8BIT));
+        uint8_t* d_at = static_cast<uint8_t*>(heap_caps_malloc(700, MALLOC_CAP_8BIT));
+        if (!cap || !ws_at || !d_at) {
+            heap_caps_free(cap);
+            heap_caps_free(ws_at);
+            heap_caps_free(d_at);
+            print_console("[ERR] i2scap: out of memory (needs ~13 KB)\n");
+            return;
+        }
         float ns = 0;
         s_unicast_engine->m_test_words.store(true);
         vTaskDelay(pdMS_TO_TICKS(60));  // test words reach the DMA (staging + 2 descriptors)
@@ -650,7 +710,6 @@ void handle_ascii_command(const char* raw_line) {
         s_unicast_engine->m_test_words.store(false);
         const uint32_t mb = 1u << dac->bclkPin(), mw = 1u << dac->wsPin(), md = 1u << dac->doutPin();
         // Rising BCLK edges: WS and DOUT as sampled there (the DAC samples on the rising edge)
-        static uint8_t ws_at[700], d_at[700];
         int ne = 0, min_hi = 1 << 30, min_lo = 1 << 30, run = 0;
         bool prev_b = cap[0] & mb;
         for (int i = 1; i < 3000 && ne < 700; ++i) {
@@ -691,6 +750,9 @@ void handle_ascii_command(const char* raw_line) {
                           ws_at[k], ws_at[k] ? "right" : "left", bits, want, off);
             shown++;
         }
+        heap_caps_free(cap);
+        heap_caps_free(ws_at);
+        heap_caps_free(d_at);
     } else if (strncasecmp(line, "i2sdrive", 8) == 0) {
         // SINK: I2S pad drive strength 0..3 (~5 / 10 / 20 / 40 mA); no argument = show
         auto* dac = s_unicast_engine ? s_unicast_engine->getI2sDac() : nullptr;
@@ -745,8 +807,21 @@ void handle_ascii_command(const char* raw_line) {
             sscanf(line + 4, "%d %d", &hz, &secs);
             secs = std::clamp(secs, 1, 30);
             auto* e = s_unicast_engine;
-            if (e->m_thdn_state.load() == 1 || !e->m_thdn_dec.configure(static_cast<uint32_t>(hz)) ||
-                !e->m_thdn_out.configure(static_cast<uint32_t>(hz))) {
+            if (e->m_thdn_state.load() != 0) {
+                print_console("[ERR] thdn already running\n");
+                return;
+            }
+            e->m_thdn_dec = new (std::nothrow) Audio::ThdnMeter();
+            e->m_thdn_out = new (std::nothrow) Audio::ThdnMeter();
+            auto free_meters = [e]() {
+                delete e->m_thdn_dec;
+                delete e->m_thdn_out;
+                e->m_thdn_dec = nullptr;
+                e->m_thdn_out = nullptr;
+            };
+            if (!e->m_thdn_dec || !e->m_thdn_out || !e->m_thdn_dec->configure(static_cast<uint32_t>(hz)) ||
+                !e->m_thdn_out->configure(static_cast<uint32_t>(hz))) {
+                free_meters();
                 print_console("[ERR] usage: thdn <hz, multiple of 100> [seconds 1..30] (busy or bad frequency)\n");
                 return;
             }
@@ -766,10 +841,12 @@ void handle_ascii_command(const char* raw_line) {
             print_console("[THDN] %d Hz, %s: decoder out: %lu frames, level %.1f dBFS, peak %ld, THD+N %.1f dB | "
                           "I2S in: %lu frames (%lu skipped: sample edits), level %.1f dBFS, peak %ld, THD+N %.1f dB\n",
                           hz, done ? "done" : "TIMEOUT (no HQ frames? not streaming?)",
-                          (unsigned long)e->m_thdn_dec.frames(), e->m_thdn_dec.levelDbfs(fs), (long)e->m_thdn_dec.peak(),
-                          e->m_thdn_dec.thdnDb(), (unsigned long)e->m_thdn_out.frames(),
-                          (unsigned long)e->m_thdn_skipped, e->m_thdn_out.levelDbfs(fs), (long)e->m_thdn_out.peak(),
-                          e->m_thdn_out.thdnDb());
+                          (unsigned long)e->m_thdn_dec->frames(), e->m_thdn_dec->levelDbfs(fs), (long)e->m_thdn_dec->peak(),
+                          e->m_thdn_dec->thdnDb(), (unsigned long)e->m_thdn_out->frames(),
+                          (unsigned long)e->m_thdn_skipped, e->m_thdn_out->levelDbfs(fs), (long)e->m_thdn_out->peak(),
+                          e->m_thdn_out->thdnDb());
+            vTaskDelay(pdMS_TO_TICKS(20));  // the SINK task has left the measurement (state reset above)
+            free_meters();
         }
     } else if (strcasecmp(line, "usbvol") == 0) {
         // SOURCE: USB host volume / mute requests (UAC1 feature unit); not applied unless CONFIG_VSAF_APPLY_USB_HOST_VOLUME
@@ -1216,8 +1293,10 @@ void handle_ascii_command(const char* raw_line) {
         if (s_unicast_engine) {
             const system_config_t* cfg = get_system_config();
             if (cfg && cfg->node_role == NODE_ROLE_SOURCE) {
-                s_unicast_engine->sendVolumeCommand(0xFF, vol_u8);
-                print_console("[OK] SOURCE broadcast VOLUME_SET: %d%% (%u/255) to all SINKs\n", pct, vol_u8);
+                // SOURCE: master volume (parameter audio.master_db), same 0..-48 dB curve as the SINK volume
+                const float db = (vol_u8 == 0) ? -96.0f : (static_cast<float>(vol_u8 - 255) / 255.0f) * 48.0f;
+                s_unicast_engine->setMasterGainDb(db);
+                print_console("[OK] SOURCE master volume: %d%% (%.1f dB, all channels)\n", pct, db);
             } else {
                 s_unicast_engine->setVolume(vol_u8);
                 print_console("[OK] SINK Volume set: %d%% (%u/255)\n", pct, vol_u8);

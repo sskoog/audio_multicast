@@ -484,6 +484,17 @@ esp_err_t EspNowBroadcastEngine::start() {
         // 1. SOURCE pipeline tasks (see vsaf_source_pipeline.cpp):
         //    core 0: USB + DSP + encoding (prio 5, below TinyUSB 6 / esp_timer 22 / Wi-Fi 23)
         //    core 1: encoding (prio 5) and the event-driven RF owner (prio 7, preempts the encoder)
+        // 0. Pipeline buffers: allocated once here, before any pipeline task exists (no allocation in the frame loop)
+        if (!m_src) {
+            m_src = static_cast<SrcBuffers*>(heap_caps_calloc(1, sizeof(SrcBuffers), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        }
+        if (!m_src) {
+            ESP_LOGE(TAG, "SOURCE: cannot allocate %u B of pipeline buffers (free internal %u B): pipeline NOT started",
+                     (unsigned)sizeof(SrcBuffers), (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+            m_running.store(false, std::memory_order_release);
+            return ESP_ERR_NO_MEM;
+        }
+        ESP_LOGI(TAG, "SOURCE: pipeline buffers %u B allocated", (unsigned)sizeof(SrcBuffers));
         m_boot_heap_before_tasks = static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
         m_boot_task_ok[0] = xTaskCreatePinnedToCore(srcRfTaskTrampoline, "src_rf", 4096, this, 7, &m_src_rf_task, 1) == pdPASS;
         m_boot_task_ok[1] = xTaskCreatePinnedToCore(srcEncTaskTrampoline, "src_enc1", 5120, this, 5, &m_src_enc_task, 1) == pdPASS;
@@ -1351,16 +1362,32 @@ void EspNowBroadcastEngine::sinkTaskTrampoline(void* arg) {
 void EspNowBroadcastEngine::runSinkLoop() {
     ESP_LOGI(TAG, "SINK Audio Decoder & I2S Task started on Core 0");
 
+    // Playback buffers: one block from internal RAM, allocated here because only a SINK runs this task. As
+    // function statics they took ~16 KB of RAM on the SOURCE too (S3, 32-bit samples), where internal RAM is
+    // the scarce resource (no PSRAM). Allocated once, never freed: zero allocation in the frame loop.
 #if VSAF_SINK_PCM32
-    // One extra sample: drift compensation may play 481 samples from a 480-sample frame
-    static int32_t pcm_mono[480 + 1];
-    static int32_t pcm_stereo[(480 + 1) * 2];
-    constexpr size_t SAMPLE_SIZE = sizeof(int32_t);
+    using pcm_t = int32_t;
 #else
-    static int16_t pcm_mono[480 + 1];
-    static int16_t pcm_stereo[(480 + 1) * 2];
-    constexpr size_t SAMPLE_SIZE = sizeof(int16_t);
+    using pcm_t = int16_t;
 #endif
+    constexpr size_t SAMPLE_SIZE = sizeof(pcm_t);
+    struct SinkBuffers {
+        pcm_t pcm_mono[480 + 1];             // one extra sample: drift / sync may play 481 samples of a frame
+        pcm_t pcm_stereo[(480 + 1) * 2];
+        pcm_t zero_stereo[480 * 2];          // silence for preload / padding
+        pcm_t dac_stage[480 * 2];            // whole-descriptor DMA staging (see dac_push)
+        uint8_t dma_pack[480 * 2 * 3];       // 3-byte packing for 24-bit I2S slots
+    };
+    auto* bufs = static_cast<SinkBuffers*>(heap_caps_calloc(1, sizeof(SinkBuffers), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    if (!bufs) {
+        ESP_LOGE(TAG, "SINK: cannot allocate %u B of playback buffers (free internal %u B)", (unsigned)sizeof(SinkBuffers),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+        vTaskDelete(nullptr);
+        return;
+    }
+    ESP_LOGI(TAG, "SINK: playback buffers %u B allocated", (unsigned)sizeof(SinkBuffers));
+    auto& pcm_mono = bufs->pcm_mono;
+    auto& pcm_stereo = bufs->pcm_stereo;
     // Clock-drift compensation (SINK crystal vs SOURCE): keep the FIFO depth at its level after start-up by
     // playing 481 (insert) or 479 (drop) samples from one frame. Depth filter in Q16 frames (16 fractional bits,
     // so the EMA can settle on any level; with Q8 and a >> 8 step it could not rise within the last frame).
@@ -1377,27 +1404,19 @@ void EspNowBroadcastEngine::runSinkLoop() {
     size_t samples_per_frame = (m_telemetry.sample_rate * 10) / 1000;
     // Scheduled playout (time sync): every frame's first sample is placed on its presentation time
     // t_frame + latency + trim (SOURCE clock) converted with the offset from the control frames
-#if VSAF_SINK_PCM32
-    static int32_t zero_stereo[480 * 2] = {};
-#else
-    static int16_t zero_stereo[480 * 2] = {};
-#endif
+    auto& zero_stereo = bufs->zero_stereo;  // calloc: all zeros
     // DMA staging: the I2S driver with 2 descriptors takes a fresh descriptor on every i2s_channel_write()
     // (its free-buffer queue holds one entry), so a short write leaves zeros at the end of a descriptor and a
     // long one spills into a nearly empty descriptor. All output therefore goes through this buffer and only
     // whole descriptors (getDmaFrameSamples(), 5 ms by default) are written; a dropped / inserted sample then really shifts the
     // timeline by one sample. Queued audio = i2s_written + stage_n - played.
-#if VSAF_SINK_PCM32
-    static int32_t dac_stage[480 * 2];
-#else
-    static int16_t dac_stage[480 * 2];
-#endif
+    auto& dac_stage = bufs->dac_stage;
     size_t   stage_n = 0;        // stereo frames waiting in dac_stage
     uint32_t q_ovf_seen = m_i2s_dac ? m_i2s_dac->getQueueOverflows() : 0;
     // Write / preload whole stereo frames to the I2S DMA in the driver's format: SAMPLE_SIZE bytes per sample, or
     // 3-byte little-endian samples for 24-bit slots (the 32-bit samples hold 24-bit audio in bits 31..8).
     // Returns the stereo frames accepted.
-    static uint8_t dma_pack[480 * 2 * 3];
+    auto& dma_pack = bufs->dma_pack;
     auto dma_out = [&](const void* stereo, size_t frames, bool preload) -> int64_t {
         if (!m_i2s_dac || frames == 0) return 0;
         const void* buf = stereo;
@@ -1870,9 +1889,9 @@ void EspNowBroadcastEngine::runSinkLoop() {
                                 actual_samples == 480 && samples_per_frame == 480;
         if (thdn_frame) {
 #if VSAF_SINK_PCM32
-            m_thdn_dec.addFrame(pcm_mono, 1, 0);  // 24-bit in int32
+            m_thdn_dec->addFrame(pcm_mono, 1, 0);  // 24-bit in int32
 #else
-            m_thdn_dec.addFrame(pcm_mono, 1, 0);  // 16-bit
+            m_thdn_dec->addFrame(pcm_mono, 1, 0);  // 16-bit
 #endif
         }
 
@@ -2141,14 +2160,14 @@ void EspNowBroadcastEngine::runSinkLoop() {
             if (thdn_frame) {
                 if (n_out == 480 && skip_head == 0) {
 #if VSAF_SINK_PCM32
-                    m_thdn_out.addFrame(pcm_stereo, 2, 8);  // 24-bit << 8 in int32 -> 24-bit
+                    m_thdn_out->addFrame(pcm_stereo, 2, 8);  // 24-bit << 8 in int32 -> 24-bit
 #else
-                    m_thdn_out.addFrame(pcm_stereo, 2, 0);
+                    m_thdn_out->addFrame(pcm_stereo, 2, 0);
 #endif
                 } else {
                     m_thdn_skipped++;
                 }
-                if (m_thdn_dec.frames() >= m_thdn_target_frames) {
+                if (m_thdn_dec->frames() >= m_thdn_target_frames) {
                     m_thdn_state.store(2, std::memory_order_release);
                 }
             }

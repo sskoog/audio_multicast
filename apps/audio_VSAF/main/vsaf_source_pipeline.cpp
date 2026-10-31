@@ -182,31 +182,32 @@ void EspNowBroadcastEngine::srcPrepareFrame(SrcFrame& f, uint32_t frame_no, int6
  * `dspload <us>` adds a synthetic busy load to test headroom for future spatial DSP.
  */
 void EspNowBroadcastEngine::srcRunDsp(SrcFrame& f) {
-    static float s_stereo_in_f32[480 * 2];
-    static float s_stereo_hp_f32[480 * 2];
-    static float s_mono_in_f32[480];
-    static float s_sub_8k_f32[80];
+    // Work buffers live in the SOURCE buffer block (allocated in start(), never here)
+    auto& s_stereo_in_f32 = m_src->stereo_in_f32;
+    auto& s_stereo_hp_f32 = m_src->stereo_hp_f32;
+    auto& s_mono_in_f32 = m_src->mono_in_f32;
+    auto& s_sub_8k_f32 = m_src->sub_8k_f32;
 
     const int64_t t_start = esp_timer_get_time();
     const size_t samples = f.samples;
     const uint32_t par = f.frame_no & 1;
 
     if (m_tone_test_mode) {
-        static int16_t tone_mono[480];
+        int16_t* tone_mono = m_src->tone_mono;
         if (m_tone_gen) {
             m_tone_gen->generateFrame(tone_mono, samples);
         } else {
-            memset(tone_mono, 0, sizeof(tone_mono));
+            memset(tone_mono, 0, sizeof(m_src->tone_mono));
         }
         for (size_t i = 0; i < samples; ++i) {
-            m_pcm_stereo_in[i * 2] = tone_mono[i];
-            m_pcm_stereo_in[i * 2 + 1] = tone_mono[i];
+            m_src->pcm_stereo_in[i * 2] = tone_mono[i];
+            m_src->pcm_stereo_in[i * 2 + 1] = tone_mono[i];
         }
     } else {
         size_t bytes_needed = samples * 2 * sizeof(int16_t);
-        size_t bytes_read = usb_audio_read_pcm(m_pcm_stereo_in, bytes_needed);
+        size_t bytes_read = usb_audio_read_pcm(m_src->pcm_stereo_in, bytes_needed);
         if (bytes_read < bytes_needed) {
-            memset(reinterpret_cast<uint8_t*>(m_pcm_stereo_in) + bytes_read, 0, bytes_needed - bytes_read);
+            memset(reinterpret_cast<uint8_t*>(m_src->pcm_stereo_in) + bytes_read, 0, bytes_needed - bytes_read);
         }
     }
     const bool stereo = m_is_stereo || m_tone_test_mode;
@@ -221,14 +222,21 @@ void EspNowBroadcastEngine::srcRunDsp(SrcFrame& f) {
         usb_audio_get_gain(&tgt_l, &tgt_r);
     }
 #endif
+    // Master volume (parameter audio.master_db / console vol): USB audio and the test synth, not caltone
+    {
+        const float mdb = m_master_gain_db.load(std::memory_order_relaxed);
+        const float mg = (mdb <= -96.0f) ? 0.0f : std::pow(10.0f, mdb / 20.0f);
+        tgt_l *= mg;
+        tgt_r *= mg;
+    }
     const float step_l = (tgt_l - s_vol_l) / static_cast<float>(samples);
     const float step_r = (tgt_r - s_vol_r) / static_cast<float>(samples);
 
     for (size_t i = 0; i < samples; ++i) {
         s_vol_l += step_l;
         s_vol_r += step_r;
-        float l = static_cast<float>(m_pcm_stereo_in[i * 2]) * s_vol_l;
-        float r = (stereo ? static_cast<float>(m_pcm_stereo_in[i * 2 + 1]) : static_cast<float>(m_pcm_stereo_in[i * 2])) * s_vol_r;
+        float l = static_cast<float>(m_src->pcm_stereo_in[i * 2]) * s_vol_l;
+        float r = (stereo ? static_cast<float>(m_src->pcm_stereo_in[i * 2 + 1]) : static_cast<float>(m_src->pcm_stereo_in[i * 2])) * s_vol_r;
         s_stereo_in_f32[i * 2] = l;
         s_stereo_in_f32[i * 2 + 1] = r;
         s_mono_in_f32[i] = 0.5f * (l + r);
@@ -238,8 +246,8 @@ void EspNowBroadcastEngine::srcRunDsp(SrcFrame& f) {
     m_hpf_stereo.processStereo(s_stereo_in_f32, s_stereo_hp_f32, static_cast<int>(samples));
     m_sub_decimator.process(s_mono_in_f32, s_sub_8k_f32);
 
-    int16_t* left = m_src_pcm_sat[par][0];
-    int16_t* right = m_src_pcm_sat[par][1];
+    int16_t* left = m_src->pcm_sat[par][0];
+    int16_t* right = m_src->pcm_sat[par][1];
     for (size_t i = 0; i < samples; ++i) {
         left[i] = static_cast<int16_t>(std::clamp(s_stereo_hp_f32[i * 2], -32768.0f, 32767.0f));
         right[i] = static_cast<int16_t>(std::clamp(s_stereo_hp_f32[i * 2 + 1], -32768.0f, 32767.0f));
@@ -251,14 +259,14 @@ void EspNowBroadcastEngine::srcRunDsp(SrcFrame& f) {
         cs.satFrame(left, samples);
         memcpy(right, left, samples * sizeof(int16_t));
     }
-    memcpy(m_src_pcm_sat[par][2], left, samples * sizeof(int16_t));  // Center (placeholder)
-    memcpy(m_src_pcm_sat[par][3], left, samples * sizeof(int16_t));  // Surround L (placeholder)
-    memcpy(m_src_pcm_sat[par][4], right, samples * sizeof(int16_t)); // Surround R (placeholder)
+    memcpy(m_src->pcm_sat[par][2], left, samples * sizeof(int16_t));  // Center (placeholder)
+    memcpy(m_src->pcm_sat[par][3], left, samples * sizeof(int16_t));  // Surround L (placeholder)
+    memcpy(m_src->pcm_sat[par][4], right, samples * sizeof(int16_t)); // Surround R (placeholder)
     if (cal) {
-        m_cal[m_cal_active.load(std::memory_order_acquire)].subFrame(m_src_pcm_sub[par], 80);
+        m_cal[m_cal_active.load(std::memory_order_acquire)].subFrame(m_src->pcm_sub[par], 80);
     } else {
         for (size_t i = 0; i < 80; ++i) {
-            m_src_pcm_sub[par][i] = static_cast<int16_t>(std::clamp(s_sub_8k_f32[i], -32768.0f, 32767.0f));
+            m_src->pcm_sub[par][i] = static_cast<int16_t>(std::clamp(s_sub_8k_f32[i], -32768.0f, 32767.0f));
         }
     }
 
@@ -385,13 +393,13 @@ void EspNowBroadcastEngine::srcDoJob(SrcFrame& f, const SrcJob& job) {
 
     switch (job.type) {
     case SrcJobType::SUB: {
-        vsaf_sub_packet_t& p = m_src_pkt_sub[par];
+        vsaf_sub_packet_t& p = m_src->pkt_sub[par];
         p.type_id = VSAF_TYPE_AUDIO_SUBWOOFER;
         p.packet_flags = make_packet_flags(SUBWOOFER_CHANNEL_ID, 8000, 10000, false);
         p.seq = seq;
         p.t_tx1_us = static_cast<uint32_t>(f.t_grid_us);  // frame time t0(N) on the 10 ms grid: same in all 6 packets
         int64_t t = esp_timer_get_time();
-        m_lc3_codec.encodeFrame(m_src_pcm_sub[par], 80, p.data_t0, LC3_FRAME_OCTETS_SUB, &actual,
+        m_lc3_codec.encodeFrame(m_src->pcm_sub[par], 80, p.data_t0, LC3_FRAME_OCTETS_SUB, &actual,
                                 Codec::Lc3CodecEngine::SUB_ENCODER_INDEX, 1);
         m_acc_enc_sub.add(static_cast<uint32_t>(esp_timer_get_time() - t));
 
@@ -414,14 +422,14 @@ void EspNowBroadcastEngine::srcDoJob(SrcFrame& f, const SrcJob& job) {
         break;
     }
     case SrcJobType::HQ: {
-        vsaf_audio_packet_t& p = m_src_pkt_sat[par][job.ch];
+        vsaf_audio_packet_t& p = m_src->pkt_sat[par][job.ch];
         p.type_id = VSAF_TYPE_AUDIO_SATELLITE;
         p.packet_flags = make_packet_flags(job.ch, m_telemetry.sample_rate, 10000, false);
         p.seq = seq;
         p.t_tx1_us = static_cast<uint32_t>(f.t_grid_us);  // frame time t0(N) on the 10 ms grid: same in all 6 packets
         // Phase 1: shared analysis + HQ frame; the MQ frame of this analysis stays pending for the MQ job
         int64_t t = esp_timer_get_time();
-        m_lc3_codec.encodeFrameDualBegin(m_src_pcm_sat[par][job.ch], p.data_t0, LC3_FRAME_OCTETS_HQ,
+        m_lc3_codec.encodeFrameDualBegin(m_src->pcm_sat[par][job.ch], p.data_t0, LC3_FRAME_OCTETS_HQ,
                                          LC3_FRAME_OCTETS_RED, job.ch);
         m_acc_enc_hq.add(static_cast<uint32_t>(esp_timer_get_time() - t));
         f.hq_done[job.ch].store(1, std::memory_order_release);
@@ -614,12 +622,12 @@ void EspNowBroadcastEngine::runSrcRfLoop() {
                     uint8_t* buf;
                     size_t len;
                     if (pick == SUBWOOFER_CHANNEL_ID) {
-                        vsaf_sub_packet_t& p = m_src_pkt_sub[par];
+                        vsaf_sub_packet_t& p = m_src->pkt_sub[par];
                         if (pick == f->ack_ch) p.packet_flags |= 0x80;
                         buf = reinterpret_cast<uint8_t*>(&p);
                         len = sizeof(p);
                     } else {
-                        vsaf_audio_packet_t& p = m_src_pkt_sat[par][pick];
+                        vsaf_audio_packet_t& p = m_src->pkt_sat[par][pick];
                         if (pick == f->ack_ch) p.packet_flags |= 0x80;
                         buf = reinterpret_cast<uint8_t*>(&p);
                         len = sizeof(p);
@@ -875,6 +883,10 @@ void encBenchTask(void* arg) {
  * @param irq_masked true = interrupts masked during each encode.
  */
 void EspNowBroadcastEngine::runEncoderBench(void (*print)(const char*, ...), int core, bool irq_masked) {
+    if (!m_src) {
+        print("[ENCBENCH] SOURCE pipeline not started (no pipeline buffers)\n");
+        return;
+    }
     auto* ctx = static_cast<EncBenchCtx*>(heap_caps_calloc(1, sizeof(EncBenchCtx) + (480 + 80) * sizeof(int16_t),
                                                            MALLOC_CAP_INTERNAL));
     if (!ctx) {
@@ -883,8 +895,8 @@ void EspNowBroadcastEngine::runEncoderBench(void (*print)(const char*, ...), int
     }
     auto* live = reinterpret_cast<int16_t*>(ctx + 1);
     uint32_t pub = m_src_pub_frame_no.load(std::memory_order_acquire);
-    memcpy(live, m_src_pcm_sat[pub & 1][0], 480 * sizeof(int16_t));
-    memcpy(live + 480, m_src_pcm_sub[pub & 1], 80 * sizeof(int16_t));
+    memcpy(live, m_src->pcm_sat[pub & 1][0], 480 * sizeof(int16_t));
+    memcpy(live + 480, m_src->pcm_sub[pub & 1], 80 * sizeof(int16_t));
     ctx->live_sat = live;
     ctx->live_sub = live + 480;
     ctx->irq_masked = irq_masked;
