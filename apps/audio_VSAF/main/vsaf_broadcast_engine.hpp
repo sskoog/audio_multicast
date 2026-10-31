@@ -18,6 +18,7 @@
 #include <atomic>
 #include <vector>
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace AudioNet {
@@ -244,7 +245,6 @@ public:
     float getPostGainDb() const { return m_post_gain_db; }
 
     // Dynamic Stream Configuration
-    esp_err_t setSampleRate(uint32_t sample_rate_hz);
     esp_err_t setBitDepth(uint8_t bit_depth);
     esp_err_t setFrameLen(uint16_t frame_len_octets);
     esp_err_t setFrameDuration(uint32_t frame_duration_us);
@@ -253,6 +253,14 @@ public:
 
     wifi_phy_mode_t getWifiPhyMode() const { return m_tx_phy_mode; }
     wifi_phy_rate_t getWifiPhyRate() const { return m_tx_phy_rate; }
+    /** @brief PHY rate / channel including a requested change that waits for the next frame boundary. */
+    wifi_phy_rate_t getWifiPhyRateTarget() const {
+        return m_pending_phy.load(std::memory_order_acquire) ? m_pending_phy_rate : m_tx_phy_rate;
+    }
+    uint8_t getWifiChannelTarget() const {
+        const uint8_t ch = m_pending_channel.load(std::memory_order_acquire);
+        return ch ? ch : m_wifi_channel;
+    }
     uint32_t getSampleRate() const { return m_telemetry.sample_rate; }
     uint32_t getFrameDurationUs() const { return m_frame_duration_us; }
     uint16_t getFrameLen() const { return m_octets_per_frame; }
@@ -333,6 +341,19 @@ public:
     float getMasterGainDb() const { return m_master_gain_db.load(std::memory_order_relaxed); }
     /** @brief Master gain currently in effect (dB): follows the target at 100 dB/s (DSP stage, once per frame). */
     float getMasterGainNowDb() const { return m_master_now_db.load(std::memory_order_relaxed); }
+    /** @brief SOURCE master mute (ramped like the master gain; the master gain target is kept). */
+    void setMasterMute(bool mute) { m_master_mute.store(mute, std::memory_order_relaxed); }
+    bool getMasterMute() const { return m_master_mute.load(std::memory_order_relaxed); }
+    /** @brief SOURCE per-channel gain (dB, -96 = mute .. 0), ch 0..4 satellites, 5 sub; ramped 100 dB/s, not on caltone. */
+    void setChannelGainDb(int ch, float db) {
+        if (ch >= 0 && ch < static_cast<int>(MAX_SINK_NODES)) m_ch_gain_db[ch].store(std::clamp(db, -96.0f, 0.0f), std::memory_order_relaxed);
+    }
+    float getChannelGainDb(int ch) const {
+        return (ch >= 0 && ch < static_cast<int>(MAX_SINK_NODES)) ? m_ch_gain_db[ch].load(std::memory_order_relaxed) : 0.0f;
+    }
+    float getChannelGainNowDb(int ch) const {
+        return (ch >= 0 && ch < static_cast<int>(MAX_SINK_NODES)) ? m_ch_now_db[ch].load(std::memory_order_relaxed) : 0.0f;
+    }
 
     // Audio Metering
     int16_t getAudioFrameRMS_int16() { return m_audio_meter.getAudioFrameRMS_int16(); }
@@ -412,6 +433,7 @@ public:
         }
     }
     void resetErrorCounters() {
+        resetReplyCounters();
         m_plc_count.store(0, std::memory_order_relaxed);
         m_fifo_underflows.store(0, std::memory_order_relaxed);
         m_fifo_overflows.store(0, std::memory_order_relaxed);
@@ -425,6 +447,32 @@ public:
     int8_t   getLastRssi() const { return m_last_rssi; }
 
     void updatePerSecondStats();
+
+    // SOURCE: telemetry replies per channel. Each REQ_ACK packet (one channel per frame, round robin) asks that
+    // SINK for a reply; a request still unanswered when the next one to the same channel goes out (60 ms later)
+    // counts as missed: the REQ_ACK audio packet (downlink) or the reply (uplink) was lost. Only while the
+    // channel is ONLINE. Counters: src_rf increments, the RX callback clears the wait flag.
+    uint32_t getReplyRequests(uint8_t ch) const { return ch < MAX_SINK_NODES ? m_reply_req[ch].load(std::memory_order_relaxed) : 0; }
+    uint32_t getRepliesMissed(uint8_t ch) const { return ch < MAX_SINK_NODES ? m_reply_missed[ch].load(std::memory_order_relaxed) : 0; }
+    /** @brief Missed replies in % over the last heartbeat window (NaN: no requests, e.g. offline). */
+    float getReplyLossPct(uint8_t ch) const { return ch < MAX_SINK_NODES ? m_reply_loss_pct[ch].load(std::memory_order_relaxed) : NAN; }
+    /** @brief Close the reply-loss window (heartbeat, 1 Hz). */
+    void updateReplyLossWindow() {
+        for (size_t c = 0; c < MAX_SINK_NODES; ++c) {
+            const uint32_t req = m_reply_req[c].load(std::memory_order_relaxed);
+            const uint32_t mis = m_reply_missed[c].load(std::memory_order_relaxed);
+            const uint32_t dreq = req - m_reply_req_prev[c], dmis = mis - m_reply_missed_prev[c];
+            m_reply_req_prev[c] = req;
+            m_reply_missed_prev[c] = mis;
+            m_reply_loss_pct[c].store(dreq ? std::min(100.0f, 100.0f * dmis / dreq) : NAN, std::memory_order_relaxed);
+        }
+    }
+    void resetReplyCounters() {
+        for (size_t c = 0; c < MAX_SINK_NODES; ++c) {
+            m_reply_missed[c].store(0, std::memory_order_relaxed);
+            m_reply_missed_prev[c] = 0;
+        }
+    }
     void update10HzTimeOffsetStats();
     void getTimeSyncStats(float& out_median_ms, float& out_range_ms, bool& out_has_data) const;
 
@@ -496,6 +544,12 @@ public:
     };
     void getPtpStatus(uint8_t ch, PtpChannelStatus& out);
     void setChannelTrimUs(uint8_t ch, int16_t us);
+    int16_t getChannelTrimUs(uint8_t ch) const { return ch < MAX_SINK_NODES ? m_trim_us[ch].load(std::memory_order_relaxed) : 0; }
+    /** @brief Values of the last control frame (no side effects, unlike getPtpStatus): rtt 0 = no estimate. */
+    uint16_t getCtrlRttUs(uint8_t ch) const { return ch < MAX_SINK_NODES ? m_ctrl_rtt_us[ch].load(std::memory_order_relaxed) : 0; }
+    int32_t getCtrlDriftPpb(uint8_t ch) const { return ch < MAX_SINK_NODES ? m_ctrl_drift_ppb[ch].load(std::memory_order_relaxed) : 0; }
+    /** @brief Last playout error reported by the SINK (us, VSAF_PLAYOUT_ERR_UNKNOWN if none). */
+    int16_t getPlayoutErrUs(uint8_t ch);
     int32_t takeSrcGridDevMax() { return m_src_grid_dev_max.exchange(0, std::memory_order_relaxed); }
     void setPlayoutLatencyUs(uint32_t us) { m_latency_us.store(us, std::memory_order_relaxed); }
     uint32_t getPlayoutLatencyUs() const { return m_latency_us.load(std::memory_order_relaxed); }
@@ -779,6 +833,18 @@ private: // SOURCE: max |tick - grid| (us) since last read
     std::atomic<bool>          m_cal_on{false};
     std::atomic<float>         m_master_gain_db{0.0f};   // target (set)
     std::atomic<float>         m_master_now_db{0.0f};    // in effect (slew-rate limited, DSP stage)
+    std::atomic<bool>          m_master_mute{false};
+    std::atomic<uint32_t>      m_reply_req[MAX_SINK_NODES] = {};     // REQ_ACKs sent to an ONLINE channel
+    std::atomic<uint32_t>      m_reply_missed[MAX_SINK_NODES] = {};  // of those, never answered
+    std::atomic<bool>          m_reply_wait[MAX_SINK_NODES] = {};    // last REQ_ACK not answered yet
+    std::atomic<float>         m_reply_loss_pct[MAX_SINK_NODES] = {};
+    uint32_t                   m_reply_req_prev[MAX_SINK_NODES] = {};     // heartbeat task only
+    uint32_t                   m_reply_missed_prev[MAX_SINK_NODES] = {};
+    std::atomic<float>         m_ch_gain_db[MAX_SINK_NODES] = {};  // per-channel gain target (dB)
+    std::atomic<float>         m_ch_now_db[MAX_SINK_NODES] = {};   // in effect (slew-rate limited, DSP stage)
+    float                      m_ch_lin_prev[MAX_SINK_NODES] = {1, 1, 1, 1, 1, 1};  // DSP stage only (ramp start)
+    std::atomic<uint16_t>      m_ctrl_rtt_us[MAX_SINK_NODES] = {};
+    std::atomic<int32_t>       m_ctrl_drift_ppb[MAX_SINK_NODES] = {};
     bool                       m_is_stereo;
 
     wifi_phy_mode_t            m_tx_phy_mode;

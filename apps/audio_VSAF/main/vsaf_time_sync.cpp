@@ -201,6 +201,8 @@ void EspNowBroadcastEngine::srcBuildControl(vsaf_control_t& out) {
         out.drift_ppb[ch] = ok ? drift : 0;
         out.rtt_us[ch] = ok ? rtt : 0;
         out.trim_us[ch] = m_trim_us[ch].load(std::memory_order_relaxed);
+        m_ctrl_rtt_us[ch].store(out.rtt_us[ch], std::memory_order_relaxed);
+        m_ctrl_drift_ppb[ch].store(out.drift_ppb[ch], std::memory_order_relaxed);
     }
     out.crc16 = calc_crc16(reinterpret_cast<const uint8_t*>(&out), sizeof(out) - 4);
 }
@@ -222,6 +224,16 @@ void EspNowBroadcastEngine::getPtpStatus(uint8_t ch, PtpChannelStatus& out) {
     out.playout_err_us = c.playout_err_us;
     portEXIT_CRITICAL(&m_ptp_mux);
     out.trim_us = m_trim_us[ch].load(std::memory_order_relaxed);
+}
+
+int16_t EspNowBroadcastEngine::getPlayoutErrUs(uint8_t ch) {
+    if (ch >= MAX_SINK_NODES) {
+        return VSAF_PLAYOUT_ERR_UNKNOWN;
+    }
+    portENTER_CRITICAL(&m_ptp_mux);
+    const int16_t e = m_ptp[ch].playout_err_us;
+    portEXIT_CRITICAL(&m_ptp_mux);
+    return e;
 }
 
 void EspNowBroadcastEngine::setChannelTrimUs(uint8_t ch, int16_t us) {

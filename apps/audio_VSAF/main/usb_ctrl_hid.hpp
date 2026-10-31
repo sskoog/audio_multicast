@@ -11,7 +11,7 @@
  * Report 2, input (SOURCE -> host), response:
  *   [0] op   [1] tag   [2] status (0 ok, 1 clamped, 2 read_only, 3 unknown, 4 invalid, 5 bad_op)
  *   GET / SET:  [3..4] id, [5..8] f32 value (applied)
- *   DESC:       [3..4] index, [5] count, [6..7] id, [8] type (0 int, 1 float, 2 enum), [9] access (0 ro, 1 rw),
+ *   DESC:       [3..4] index, [5] count, [6..7] id, [8] type (0 int, 1 float, 2 enum), [9] access (0 ro, 1 rw, 2 action),
  *               [10..13] f32 min, [14..17] f32 max, [18..21] f32 default, [22] enum count,
  *               [23..46] name (24 bytes, NUL padded), [47..54] unit (8 bytes UTF-8, NUL padded), [55] decimals
  *   ENUM:       [3..4] id, [5] index, [6..29] label (24 bytes, NUL padded)

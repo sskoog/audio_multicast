@@ -290,6 +290,7 @@ void SystemDiagnostics::tick() {
             snprintf(mid_block, sizeof(mid_block),
                      "  %-6.6s    %4.4s  %4.4s  %4.4s  %5.5s ",
                      input_str, tx_pkts_str, ack_pct_str, ack_fails_str, tx_tot_str);
+            m_unicast_engine.updateReplyLossWindow();
             AudioNet::Params::publishStatus(snap);
         } else {
             // SINK specifics: Target Channel string

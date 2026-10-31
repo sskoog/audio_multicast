@@ -349,13 +349,13 @@ void handle_ascii_command(const char* raw_line) {
         print_console("--- AUDIO & CODEC CONFIGURATION ---\n"
                       "  tone [on|off]              - Toggle internal test tone generator\n"
                       "  mode mono|stereo|surround  - Switch audio channel generation mode\n"
-                      "  sublp <20..500>            - Set Subwoofer LR low-pass cutoff (Hz)\n"
-                      "  sr <16k|24k|32k|48k|96k>   - Set audio sample rate\n");
+                      "  sublp <20..500>            - Set Subwoofer LR low-pass cutoff (Hz)\n");
         vTaskDelay(pdMS_TO_TICKS(5));
 
         print_console("--- VOLUME & SYSTEM CONTROL ---\n"
                       "  vol <0..100> / voldb <-96..0> - Set volume (%% or dB)\n"
-                      "  volu8 <0..255> / volch <c> <v> - Set raw uint8 volume\n"
+                      "  volu8 <0..255>             - Set raw uint8 volume\n"
+                      "  volch <ch> <dB>            - SOURCE: channel gain (-96..0 dB, ramped)\n"
                       "  postgain <-48..12>         - Set SINK software post-gain (dB)\n"
                       "  mute / unmute              - Mute / Unmute audio (slew-limited)\n"
                       "  gain <0|3|6|9|12|15>       - Set I2S DAC hardware gain (dB)\n"
@@ -499,7 +499,7 @@ void handle_ascii_command(const char* raw_line) {
             P::formatValue(d, d.def, defs, sizeof(defs));
             const char* type = d.type == P::Type::INT ? "int" : (d.type == P::Type::FLOAT ? "float" : "enum");
             print_console("[PARAM] id=0x%04X name=%s value=%s unit=%s type=%s access=%s min=%s max=%s def=%s\n",
-                          d.id, d.name, vs, d.unit[0] ? d.unit : "-", type, d.access == P::Access::RW ? "rw" : "ro",
+                          d.id, d.name, vs, d.unit[0] ? d.unit : "-", type, d.access == P::Access::RW ? "rw" : (d.access == P::Access::ACTION ? "act" : "ro"),
                           mins, maxs, defs);
         };
         if (n < 1 || strcasecmp(verb, "list") == 0) {
@@ -1020,19 +1020,6 @@ void handle_ascii_command(const char* raw_line) {
             s_unicast_engine->setFrameLen(static_cast<uint16_t>(oct));
             print_console("[OK] LC3 Frame Length set to %d octets\n", oct);
         }
-    } else if (strncasecmp(line, "sr ", 3) == 0) {
-        char sr_str[16] = {0};
-        if (sscanf(line + 3, "%15s", sr_str) == 1 && s_unicast_engine) {
-            uint32_t sr = 48000;
-            if (strcasecmp(sr_str, "8k") == 0 || strcasecmp(sr_str, "8000") == 0) sr = 8000;
-            else if (strcasecmp(sr_str, "16k") == 0 || strcasecmp(sr_str, "16000") == 0) sr = 16000;
-            else if (strcasecmp(sr_str, "24k") == 0 || strcasecmp(sr_str, "24000") == 0) sr = 24000;
-            else if (strcasecmp(sr_str, "32k") == 0 || strcasecmp(sr_str, "32000") == 0) sr = 32000;
-            else if (strcasecmp(sr_str, "48k") == 0 || strcasecmp(sr_str, "48000") == 0) sr = 48000;
-            else if (strcasecmp(sr_str, "96k") == 0 || strcasecmp(sr_str, "96000") == 0) sr = 96000;
-            s_unicast_engine->setSampleRate(sr);
-            print_console("[OK] Sample rate switched to %lu Hz\n", (unsigned long)sr);
-        }
     } else if (strcasecmp(line, "clear") == 0 || strcasecmp(line, "cls") == 0) {
         if (s_unicast_engine) {
             s_unicast_engine->resetStreamingCounters();
@@ -1310,8 +1297,9 @@ void handle_ascii_command(const char* raw_line) {
         if (s_unicast_engine) {
             const system_config_t* cfg = get_system_config();
             if (cfg && cfg->node_role == NODE_ROLE_SOURCE) {
-                s_unicast_engine->sendVolumeCommand(0xFF, vol_u8);
-                print_console("[OK] SOURCE broadcast VOLUME_SET: %+5.1fdB (%u/255) to all SINKs\n", db, vol_u8);
+                const float mdb = std::clamp(static_cast<float>(atof(line + 6)), -96.0f, 0.0f);
+                s_unicast_engine->setMasterGainDb(mdb);
+                print_console("[OK] SOURCE master volume: %.1f dB (all channels)\n", mdb);
             } else {
                 s_unicast_engine->setVolume(vol_u8);
                 print_console("[OK] SINK Volume set: %+5.1fdB (%u/255)\n", db, vol_u8);
@@ -1325,27 +1313,31 @@ void handle_ascii_command(const char* raw_line) {
         if (s_unicast_engine) {
             const system_config_t* cfg = get_system_config();
             if (cfg && cfg->node_role == NODE_ROLE_SOURCE) {
-                s_unicast_engine->sendVolumeCommand(0xFF, vol_u8);
-                print_console("[OK] SOURCE broadcast raw VOLUME_SET: %u/255\n", vol_u8);
+                const float db = (vol_u8 == 0) ? -96.0f : (static_cast<float>(vol_u8 - 255) / 255.0f) * 48.0f;
+                s_unicast_engine->setMasterGainDb(db);
+                print_console("[OK] SOURCE master volume: %u/255 (%.1f dB, all channels)\n", vol_u8, db);
             } else {
                 s_unicast_engine->setVolume(vol_u8);
                 print_console("[OK] SINK raw Volume set: %u/255\n", vol_u8);
             }
         }
     } else if (strncasecmp(line, "volch ", 6) == 0) {
-        int ch = 0, u8_val = 255;
-        if (sscanf(line + 6, "%d %d", &ch, &u8_val) == 2 && s_unicast_engine) {
-            if (u8_val < 0) u8_val = 0;
-            if (u8_val > 255) u8_val = 255;
-            s_unicast_engine->sendVolumeCommand(static_cast<uint8_t>(ch), static_cast<uint8_t>(u8_val));
-            print_console("[OK] SOURCE sent VOLUME_SET to Channel %d: %u/255\n", ch, u8_val);
+        // SOURCE: per-channel gain (parameter audio.chN_db): volch <ch 0..5> <dB -96..0>, ramped 100 dB/s
+        int ch = 0;
+        float db = 0.0f;
+        if (sscanf(line + 6, "%d %f", &ch, &db) == 2 && s_unicast_engine && ch >= 0 && ch < 6) {
+            db = std::clamp(db, -96.0f, 0.0f);
+            s_unicast_engine->setChannelGainDb(ch, db);
+            print_console("[OK] SOURCE channel %d gain: %.1f dB\n", ch, db);
+        } else {
+            print_console("[ERR] usage: volch <ch 0..5> <dB -96..0>\n");
         }
     } else if (strcasecmp(line, "mute") == 0) {
         if (s_unicast_engine) {
             const system_config_t* cfg = get_system_config();
             if (cfg && cfg->node_role == NODE_ROLE_SOURCE) {
-                s_unicast_engine->sendVolumeCommand(0xFF, 0);
-                print_console("[OK] SOURCE broadcast MUTE (0/255) to all SINKs\n");
+                s_unicast_engine->setMasterMute(true);
+                print_console("[OK] SOURCE master MUTE (ramped; 'unmute' restores %.1f dB)\n", s_unicast_engine->getMasterGainDb());
             } else {
                 s_unicast_engine->setVolume(0);
                 print_console("[OK] SINK Muted\n");
@@ -1355,8 +1347,8 @@ void handle_ascii_command(const char* raw_line) {
         if (s_unicast_engine) {
             const system_config_t* cfg = get_system_config();
             if (cfg && cfg->node_role == NODE_ROLE_SOURCE) {
-                s_unicast_engine->sendVolumeCommand(0xFF, 255);
-                print_console("[OK] SOURCE broadcast UNMUTE (255/255 = 0.0dB) to all SINKs\n");
+                s_unicast_engine->setMasterMute(false);
+                print_console("[OK] SOURCE master unmuted (%.1f dB)\n", s_unicast_engine->getMasterGainDb());
             } else {
                 s_unicast_engine->setVolume(255);
                 print_console("[OK] SINK Unmuted (255/255 = 0.0dB)\n");

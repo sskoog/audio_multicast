@@ -424,10 +424,10 @@ How each node reads its console:
 | Command | Target | Description |
 | :--- | :--- | :--- |
 | `vol <0..100>` | SOURCE / SINK | SOURCE: master volume for all channels (parameter `audio.master_db`, section 7.5), 0..-48 dB curve, 0 = mute. SINK: local volume of that SINK, ramped at 100 dB/s. Before 2026-10-29 `vol` and `mute` had no effect on either role. |
-| `voldb <-96..0>` | SOURCE / SINK | Set volume directly in decibels. |
-| `volu8 <0..255>` | SOURCE / SINK | Set raw 8-bit volume level. |
-| `volch <ch> <0..255>` | SOURCE | Set volume for one channel (0: Left, 1: Right, 2: Center, 3: LSurr, 4: RSurr, 5: Sub). |
-| `mute` / `unmute` | Both | Mute / unmute (SINK: ramped at 100 dB/s). |
+| `voldb <-96..0>` | SOURCE / SINK | Set volume directly in decibels (SOURCE: master volume). |
+| `volu8 <0..255>` | SOURCE / SINK | Set raw 8-bit volume level (SOURCE: master volume, same curve as `vol`). |
+| `volch <ch> <dB>` | SOURCE | Gain of one channel on the SOURCE, -96..0 dB (0: Left, 1: Right, 2: Center, 3: LSurr, 4: RSurr, 5: Sub; parameter `audio.chN_db`), ramped at 100 dB/s, not applied to `caltone`. |
+| `mute` / `unmute` | Both | Mute / unmute, ramped at 100 dB/s (SOURCE: master mute, parameter `audio.mute`; the master volume is kept). Before 2026-10-31 the SOURCE `mute`, `unmute`, `voldb`, `volu8` and `volch` had no effect. |
 | `postgain <dB>` | SINK | Software post-gain (PCM5102A calibration, see AGENTS.md). |
 | `peer list` / `peers` | SOURCE | Registered SINK peers, online status, RTT and telemetry. |
 | `start` / `play` / `cast` | SOURCE | Begin broadcast (`CAST`). |
@@ -435,7 +435,6 @@ How each node reads its console:
 | `synth [on/off]` / `tone` | SOURCE | Internal test synthesizer instead of USB audio. |
 | `caltone pink [dBFS]` / `caltone sine [dBFS] [sat Hz] [sub Hz]` / `caltone off` | SOURCE | Calibration signal for SPL level matching, replacing the program input and bypassing the crossover: pink noise 500-2000 Hz on the satellites and 40-100 Hz on the sub, or sines (default 1 kHz / 63 Hz), all at the same RMS level (default -20, max -6 dBFS). Not affected by the master volume. Method and results in AGENTS.md. |
 | `usbvol` | SOURCE | USB host volume / mute requests (UAC1 feature unit): count, master / L / R dB, whether they are applied. Windows sends its volume slider as these requests and does not scale the PCM; the SOURCE applies the lower of master and channel volume (`CONFIG_VSAF_APPLY_USB_HOST_VOLUME`). |
-| `sr <8k..48k>` | SOURCE | Satellite sample rate. |
 | `scan` / `survey` | SOURCE | Passive channel survey 1..13 (refused while casting). |
 | `wifich <1..13>` / `channel` | SOURCE / SINK | Set Wi-Fi channel (SOURCE: applied at the next frame boundary). |
 | `phy <mode>` | SOURCE | TX PHY rate (default HT20 MCS3), applied at the next frame boundary. |
@@ -481,8 +480,10 @@ How each node reads its console:
 
 One transport-independent table names, describes, reads and writes runtime parameters: the console uses it today, a USB HID (WebHID) interface or a control node can use the same calls later.
 
-- Every parameter has a **stable numeric ID** (high byte = group: 0x01 system, 0x02 SOURCE pipeline, 0x03 radio, 0x04 audio status, 0x10 controls; IDs are never reused), a dotted name, a unit, a type (int / float / enum), access (ro / rw), min, max and default.
-- **Read-only values** come from a snapshot the 1 s heartbeat publishes (with a sequence number), so a read never resets a counter.
+- Every parameter has a **stable numeric ID** (high byte = group: 0x01 system / network, 0x02 SOURCE pipeline, 0x03 radio status, 0x04 audio / USB status, 0x10 audio / source / radio controls, 0x11 time sync, 0x12 calibration signal, 0x1F tests; IDs are never reused), a dotted name, a unit, a type (int / float / enum), access, min, max, default and display decimals.
+- **Access**: `ro` (status), `rw` (setting) or `act` (action: a write runs it, e.g. reboot; a read returns 0).
+- The table covers every SOURCE console command that sets or reports a value (99 parameters). Text-only diagnostics (`timing`, `tasks`, `ptp`, `peer list`, `txstat`, `mem`, `log`, `encbench`, `scan`) stay console-only; SINK-only commands (`postgain`, `ch`, `driftcorr`, `syncoff`, I2S tests) are not in it. The runtime sample-rate switch (`sr`, ID 0x1006) was removed on 2026-10-31: the pipeline only supports 48 kHz satellites, other rates gave corrupt audio. `octets` and `peer enable / disable` have no effect in VSAF 3.x (every channel is broadcast and polled for telemetry in turn) and are left out (IDs 0x0120..0x0125 are retired).
+- **Read-only values** come from a snapshot the 1 s heartbeat publishes (with a sequence number), from counters, or from values cached when the 100 ms control frame is built, so a read never resets a counter or changes state.
 - **Writes** go through the same engine calls as the console commands and return the value actually applied, with a status `ok` / `clamped` / `read_only` / `unknown` / `invalid`.
 - Replies are single tagged lines, e.g. `[PARAM] id=0x1000 name=audio.master_db set=-6 applied=-6.00 status=ok`.
 
@@ -492,21 +493,38 @@ One transport-independent table names, describes, reads and writes runtime param
 | `param get <name\|id>` | One parameter (`audio.master_db`, `0x1000` or `4096`) |
 | `param set <name\|id> <value>` | Write; enum values by label or index (`param set source.mode synth`) |
 
-| ID | Name | Access | Unit | Meaning |
+`N` = channel 0..5 (L, R, C, LS, RS, Sub). `param list` prints the full table with ranges.
+
+| ID | Name | Access | Unit | Meaning (console equivalent) |
 | :--- | :--- | :--- | :--- | :--- |
-| 0x0100 | `sys.cpu_pct` | ro | % | CPU load (heartbeat CPU %) |
-| 0x0101 | `sys.temp_c` | ro | C | On-chip temperature |
-| 0x0110 | `net.peers_online` | ro | | SINKs online |
-| 0x0111 | `net.peers_mask` | ro | | Online channels, bit c = channel c |
-| 0x0200 | `dsp.time_ms` | ro | ms | DSP stage per frame |
-| 0x0201 | `enc.hq_ms` | ro | ms | HQ + sub encode per frame, both cores |
-| 0x0202 | `enc.mq_ms` | ro | ms | MQ encode per frame, both cores |
-| 0x0300 | `rf.tx_end_ms` | ro | ms | Last packet on air after the frame tick |
-| 0x0301 | `rf.tx_pkts_s` | ro | 1/s | Packets sent per second |
+| 0x0100 / 0x0101 | `sys.cpu_pct`, `sys.temp_c` | ro | %, °C | CPU load, chip temperature (heartbeat) |
+| 0x0102..0x0105 | `sys.uptime_s`, `sys.heap_free_kb`, `sys.heap_min_kb`, `sys.heap_block_kb` | ro | s, KB | Uptime, internal heap free / lowest / largest block (`mem`) |
+| 0x01F0..0x01F2 | `sys.clear_counters`, `sys.reboot`, `sys.bootloader` | act | | `clear`, `reboot`, `bootloader` (reboots run 300 ms after the reply) |
+| 0x0110 / 0x0111 | `net.peers_online`, `net.peers_mask` | ro | | SINKs online, bit c = channel c |
+| 0x0130+N | `net.chN_rssi_dbm` | ro | dBm | Uplink RSSI of the channel's last reply (follows the SINK's TX power), -127 = offline |
+| 0x0140+N | `net.chN_dl_rssi_dbm` | ro | dBm | Downlink RSSI the SINK measured on its REQ_ACK packet, from the reply (follows the SOURCE TX power) |
+| 0x0150+N / 0x0160+N | `net.chN_reply_loss_pct`, `net.chN_replies_missed` | ro | %, | Telemetry replies missing in the last second / since boot or `clear`: a REQ_ACK still unanswered when the next one to that channel goes out (60 ms later), i.e. that audio packet or its reply was lost. Only while the channel is online. About 16.7 requests per second per channel, so one miss = 6 % |
+| 0x0200..0x0202 | `dsp.time_ms`, `enc.hq_ms`, `enc.mq_ms` | ro | ms | Stage times per frame (`timing`) |
+| 0x0203 / 0x0204 | `src.overruns`, `src.deadline_skips` | ro | | Frames lost / packets not sent in the last timing window (`timing`) |
+| 0x0210 / 0x0211 | `debug.dsp_load_us`, `debug.enc_cores` | rw | us | `dspload`, `enccores` |
+| 0x0300..0x0302 | `rf.tx_end_ms`, `rf.tx_pkts_s`, `rf.tx_end_max_ms` | ro | ms, 1/s | TX end (avg, worst in window), packets per second |
+| 0x0303..0x030A | `rf.recoveries`, `rf.wifi_restarts`, `rf.wedge_reboots`, `rf.send_errors`, `rf.no_mem_errors`, `rf.txdone_timeouts`, `rf.status_fails`, `rf.deadline_drops` | ro | | `txstat` counters since boot |
+| 0x1002..0x1004 | `rf.channel`, `rf.phy`, `rf.tx_power_dbm` | rw | , enum, dBm | `wifich`, `phy` (ht0..ht3, ofdm6..ofdm54), `txpower` as an enum of the radio's 11 levels (2, 5, 7, 8.5, 11, 13, 14, 15, 16.5, 18, 20 dBm; a setting between two levels transmits at the lower one). Channel and PHY read back the requested value at once; the radio switches at the next frame boundary |
+| 0x1F00 | `test.txfault` | act | once / wifi / reboot | `txfault`, `txfault wifi`, `txfault reboot` |
 | 0x0400 | `audio.rms_dbfs` | ro | dBFS | Input RMS, -100 = silent / off |
-| 0x1000 | `audio.master_db` | rw | dB | Master volume -96..0 (-96 = mute), SOURCE DSP stage, ramped |
+| 0x0410..0x0412 | `usb.streaming`, `usb.host_vol_db`, `usb.host_mute` | ro | , dB | USB host streaming, volume as applied, mute (`usbvol`) |
+| 0x1000 | `audio.master_db` | rw | dB | Master volume -96..0 (`vol`, `voldb`); read = gain in effect (ramped) |
+| 0x1005 | `audio.mute` | rw | off / on | `mute` / `unmute` |
+| 0x1010+N | `audio.chN_db` | rw | dB | Channel gain on the SOURCE (`volch`), ramped |
 | 0x1001 | `source.mode` | rw | enum | `pause` (IDLE) / `cast` (USB audio) / `synth` (test synth) |
-| 0x1002 | `rf.channel` | rw | | Wi-Fi channel 1..13, applied at the next frame boundary |
+| 0x1100 | `sync.latency_ms` | rw | ms | `latency` |
+| 0x1110+N | `sync.chN_trim_us` | rw | us | `trim` |
+| 0x1120+N / 0x1130+N / 0x1140+N | `sync.chN_rtt_us`, `sync.chN_drift_ppm`, `sync.chN_err_us` | ro | us, ppm, us | Best RTT, SINK clock drift, playout error reported by the SINK (`ptp`) |
+| 0x1200..0x1203 | `cal.mode`, `cal.level_dbfs`, `cal.sat_hz`, `cal.sub_hz` | rw | enum, dBFS, Hz | `caltone` (off / pink / sine, level, sine frequencies) |
+
+#### USB HID and the WebHID page
+
+The SOURCE (S3) exposes the same table as a vendor USB HID interface (`usb_ctrl_hid.hpp`, usage page 0xFF00, 63-byte reports): request ops GET / SET / DESC / ENUM / STATUS, and it pushes values on its own (rw parameters at 10 Hz, all parameters on every new 1 s snapshot). `tools/webui/index.html` builds its UI from the table: one section per name prefix, a channel matrix for the `chN_` parameters, feedback sliders (knob = set, filled track = value in effect), status cards, and buttons with confirmation for actions. Run `python tools/webui/serve.py` and open `http://localhost:8000` in Chrome or Edge (WebHID needs a secure context, i.e. localhost or https).
 
 ### 7.6 SINK audio and I2S diagnostics
 
@@ -832,4 +850,4 @@ Also found: SINK `vol` / `mute` never worked (fixed: gain ramps to the target); 
 - Soak with the amplifiers on (supply / switching noise vs. radio).
 - Optional: hardware RX timestamps (`rx_ctrl->timestamp` + learned offset) for t2 / t4 to cut callback jitter.
 - Spatial upmix on the SOURCE: about half of each core is now free for it; `dspload` can rehearse the extra load.
-- Optional RAM: limit `liblc3_dual` to 10 ms frames (~8-12 KB of tables) and, if the runtime `sr` switch can go, to 48 kHz + 8 kHz.
+- Optional RAM: limit `liblc3_dual` to 10 ms frames (~8-12 KB of tables) and, now that the runtime `sr` switch is gone, to 48 kHz + 8 kHz.

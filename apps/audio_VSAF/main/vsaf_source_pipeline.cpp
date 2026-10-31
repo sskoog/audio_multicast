@@ -66,7 +66,13 @@ void EspNowBroadcastEngine::runSrcDspLoop() {
         }
         if (m_state.load(std::memory_order_acquire) != NetworkState::CAST) {
             // No audio while paused: the master gain may take its target at once (no ramp needed)
-            m_master_now_db.store(m_master_gain_db.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            m_master_now_db.store(m_master_mute.load(std::memory_order_relaxed) ? -96.0f
+                                  : m_master_gain_db.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            for (size_t c = 0; c < MAX_SINK_NODES; ++c) {
+                const float g = m_ch_gain_db[c].load(std::memory_order_relaxed);
+                m_ch_now_db[c].store(g, std::memory_order_relaxed);
+                m_ch_lin_prev[c] = g <= -96.0f ? 0.0f : std::pow(10.0f, g / 20.0f);
+            }
             continue;
         }
 
@@ -174,6 +180,27 @@ void EspNowBroadcastEngine::srcPrepareFrame(SrcFrame& f, uint32_t frame_no, int6
     f.tx_order[w] = f.ack_ch;
 }
 
+namespace {
+/**
+ * @brief One frame of the 100 dB/s gain slew (1 dB per 10 ms frame), as on the SINK output gain.
+ * @param cur Gain in effect (dB, -96 = mute).
+ * @param tgt Target gain (dB, -96 = mute).
+ * @return New gain in effect (dB): towards mute it drops to -96 below -60 dB, from mute it starts at -60 dB.
+ */
+inline float slewGainDb(float cur, float tgt) {
+    if (tgt <= -96.0f && cur <= -60.0f) {
+        return tgt;
+    }
+    if (cur < tgt) {
+        return std::min(tgt, (cur <= -96.0f ? -60.0f : cur) + 1.0f);
+    }
+    if (cur > tgt) {
+        return std::max(tgt, cur - 1.0f);
+    }
+    return cur;
+}
+}  // namespace
+
 /**
  * @brief USB/tone input and DSP for one frame (core 0). Produces the 5 satellite PCM streams and the
  * 8 kHz sub stream for this frame's parity buffer.
@@ -229,15 +256,9 @@ void EspNowBroadcastEngine::srcRunDsp(SrcFrame& f) {
     // 10 ms frame (100 dB/s); towards mute it drops to silence below -60 dB, from mute it starts at -60 dB.
     // The per-sample ramp below smooths each 1 dB step over the frame.
     {
-        const float tgt = m_master_gain_db.load(std::memory_order_relaxed);
-        float cur = m_master_now_db.load(std::memory_order_relaxed);
-        if (tgt <= -96.0f && cur <= -60.0f) {
-            cur = tgt;
-        } else if (cur < tgt) {
-            cur = std::min(tgt, (cur <= -96.0f ? -60.0f : cur) + 1.0f);
-        } else if (cur > tgt) {
-            cur = std::max(tgt, cur - 1.0f);
-        }
+        const float tgt = m_master_mute.load(std::memory_order_relaxed) ? -96.0f
+                          : m_master_gain_db.load(std::memory_order_relaxed);
+        const float cur = slewGainDb(m_master_now_db.load(std::memory_order_relaxed), tgt);
         m_master_now_db.store(cur, std::memory_order_relaxed);
         const float mg = (cur <= -96.0f) ? 0.0f : std::pow(10.0f, cur / 20.0f);
         tgt_l *= mg;
@@ -289,7 +310,29 @@ void EspNowBroadcastEngine::srcRunDsp(SrcFrame& f) {
         esp_rom_delay_us(extra); // synthetic DSP load (headroom test)
     }
 
-    m_audio_meter.pushFramePcm(left, samples, 1);
+    m_audio_meter.pushFramePcm(left, samples, 1);  // input level, before the per-channel gains
+
+    // Per-channel gains (audio.chN_db / console volch), same slew limit as the master volume; the calibration
+    // signal bypasses them (its level is set by caltone). Linear ramp over the frame, in place on the PCM.
+    for (size_t c = 0; c < MAX_SINK_NODES; ++c) {
+        const float db = slewGainDb(m_ch_now_db[c].load(std::memory_order_relaxed),
+                                    m_ch_gain_db[c].load(std::memory_order_relaxed));
+        m_ch_now_db[c].store(db, std::memory_order_relaxed);
+        const float g1 = db <= -96.0f ? 0.0f : std::pow(10.0f, db / 20.0f);
+        const float g0 = m_ch_lin_prev[c];
+        m_ch_lin_prev[c] = g1;
+        if (cal || (g0 == 1.0f && g1 == 1.0f)) {
+            continue;
+        }
+        int16_t* pcm = (c < 5) ? m_src->pcm_sat[par][c] : m_src->pcm_sub[par];
+        const size_t n = (c < 5) ? samples : 80;
+        const float step = (g1 - g0) / static_cast<float>(n);
+        float g = g0;
+        for (size_t i = 0; i < n; ++i) {
+            g += step;
+            pcm[i] = static_cast<int16_t>(std::clamp(static_cast<float>(pcm[i]) * g, -32768.0f, 32767.0f));
+        }
+    }
     m_acc_dsp.add(static_cast<uint32_t>(esp_timer_get_time() - t_start));
 }
 
@@ -670,6 +713,15 @@ void EspNowBroadcastEngine::runSrcRfLoop() {
                             m_acc_tx_gap.add(static_cast<uint32_t>(ts - t_last_done));
                         }
                         m_peers[pick].packets_sent++;
+                        if (pick == f->ack_ch) {
+                            // Telemetry reply bookkeeping: the previous request to this channel still unanswered?
+                            const bool online = m_peers[pick].status == PeerStatus::ONLINE;
+                            const bool waiting = m_reply_wait[pick].exchange(online, std::memory_order_relaxed);
+                            if (online) {
+                                m_reply_req[pick].fetch_add(1, std::memory_order_relaxed);
+                                if (waiting) m_reply_missed[pick].fetch_add(1, std::memory_order_relaxed);
+                            }
+                        }
                         m_tx_packets_this_sec++;
                         m_tx_packets_total++;
                         m_tx_packets_sec++;

@@ -1,6 +1,8 @@
 /**
  * @file vsaf_params.cpp
- * @brief VSAF parameter table (see vsaf_params.hpp).
+ * @brief VSAF parameter table (see vsaf_params.hpp). Covers the SOURCE console commands that set or report a
+ * value; text-only diagnostics (help, log, tasks, timing / ptp / peer / txstat / mem dumps, encbench, scan)
+ * stay console-only. SINK-only commands (postgain, ch, driftcorr, syncoff, I2S tests...) are not in this table.
  */
 #include "vsaf_params.hpp"
 
@@ -11,7 +13,11 @@
 #include <cstring>
 #include <strings.h>
 
+#include "esp_heap_caps.h"
+#include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "usb_audio.hpp"
 #include "vsaf_broadcast_engine.hpp"
 
 namespace AudioNet {
@@ -25,55 +31,252 @@ StatusSnapshot s_status = {};
 
 const char* const kModeNames[] = {"pause", "cast", "synth"};
 enum Mode : uint8_t { MODE_PAUSE = 0, MODE_CAST = 1, MODE_SYNTH = 2 };
+const char* const kOffOn[] = {"off", "on"};
+const char* const kNoYes[] = {"no", "yes"};
+const char* const kPhyNames[] = {"ht0", "ht1", "ht2", "ht3", "ofdm6", "ofdm9", "ofdm12", "ofdm18",
+                                 "ofdm24", "ofdm36", "ofdm48", "ofdm54"};
+const wifi_phy_rate_t kPhyRates[] = {WIFI_PHY_RATE_MCS0_LGI, WIFI_PHY_RATE_MCS1_LGI, WIFI_PHY_RATE_MCS2_LGI,
+                                     WIFI_PHY_RATE_MCS3_LGI, WIFI_PHY_RATE_6M, WIFI_PHY_RATE_9M, WIFI_PHY_RATE_12M,
+                                     WIFI_PHY_RATE_18M, WIFI_PHY_RATE_24M, WIFI_PHY_RATE_36M, WIFI_PHY_RATE_48M,
+                                     WIFI_PHY_RATE_54M};
+// esp_wifi_set_max_tx_power(): the radio only has these levels (esp_wifi.h mapping table, 0.25 dBm units);
+// a setting between two levels transmits at the lower one
+const int8_t kTxPowerQdbm[] = {8, 20, 28, 34, 44, 52, 56, 60, 66, 72, 80};
+const char* const kTxPowerNames[] = {"2", "5", "7", "8.5", "11", "13", "14", "15", "16.5", "18", "20"};
+const char* const kTxFaultNames[] = {"once", "wifi", "reboot"};
+const char* const kCalNames[] = {"off", "pink", "sine"};
 
-// IDs: high byte = group (0x01 system, 0x02 SOURCE pipeline, 0x03 radio, 0x04 audio status, 0x10 controls).
-// Never reuse an ID for a different meaning; add new parameters with new IDs.
-constexpr uint16_t ID_CPU_PCT = 0x0100;
-constexpr uint16_t ID_TEMP_C = 0x0101;
-constexpr uint16_t ID_PEERS_ONLINE = 0x0110;
-constexpr uint16_t ID_PEERS_MASK = 0x0111;
-constexpr uint16_t ID_DSP_MS = 0x0200;
-constexpr uint16_t ID_ENC_HQ_MS = 0x0201;
-constexpr uint16_t ID_ENC_MQ_MS = 0x0202;
-constexpr uint16_t ID_TX_END_MS = 0x0300;
-constexpr uint16_t ID_TX_PKTS_S = 0x0301;
-constexpr uint16_t ID_RMS_DBFS = 0x0400;
-constexpr uint16_t ID_MASTER_DB = 0x1000;
-constexpr uint16_t ID_SOURCE_MODE = 0x1001;
-constexpr uint16_t ID_RF_CHANNEL = 0x1002;
-
+// IDs: high byte = group (0x01 system / network, 0x02 SOURCE pipeline, 0x03 radio status, 0x04 audio status,
+// 0x10 audio / source / radio controls, 0x11 time sync, 0x12 calibration, 0x1F tests). Never reuse an ID for a
+// different meaning; add new parameters with new IDs.
 const Desc kTable[] = {
-    {ID_CPU_PCT, "sys.cpu_pct", "%", Type::INT, Access::RO, 0, 100, 0, nullptr, 0,
+    {0x0100, "sys.cpu_pct", "%", Type::INT, Access::RO, 0, 100, 0, nullptr, 0,
      "CPU load: SOURCE (DSP + encode) / 2 cores, SINK decode / frame", 0},
-    {ID_TEMP_C, "sys.temp_c", "\xC2\xB0" "C", Type::FLOAT, Access::RO, -40, 125, 0, nullptr, 0, "On-chip temperature", 0},
-    {ID_PEERS_ONLINE, "net.peers_online", "", Type::INT, Access::RO, 0, 6, 0, nullptr, 0, "SINKs online", 0},
-    {ID_PEERS_MASK, "net.peers_mask", "", Type::INT, Access::RO, 0, 63, 0, nullptr, 0,
+    {0x0101, "sys.temp_c", "\xC2\xB0" "C", Type::FLOAT, Access::RO, -40, 125, 0, nullptr, 0,
+     "On-chip temperature", 0},
+    {0x0102, "sys.uptime_s", "s", Type::INT, Access::RO, 0, 1e9, 0, nullptr, 0,
+     "Time since boot", 0},
+    {0x0103, "sys.heap_free_kb", "KB", Type::FLOAT, Access::RO, 0, 512, 0, nullptr, 0,
+     "Free internal heap", 1},
+    {0x0104, "sys.heap_min_kb", "KB", Type::FLOAT, Access::RO, 0, 512, 0, nullptr, 0,
+     "Lowest free internal heap since boot", 1},
+    {0x0105, "sys.heap_block_kb", "KB", Type::FLOAT, Access::RO, 0, 512, 0, nullptr, 0,
+     "Largest free internal block", 1},
+    {0x01F0, "sys.clear_counters", "", Type::INT, Access::ACTION, 0, 1, 0, nullptr, 0,
+     "Reset frame, PLC and error counters (console clear)", 0},
+    {0x01F1, "sys.reboot", "", Type::INT, Access::ACTION, 0, 1, 0, nullptr, 0,
+     "Restart the SOURCE (console reboot)", 0},
+    {0x01F2, "sys.bootloader", "", Type::INT, Access::ACTION, 0, 1, 0, nullptr, 0,
+     "Reboot into the ROM download bootloader (COM16)", 0},
+    {0x0110, "net.peers_online", "", Type::INT, Access::RO, 0, 6, 0, nullptr, 0,
+     "SINKs online", 0},
+    {0x0111, "net.peers_mask", "", Type::INT, Access::RO, 0, 63, 0, nullptr, 0,
      "Online channels, bit c = channel c (0 L, 1 R, 2 C, 3 LS, 4 RS, 5 Sub)", 0},
-    {ID_DSP_MS, "dsp.time_ms", "ms", Type::FLOAT, Access::RO, 0, 10, 0, nullptr, 0, "DSP stage per frame", 2},
-    {ID_ENC_HQ_MS, "enc.hq_ms", "ms", Type::FLOAT, Access::RO, 0, 20, 0, nullptr, 0,
+    {0x0130, "net.ch0_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
+     "Channel 0 (L) uplink RSSI of its last reply", 0},
+    {0x0131, "net.ch1_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
+     "Channel 1 (R) uplink RSSI of its last reply", 0},
+    {0x0132, "net.ch2_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
+     "Channel 2 (C) uplink RSSI of its last reply", 0},
+    {0x0133, "net.ch3_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
+     "Channel 3 (LS) uplink RSSI of its last reply", 0},
+    {0x0134, "net.ch4_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
+     "Channel 4 (RS) uplink RSSI of its last reply", 0},
+    {0x0135, "net.ch5_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
+     "Channel 5 (Sub) uplink RSSI of its last reply", 0},
+    {0x0140, "net.ch0_dl_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
+     "Channel 0 (L) downlink RSSI the SINK measured on its REQ_ACK packet (SOURCE TX power shows here)", 0},
+    {0x0141, "net.ch1_dl_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
+     "Channel 1 (R) downlink RSSI the SINK measured on its REQ_ACK packet (SOURCE TX power shows here)", 0},
+    {0x0142, "net.ch2_dl_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
+     "Channel 2 (C) downlink RSSI the SINK measured on its REQ_ACK packet (SOURCE TX power shows here)", 0},
+    {0x0143, "net.ch3_dl_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
+     "Channel 3 (LS) downlink RSSI the SINK measured on its REQ_ACK packet (SOURCE TX power shows here)", 0},
+    {0x0144, "net.ch4_dl_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
+     "Channel 4 (RS) downlink RSSI the SINK measured on its REQ_ACK packet (SOURCE TX power shows here)", 0},
+    {0x0145, "net.ch5_dl_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
+     "Channel 5 (Sub) downlink RSSI the SINK measured on its REQ_ACK packet (SOURCE TX power shows here)", 0},
+    {0x0150, "net.ch0_reply_loss_pct", "%", Type::FLOAT, Access::RO, 0, 100, 0, nullptr, 0,
+     "Channel 0 (L) telemetry replies missing in the last second (REQ_ACK packet or reply lost)", 1},
+    {0x0151, "net.ch1_reply_loss_pct", "%", Type::FLOAT, Access::RO, 0, 100, 0, nullptr, 0,
+     "Channel 1 (R) telemetry replies missing in the last second (REQ_ACK packet or reply lost)", 1},
+    {0x0152, "net.ch2_reply_loss_pct", "%", Type::FLOAT, Access::RO, 0, 100, 0, nullptr, 0,
+     "Channel 2 (C) telemetry replies missing in the last second (REQ_ACK packet or reply lost)", 1},
+    {0x0153, "net.ch3_reply_loss_pct", "%", Type::FLOAT, Access::RO, 0, 100, 0, nullptr, 0,
+     "Channel 3 (LS) telemetry replies missing in the last second (REQ_ACK packet or reply lost)", 1},
+    {0x0154, "net.ch4_reply_loss_pct", "%", Type::FLOAT, Access::RO, 0, 100, 0, nullptr, 0,
+     "Channel 4 (RS) telemetry replies missing in the last second (REQ_ACK packet or reply lost)", 1},
+    {0x0155, "net.ch5_reply_loss_pct", "%", Type::FLOAT, Access::RO, 0, 100, 0, nullptr, 0,
+     "Channel 5 (Sub) telemetry replies missing in the last second (REQ_ACK packet or reply lost)", 1},
+    {0x0160, "net.ch0_replies_missed", "", Type::INT, Access::RO, 0, 1e9, 0, nullptr, 0,
+     "Channel 0 (L) telemetry replies missing since boot / clear", 0},
+    {0x0161, "net.ch1_replies_missed", "", Type::INT, Access::RO, 0, 1e9, 0, nullptr, 0,
+     "Channel 1 (R) telemetry replies missing since boot / clear", 0},
+    {0x0162, "net.ch2_replies_missed", "", Type::INT, Access::RO, 0, 1e9, 0, nullptr, 0,
+     "Channel 2 (C) telemetry replies missing since boot / clear", 0},
+    {0x0163, "net.ch3_replies_missed", "", Type::INT, Access::RO, 0, 1e9, 0, nullptr, 0,
+     "Channel 3 (LS) telemetry replies missing since boot / clear", 0},
+    {0x0164, "net.ch4_replies_missed", "", Type::INT, Access::RO, 0, 1e9, 0, nullptr, 0,
+     "Channel 4 (RS) telemetry replies missing since boot / clear", 0},
+    {0x0165, "net.ch5_replies_missed", "", Type::INT, Access::RO, 0, 1e9, 0, nullptr, 0,
+     "Channel 5 (Sub) telemetry replies missing since boot / clear", 0},
+    {0x0200, "dsp.time_ms", "ms", Type::FLOAT, Access::RO, 0, 10, 0, nullptr, 0,
+     "DSP stage per frame", 2},
+    {0x0201, "enc.hq_ms", "ms", Type::FLOAT, Access::RO, 0, 20, 0, nullptr, 0,
      "HQ + sub LC3 encode per frame, both cores", 2},
-    {ID_ENC_MQ_MS, "enc.mq_ms", "ms", Type::FLOAT, Access::RO, 0, 20, 0, nullptr, 0,
+    {0x0202, "enc.mq_ms", "ms", Type::FLOAT, Access::RO, 0, 20, 0, nullptr, 0,
      "MQ (redundancy) LC3 encode per frame, both cores", 2},
-    {ID_TX_END_MS, "rf.tx_end_ms", "ms", Type::FLOAT, Access::RO, 0, 10, 0, nullptr, 0,
+    {0x0203, "src.overruns", "", Type::INT, Access::RO, 0, 1000, 0, nullptr, 0,
+     "Frames lost to core-0 overruns in the last timing window (~1 s)", 0},
+    {0x0204, "src.deadline_skips", "", Type::INT, Access::RO, 0, 1000, 0, nullptr, 0,
+     "Packets not sent (9.5 ms deadline) in the last timing window", 0},
+    {0x0210, "debug.dsp_load_us", "us", Type::INT, Access::RW, 0, 9000, 0, nullptr, 0,
+     "Synthetic DSP load per frame (console dspload)", 0},
+    {0x0211, "debug.enc_cores", "", Type::INT, Access::RW, 1, 2, 2, nullptr, 0,
+     "LC3 encode on core 0 only (1) or both cores (2) (console enccores)", 0},
+    {0x0300, "rf.tx_end_ms", "ms", Type::FLOAT, Access::RO, 0, 10, 0, nullptr, 0,
      "Last packet of the frame on air, after the frame tick (deadline 9.5 ms)", 2},
-    {ID_TX_PKTS_S, "rf.tx_pkts_s", "1/s", Type::INT, Access::RO, 0, 1000, 0, nullptr, 0, "Packets sent per second", 0},
-    {ID_RMS_DBFS, "audio.rms_dbfs", "dBFS", Type::FLOAT, Access::RO, -100, 0, -100, nullptr, 0,
-     "Audio RMS (SOURCE input / SINK output), -100 = silent or off", 1},
-    {ID_MASTER_DB, "audio.master_db", "dB", Type::FLOAT, Access::RW, -96, 0, 0, nullptr, 0,
-     "Master volume on the SOURCE (all channels), -96 = mute; set = target, read = in effect (100 dB/s ramp)", 1},
-    {ID_SOURCE_MODE, "source.mode", "", Type::ENUM, Access::RW, 0, 2, 1, kModeNames, 3,
-     "SOURCE input / state: pause (IDLE), cast (USB audio), synth (test synth)", 0},
-    {ID_RF_CHANNEL, "rf.channel", "", Type::INT, Access::RW, 1, 13, 13, nullptr, 0,
+    {0x0301, "rf.tx_pkts_s", "1/s", Type::INT, Access::RO, 0, 1000, 0, nullptr, 0,
+     "Packets sent per second", 0},
+    {0x0302, "rf.tx_end_max_ms", "ms", Type::FLOAT, Access::RO, 0, 10, 0, nullptr, 0,
+     "Worst TX end in the last timing window", 2},
+    {0x0303, "rf.recoveries", "", Type::INT, Access::RO, 0, 1e9, 0, nullptr, 0,
+     "TX-wedge recoveries since boot (console txstat)", 0},
+    {0x0304, "rf.wifi_restarts", "", Type::INT, Access::RO, 0, 1e9, 0, nullptr, 0,
+     "Wi-Fi driver restarts by the recovery escalation", 0},
+    {0x0305, "rf.wedge_reboots", "", Type::INT, Access::RO, 0, 1e9, 0, nullptr, 0,
+     "Reboots forced by an unrecoverable TX wedge, since power-on", 0},
+    {0x0306, "rf.send_errors", "", Type::INT, Access::RO, 0, 1e9, 0, nullptr, 0,
+     "esp_now_send() errors since boot", 0},
+    {0x0307, "rf.no_mem_errors", "", Type::INT, Access::RO, 0, 1e9, 0, nullptr, 0,
+     "esp_now_send() ESP_ERR_ESPNOW_NO_MEM since boot", 0},
+    {0x0308, "rf.txdone_timeouts", "", Type::INT, Access::RO, 0, 1e9, 0, nullptr, 0,
+     "TX-done callbacks not received in time, since boot", 0},
+    {0x0309, "rf.status_fails", "", Type::INT, Access::RO, 0, 1e9, 0, nullptr, 0,
+     "TX-done with a failure status, since boot", 0},
+    {0x030A, "rf.deadline_drops", "", Type::INT, Access::RO, 0, 1e9, 0, nullptr, 0,
+     "Packets dropped at the TX deadline, since boot", 0},
+    {0x1002, "rf.channel", "", Type::INT, Access::RW, 1, 13, 13, nullptr, 0,
      "Wi-Fi channel (applied at the next frame boundary)", 0},
+    {0x1003, "rf.phy", "", Type::ENUM, Access::RW, 0, 11, 3, kPhyNames, static_cast<uint8_t>(sizeof(kPhyNames) / sizeof(kPhyNames[0])),
+     "Broadcast PHY rate (applied at the next frame boundary)", 0},
+    {0x1004, "rf.tx_power_dbm", "dBm", Type::ENUM, Access::RW, 0, 10, 3, kTxPowerNames, static_cast<uint8_t>(sizeof(kTxPowerNames) / sizeof(kTxPowerNames[0])),
+     "TX power: one of the radio's 11 levels (esp_wifi.h table); readback = level in effect for the setting", 0},
+    {0x1F00, "test.txfault", "", Type::ENUM, Access::ACTION, 0, 2, 0, kTxFaultNames, static_cast<uint8_t>(sizeof(kTxFaultNames) / sizeof(kTxFaultNames[0])),
+     "TX fault test: once (ESP-NOW re-init), wifi (Wi-Fi restart), reboot", 0},
+    {0x0400, "audio.rms_dbfs", "dBFS", Type::FLOAT, Access::RO, -100, 0, -100, nullptr, 0,
+     "SOURCE input RMS, -100 = silent or off", 1},
+    {0x0410, "usb.streaming", "", Type::ENUM, Access::RO, 0, 1, 0, kNoYes, static_cast<uint8_t>(sizeof(kNoYes) / sizeof(kNoYes[0])),
+     "Host is streaming USB audio", 0},
+    {0x0411, "usb.host_vol_db", "dB", Type::FLOAT, Access::RO, -90, 0, 0, nullptr, 0,
+     "USB host (Windows) volume as applied: lower of master and channels", 1},
+    {0x0412, "usb.host_mute", "", Type::ENUM, Access::RO, 0, 1, 0, kOffOn, static_cast<uint8_t>(sizeof(kOffOn) / sizeof(kOffOn[0])),
+     "USB host mute", 0},
+    {0x1000, "audio.master_db", "dB", Type::FLOAT, Access::RW, -96, 0, 0, nullptr, 0,
+     "Master volume (all channels), -96 = mute; set = target, read = in effect (100 dB/s ramp)", 1},
+    {0x1005, "audio.mute", "", Type::ENUM, Access::RW, 0, 1, 0, kOffOn, static_cast<uint8_t>(sizeof(kOffOn) / sizeof(kOffOn[0])),
+     "Master mute, ramped (console mute / unmute)", 0},
+    {0x1010, "audio.ch0_db", "dB", Type::FLOAT, Access::RW, -96, 0, 0, nullptr, 0,
+     "Channel 0 (L) gain on the SOURCE, ramped 100 dB/s (console volch); not applied to caltone", 1},
+    {0x1011, "audio.ch1_db", "dB", Type::FLOAT, Access::RW, -96, 0, 0, nullptr, 0,
+     "Channel 1 (R) gain on the SOURCE, ramped 100 dB/s (console volch); not applied to caltone", 1},
+    {0x1012, "audio.ch2_db", "dB", Type::FLOAT, Access::RW, -96, 0, 0, nullptr, 0,
+     "Channel 2 (C) gain on the SOURCE, ramped 100 dB/s (console volch); not applied to caltone", 1},
+    {0x1013, "audio.ch3_db", "dB", Type::FLOAT, Access::RW, -96, 0, 0, nullptr, 0,
+     "Channel 3 (LS) gain on the SOURCE, ramped 100 dB/s (console volch); not applied to caltone", 1},
+    {0x1014, "audio.ch4_db", "dB", Type::FLOAT, Access::RW, -96, 0, 0, nullptr, 0,
+     "Channel 4 (RS) gain on the SOURCE, ramped 100 dB/s (console volch); not applied to caltone", 1},
+    {0x1015, "audio.ch5_db", "dB", Type::FLOAT, Access::RW, -96, 0, 0, nullptr, 0,
+     "Channel 5 (Sub) gain on the SOURCE, ramped 100 dB/s (console volch); not applied to caltone", 1},
+    {0x1001, "source.mode", "", Type::ENUM, Access::RW, 0, 2, 1, kModeNames, static_cast<uint8_t>(sizeof(kModeNames) / sizeof(kModeNames[0])),
+     "SOURCE input / state: pause (IDLE), cast (USB audio), synth (test synth)", 0},
+    {0x1100, "sync.latency_ms", "ms", Type::INT, Access::RW, 20, 200, 50, nullptr, 0,
+     "Playout latency (console latency)", 0},
+    {0x1110, "sync.ch0_trim_us", "us", Type::INT, Access::RW, -30000, 30000, 0, nullptr, 0,
+     "Channel 0 (L) presentation-time trim, + = later (console trim)", 0},
+    {0x1111, "sync.ch1_trim_us", "us", Type::INT, Access::RW, -30000, 30000, 0, nullptr, 0,
+     "Channel 1 (R) presentation-time trim, + = later (console trim)", 0},
+    {0x1112, "sync.ch2_trim_us", "us", Type::INT, Access::RW, -30000, 30000, 0, nullptr, 0,
+     "Channel 2 (C) presentation-time trim, + = later (console trim)", 0},
+    {0x1113, "sync.ch3_trim_us", "us", Type::INT, Access::RW, -30000, 30000, 0, nullptr, 0,
+     "Channel 3 (LS) presentation-time trim, + = later (console trim)", 0},
+    {0x1114, "sync.ch4_trim_us", "us", Type::INT, Access::RW, -30000, 30000, 0, nullptr, 0,
+     "Channel 4 (RS) presentation-time trim, + = later (console trim)", 0},
+    {0x1115, "sync.ch5_trim_us", "us", Type::INT, Access::RW, -30000, 30000, 0, nullptr, 0,
+     "Channel 5 (Sub) presentation-time trim, + = later (console trim)", 0},
+    {0x1120, "sync.ch0_rtt_us", "us", Type::INT, Access::RO, 0, 20000, 0, nullptr, 0,
+     "Channel 0 (L) best two-step round trip, 0 = no estimate", 0},
+    {0x1121, "sync.ch1_rtt_us", "us", Type::INT, Access::RO, 0, 20000, 0, nullptr, 0,
+     "Channel 1 (R) best two-step round trip, 0 = no estimate", 0},
+    {0x1122, "sync.ch2_rtt_us", "us", Type::INT, Access::RO, 0, 20000, 0, nullptr, 0,
+     "Channel 2 (C) best two-step round trip, 0 = no estimate", 0},
+    {0x1123, "sync.ch3_rtt_us", "us", Type::INT, Access::RO, 0, 20000, 0, nullptr, 0,
+     "Channel 3 (LS) best two-step round trip, 0 = no estimate", 0},
+    {0x1124, "sync.ch4_rtt_us", "us", Type::INT, Access::RO, 0, 20000, 0, nullptr, 0,
+     "Channel 4 (RS) best two-step round trip, 0 = no estimate", 0},
+    {0x1125, "sync.ch5_rtt_us", "us", Type::INT, Access::RO, 0, 20000, 0, nullptr, 0,
+     "Channel 5 (Sub) best two-step round trip, 0 = no estimate", 0},
+    {0x1130, "sync.ch0_drift_ppm", "ppm", Type::FLOAT, Access::RO, -200, 200, 0, nullptr, 0,
+     "Channel 0 (L) SINK clock vs SOURCE", 2},
+    {0x1131, "sync.ch1_drift_ppm", "ppm", Type::FLOAT, Access::RO, -200, 200, 0, nullptr, 0,
+     "Channel 1 (R) SINK clock vs SOURCE", 2},
+    {0x1132, "sync.ch2_drift_ppm", "ppm", Type::FLOAT, Access::RO, -200, 200, 0, nullptr, 0,
+     "Channel 2 (C) SINK clock vs SOURCE", 2},
+    {0x1133, "sync.ch3_drift_ppm", "ppm", Type::FLOAT, Access::RO, -200, 200, 0, nullptr, 0,
+     "Channel 3 (LS) SINK clock vs SOURCE", 2},
+    {0x1134, "sync.ch4_drift_ppm", "ppm", Type::FLOAT, Access::RO, -200, 200, 0, nullptr, 0,
+     "Channel 4 (RS) SINK clock vs SOURCE", 2},
+    {0x1135, "sync.ch5_drift_ppm", "ppm", Type::FLOAT, Access::RO, -200, 200, 0, nullptr, 0,
+     "Channel 5 (Sub) SINK clock vs SOURCE", 2},
+    {0x1140, "sync.ch0_err_us", "us", Type::INT, Access::RO, -32767, 32767, 0, nullptr, 0,
+     "Channel 0 (L) playout error reported by the SINK (+ = late), - = unknown", 0},
+    {0x1141, "sync.ch1_err_us", "us", Type::INT, Access::RO, -32767, 32767, 0, nullptr, 0,
+     "Channel 1 (R) playout error reported by the SINK (+ = late), - = unknown", 0},
+    {0x1142, "sync.ch2_err_us", "us", Type::INT, Access::RO, -32767, 32767, 0, nullptr, 0,
+     "Channel 2 (C) playout error reported by the SINK (+ = late), - = unknown", 0},
+    {0x1143, "sync.ch3_err_us", "us", Type::INT, Access::RO, -32767, 32767, 0, nullptr, 0,
+     "Channel 3 (LS) playout error reported by the SINK (+ = late), - = unknown", 0},
+    {0x1144, "sync.ch4_err_us", "us", Type::INT, Access::RO, -32767, 32767, 0, nullptr, 0,
+     "Channel 4 (RS) playout error reported by the SINK (+ = late), - = unknown", 0},
+    {0x1145, "sync.ch5_err_us", "us", Type::INT, Access::RO, -32767, 32767, 0, nullptr, 0,
+     "Channel 5 (Sub) playout error reported by the SINK (+ = late), - = unknown", 0},
+    {0x1200, "cal.mode", "", Type::ENUM, Access::RW, 0, 2, 0, kCalNames, static_cast<uint8_t>(sizeof(kCalNames) / sizeof(kCalNames[0])),
+     "Calibration signal (console caltone): off, pink (500-2000 Hz / sub 40-100 Hz), sine", 0},
+    {0x1201, "cal.level_dbfs", "dBFS", Type::FLOAT, Access::RW, -60, -6, -20, nullptr, 0,
+     "Calibration signal RMS level", 1},
+    {0x1202, "cal.sat_hz", "Hz", Type::INT, Access::RW, 100, 10000, 1000, nullptr, 0,
+     "Sine frequency on the satellites", 0},
+    {0x1203, "cal.sub_hz", "Hz", Type::INT, Access::RW, 20, 100, 63, nullptr, 0,
+     "Sine frequency on the sub", 0},
 };
 constexpr size_t kCount = sizeof(kTable) / sizeof(kTable[0]);
 
 float currentMode() {
     if (!s_engine) return MODE_PAUSE;
-    const NetworkState st = s_engine->getState();
-    if (st != NetworkState::CAST) return MODE_PAUSE;
-    return s_engine->isToneTestMode() ? MODE_SYNTH : MODE_CAST;
+    if (s_engine->getState() != NetworkState::CAST) return MODE_PAUSE;
+    return s_engine->isToneTestMode() && !s_engine->isCalSignalOn() ? MODE_SYNTH : MODE_CAST;
 }
+
+/** @brief Deferred reboot so the HID / console reply goes out first (action parameters). */
+void scheduleRestart(bool to_bootloader) {
+    static esp_timer_handle_t s_timer = nullptr;
+    static bool s_boot = false;
+    s_boot = to_bootloader;
+    if (!s_timer) {
+        esp_timer_create_args_t a = {};
+        a.callback = [](void*) {
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+            if (s_boot) usb_reboot_to_rom_download();
+#endif
+            esp_restart();
+        };
+        a.name = "param_reboot";
+        if (esp_timer_create(&a, &s_timer) != ESP_OK) return;
+    }
+    esp_timer_start_once(s_timer, 300000);
+}
+
+float kb(size_t bytes) { return static_cast<float>(bytes) / 1024.0f; }
 
 }  // namespace
 
@@ -128,20 +331,118 @@ const Desc* findByText(const char* text) {
 
 bool get(uint16_t id, float& value) {
     const StatusSnapshot s = latestStatus();
+    EspNowBroadcastEngine* e = s_engine;
+    // Per-channel groups
+    if (id >= 0x0140 && id < 0x0146) {
+        const SinkPeerConfig* p = e ? e->getPeer(id - 0x0140) : nullptr;
+        value = (p && p->status == PeerStatus::ONLINE) ? p->downlink_rssi : -127;
+        return true;
+    }
+    if (id >= 0x0150 && id < 0x0156) {
+        value = e ? e->getReplyLossPct(static_cast<uint8_t>(id - 0x0150)) : NAN;
+        return true;
+    }
+    if (id >= 0x0160 && id < 0x0166) {
+        value = e ? e->getRepliesMissed(static_cast<uint8_t>(id - 0x0160)) : 0;
+        return true;
+    }
+    if (id >= 0x0130 && id < 0x0136) {
+        const SinkPeerConfig* p = e ? e->getPeer(id - 0x0130) : nullptr;
+        value = (p && p->status == PeerStatus::ONLINE) ? p->last_rssi : -127;
+        return true;
+    }
+    if (id >= 0x1010 && id < 0x1016) {
+        value = e ? e->getChannelGainNowDb(id - 0x1010) : 0;
+        return true;
+    }
+    if (id >= 0x1110 && id < 0x1146) {
+        // Not getPtpStatus(): it has side effects (drift update, holdover count); these are cached per frame
+        if (!e) { value = NAN; return true; }
+        const uint8_t ch = static_cast<uint8_t>(id & 0x0F);
+        if (ch >= MAX_SINK_NODES) return false;
+        switch (id & 0xFFF0) {
+            case 0x1110: value = e->getChannelTrimUs(ch); return true;
+            case 0x1120: value = e->getCtrlRttUs(ch); return true;
+            case 0x1130: value = e->getCtrlRttUs(ch) ? e->getCtrlDriftPpb(ch) / 1000.0f : NAN; return true;
+            case 0x1140: {
+                const int16_t err = e->getPlayoutErrUs(ch);
+                value = (err == VSAF_PLAYOUT_ERR_UNKNOWN) ? NAN : err;
+                return true;
+            }
+            default: return false;
+        }
+    }
+    SourceTimingSnapshot t{};
     switch (id) {
-        case ID_CPU_PCT: value = s.cpu_pct; return true;
-        case ID_TEMP_C: value = s.temp_c; return true;
-        case ID_PEERS_ONLINE: value = s.peers_online; return true;
-        case ID_PEERS_MASK: value = s.peers_mask; return true;
-        case ID_DSP_MS: value = s.dsp_ms; return true;
-        case ID_ENC_HQ_MS: value = s.enc_hq_ms; return true;
-        case ID_ENC_MQ_MS: value = s.enc_mq_ms; return true;
-        case ID_TX_END_MS: value = s.tx_end_ms; return true;
-        case ID_TX_PKTS_S: value = s.tx_pkts_s; return true;
-        case ID_RMS_DBFS: value = s.rms_dbfs; return true;
-        case ID_MASTER_DB: value = s_engine ? s_engine->getMasterGainNowDb() : 0.0f; return true;  // in effect (ramped)
-        case ID_SOURCE_MODE: value = currentMode(); return true;
-        case ID_RF_CHANNEL: value = s_engine ? s_engine->getWifiChannel() : 0; return true;
+        case 0x0100: value = s.cpu_pct; return true;
+        case 0x0101: value = s.temp_c; return true;
+        case 0x0102: value = static_cast<float>(esp_timer_get_time() / 1000000); return true;
+        case 0x0103: value = kb(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)); return true;
+        case 0x0104: value = kb(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)); return true;
+        case 0x0105: value = kb(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)); return true;
+        case 0x01F0: case 0x01F1: case 0x01F2: case 0x1F00: value = 0; return true;  // actions
+        case 0x0110: value = s.peers_online; return true;
+        case 0x0111: value = s.peers_mask; return true;
+        case 0x0200: value = s.dsp_ms; return true;
+        case 0x0201: value = s.enc_hq_ms; return true;
+        case 0x0202: value = s.enc_mq_ms; return true;
+        case 0x0203: if (e) e->getSourceTiming(t); value = t.overruns; return true;
+        case 0x0204: if (e) e->getSourceTiming(t); value = t.deadline_skips; return true;
+        case 0x0210: value = e ? e->getDspExtraLoadUs() : 0; return true;
+        case 0x0211: value = e ? e->getEncoderCores() : 2; return true;
+        case 0x0300: value = s.tx_end_ms; return true;
+        case 0x0301: value = s.tx_pkts_s; return true;
+        case 0x0302: if (e) e->getSourceTiming(t); value = t.tx_last_done_at.max / 1000.0f; return true;
+        case 0x0303: value = e ? e->getTxRecoveryCount() : 0; return true;
+        case 0x0304: value = e ? e->getWifiRestartCount() : 0; return true;
+        case 0x0305: value = EspNowBroadcastEngine::getTxWedgeReboots(); return true;
+        case 0x0306: value = e ? e->getTxMacErrorCount() : 0; return true;
+        case 0x0307: value = e ? e->getTxNoMemCount() : 0; return true;
+        case 0x0308: value = e ? e->getTxTimeoutCount() : 0; return true;
+        case 0x0309: value = e ? e->getTxFailCount() : 0; return true;
+        case 0x030A: value = e ? e->getTxDeadlineDropsCount() : 0; return true;
+        case 0x1002: value = e ? e->getWifiChannelTarget() : 0; return true;  // incl. a change not yet applied
+        case 0x1003: {
+            value = NAN;
+            if (!e) return true;
+            for (size_t i = 0; i < sizeof(kPhyRates) / sizeof(kPhyRates[0]); ++i) {
+                if (kPhyRates[i] == e->getWifiPhyRateTarget()) value = i;
+            }
+            return true;
+        }
+        case 0x1004: {
+            // Level the radio uses for the current setting: the highest table entry not above it
+            value = 0;
+            const int8_t q = e ? e->getWifiTxPower() : 0;
+            for (size_t i = 0; i < sizeof(kTxPowerQdbm); ++i) {
+                if (kTxPowerQdbm[i] <= q) value = i;
+            }
+            return true;
+        }
+        case 0x0400: value = s.rms_dbfs; return true;
+        case 0x0410: value = usb_audio_is_streaming() ? 1 : 0; return true;
+        case 0x0411:
+        case 0x0412: {
+            int8_t m[3];
+            int16_t v[3];
+            uint32_t n = 0;
+            usb_audio_get_fu_state(m, v, &n);
+            if (id == 0x0412) {
+                value = (m[0] || (m[1] && m[2])) ? 1 : 0;
+            } else {
+                const int16_t lo = std::min(v[0], std::max(v[1], v[2]));
+                value = lo / 256.0f;
+            }
+            return true;
+        }
+        case 0x1000: value = e ? e->getMasterGainNowDb() : 0; return true;
+        case 0x1005: value = (e && e->getMasterMute()) ? 1 : 0; return true;
+        case 0x1001: value = currentMode(); return true;
+        case 0x1100: value = e ? e->getPlayoutLatencyUs() / 1000.0f : 0; return true;
+        case 0x1200: value = (e && e->isCalSignalOn()) ? static_cast<float>(e->getCalSignal().mode()) : 0; return true;
+        case 0x1201: value = e ? e->getCalSignal().rmsDbfs() : -20; return true;
+        case 0x1202: value = e ? e->getCalSignal().satHz() : 1000; return true;
+        case 0x1203: value = e ? e->getCalSignal().subHz() : 63; return true;
         default: return false;
     }
 }
@@ -149,36 +450,84 @@ bool get(uint16_t id, float& value) {
 SetStatus set(uint16_t id, float value, float& applied) {
     const Desc* d = find(id);
     if (!d) return SetStatus::UNKNOWN;
-    if (d->access != Access::RW) return SetStatus::READ_ONLY;
+    if (d->access == Access::RO) return SetStatus::READ_ONLY;
     if (!s_engine || std::isnan(value)) return SetStatus::INVALID;
+    EspNowBroadcastEngine* e = s_engine;
     float v = std::clamp(value, d->min, d->max);
     if (d->type != Type::FLOAT) v = std::round(v);
     const SetStatus st = (v != value) ? SetStatus::CLAMPED : SetStatus::OK;
-    switch (id) {
-        case ID_MASTER_DB:
-            s_engine->setMasterGainDb(v);
-            applied = s_engine->getMasterGainNowDb();  // in effect now; it reaches the target at 100 dB/s
-            return st;
-        case ID_SOURCE_MODE: {
-            const auto m = static_cast<Mode>(static_cast<int>(v));
-            if (m == MODE_PAUSE) {
-                s_engine->setToneTestMode(false);
-                s_engine->transitionTo(NetworkState::IDLE);
-            } else {
-                s_engine->setToneTestMode(m == MODE_SYNTH);
-                s_engine->transitionTo(NetworkState::CAST);
+    const int iv = static_cast<int>(v);
+    if (id >= 0x1010 && id < 0x1016) {
+        e->setChannelGainDb(id - 0x1010, v);
+    } else if (id >= 0x1110 && id < 0x1116) {
+        e->setChannelTrimUs(static_cast<uint8_t>(id - 0x1110), static_cast<int16_t>(iv));
+    } else {
+        switch (id) {
+            case 0x01F0:
+                e->resetStreamingCounters();
+                e->resetErrorCounters();
+                break;
+            case 0x01F1: scheduleRestart(false); break;
+            case 0x01F2: scheduleRestart(true); break;
+            case 0x1F00:
+                if (iv == 0) e->requestTxFaultInjection();
+                else e->simulateTxWedge(iv);  // 1: healed by a Wi-Fi restart, 2: only by a reboot
+                break;
+            case 0x0210: e->setDspExtraLoadUs(static_cast<uint32_t>(iv)); break;
+            case 0x0211: e->setEncoderCores(static_cast<uint32_t>(iv)); break;
+            case 0x1002:
+                e->requestWifiChannel(static_cast<uint8_t>(iv));  // at the next frame boundary
+                e->lockChannel(true);
+                break;
+            case 0x1003:
+                e->requestWifiPhyRate(iv <= 3 ? WIFI_PHY_MODE_HT20 : WIFI_PHY_MODE_11G, kPhyRates[iv]);
+                break;
+            case 0x1004:
+                e->setWifiTxPower(kTxPowerQdbm[iv]);
+                break;
+            case 0x1000: e->setMasterGainDb(v); break;
+            case 0x1005: e->setMasterMute(iv != 0); break;
+            case 0x1001: {
+                const auto m = static_cast<Mode>(iv);
+                if (m == MODE_PAUSE) {
+                    e->setToneTestMode(false);
+                    e->transitionTo(NetworkState::IDLE);
+                } else {
+                    e->setToneTestMode(m == MODE_SYNTH);
+                    e->transitionTo(NetworkState::CAST);
+                }
+                break;
             }
-            applied = currentMode();
-            return st;
+            case 0x1100: e->setPlayoutLatencyUs(static_cast<uint32_t>(iv) * 1000U); break;
+            case 0x1200: case 0x1201: case 0x1202: case 0x1203: {
+                // The calibration signal is configured as a whole (as console caltone); this replaces one field
+                const Audio::CalSignal& cs = e->getCalSignal();
+                const bool was_on = e->isCalSignalOn();
+                int mode = was_on ? static_cast<int>(cs.mode()) : 0;
+                float lvl = cs.rmsDbfs(), sat = cs.satHz(), sub = cs.subHz();
+                if (id == 0x1200) mode = iv;
+                if (id == 0x1201) lvl = v;
+                if (id == 0x1202) sat = v;
+                if (id == 0x1203) sub = v;
+                e->setCalSignal(static_cast<Audio::CalSignal::Mode>(mode), lvl, sat, sub);
+                if (mode != 0 && !was_on) {
+                    e->setToneTestMode(true);  // keep casting without USB audio
+                    e->transitionTo(NetworkState::CAST);
+                } else if (mode == 0 && was_on) {
+                    e->setToneTestMode(false);
+                }
+                break;
+            }
+            default:
+                return SetStatus::READ_ONLY;
         }
-        case ID_RF_CHANNEL:
-            s_engine->requestWifiChannel(static_cast<uint8_t>(v));  // SOURCE: at the next frame boundary
-            s_engine->lockChannel(true);
-            applied = v;
-            return st;
-        default:
-            return SetStatus::READ_ONLY;
     }
+    if (d->access == Access::ACTION) {
+        applied = v;
+    } else {
+        get(id, applied);  // the value now in effect (ramped values: where the ramp is right now)
+    }
+    return st;
 }
 
 bool parseValue(const Desc& d, const char* text, float& value) {
@@ -199,7 +548,9 @@ bool parseValue(const Desc& d, const char* text, float& value) {
 }
 
 void formatValue(const Desc& d, float value, char* out, size_t out_len) {
-    if (d.type == Type::ENUM) {
+    if (std::isnan(value)) {
+        snprintf(out, out_len, "-");
+    } else if (d.type == Type::ENUM) {
         const int i = static_cast<int>(value);
         snprintf(out, out_len, "%s", (i >= 0 && i < d.enum_count) ? d.enum_names[i] : "?");
     } else if (d.type == Type::INT || d.decimals == 0) {

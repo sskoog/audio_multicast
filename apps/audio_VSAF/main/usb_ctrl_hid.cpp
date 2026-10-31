@@ -95,7 +95,7 @@ void handle_request(const uint8_t* rq) {
             const P::Desc& d = P::descAt(idx);
             put_u16(out + 6, d.id);
             out[8] = d.type == P::Type::INT ? 0 : (d.type == P::Type::FLOAT ? 1 : 2);
-            out[9] = d.access == P::Access::RW ? 1 : 0;
+            out[9] = static_cast<uint8_t>(d.access);  // 0 ro, 1 rw, 2 action
             put_f32(out + 10, d.min);
             put_f32(out + 14, d.max);
             put_f32(out + 18, d.def);

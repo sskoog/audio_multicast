@@ -21,7 +21,7 @@ class EspNowBroadcastEngine;
 namespace Params {
 
 enum class Type : uint8_t { INT, FLOAT, ENUM };
-enum class Access : uint8_t { RO, RW };
+enum class Access : uint8_t { RO, RW, ACTION };  // ACTION: write-only command (set runs it; get returns 0)
 
 /** @brief Static description of one parameter. */
 struct Desc {

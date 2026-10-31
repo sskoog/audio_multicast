@@ -747,17 +747,6 @@ void EspNowBroadcastEngine::sendVolumeCommand(uint8_t channel_id, uint8_t vol_u8
 // Dynamic Stream Configuration
 // ---------------------------------------------------------------------------
 
-esp_err_t EspNowBroadcastEngine::setSampleRate(uint32_t sample_rate_hz) {
-    m_telemetry.sample_rate = sample_rate_hz;
-    m_hpf_stereo.initHighPass(100.0f, static_cast<float>(sample_rate_hz));
-    m_sub_decimator.init(100.0f, static_cast<float>(sample_rate_hz));
-    m_lc3_codec.reconfigureDecoder(sample_rate_hz, m_octets_per_frame, m_frame_duration_us);
-    if (m_i2s_dac) {
-        m_i2s_dac->reconfigureSampleRate(sample_rate_hz, m_frame_duration_us);
-    }
-    return ESP_OK;
-}
-
 esp_err_t EspNowBroadcastEngine::setBitDepth(uint8_t bit_depth) {
     m_telemetry.bit_depth = bit_depth;
     return ESP_OK;
@@ -1122,6 +1111,7 @@ void EspNowBroadcastEngine::onPacketReceived(const uint8_t* mac_addr, const uint
                 m_peers[sink_id].downlink_rssi = ack->downlink_rssi; // Downlink RSSI
                 m_peers[sink_id].fifo_fill = ack->fifo_fill;
                 m_peers[sink_id].acks_received++;
+                m_reply_wait[sink_id].store(false, std::memory_order_relaxed);
                 m_peers[sink_id].consecutive_ack_fails = 0;
                 m_peers[sink_id].last_rx_telemetry_time_us = t_now_us;
                 m_peers[sink_id].status = PeerStatus::ONLINE;
