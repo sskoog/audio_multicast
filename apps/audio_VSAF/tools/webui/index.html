@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VSAF Control</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #667085; --line: #e3e6eb;
+    --accent: #2f6fde; --ok: #1f8a4c; --warn: #b7791f; --err: #c0392b; --chip: #eef2f7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #14171c; --panel: #1c2027; --text: #e6e9ef; --muted: #9aa3b2; --line: #2c323c;
+            --accent: #6aa0ff; --ok: #4cc38a; --warn: #e0b057; --err: #ef6b5d; --chip: #252b34; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 14px 16px;
+           border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; }
+  h1 { font-size: 17px; margin: 0 8px 0 0; }
+  button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--accent);
+           background: var(--accent); color: #fff; cursor: pointer; }
+  button.secondary { background: transparent; color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  .chip { padding: 3px 10px; border-radius: 999px; background: var(--chip); color: var(--muted); font-size: 12px; }
+  .chip.ok { color: var(--ok); } .chip.err { color: var(--err); } .chip.warn { color: var(--warn); }
+  main { max-width: 980px; margin: 0 auto; padding: 16px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; margin-bottom: 16px; }
+  section h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
+               margin: 0; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 8px 14px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  tr:last-child td { border-bottom: none; }
+  td.name { font-family: ui-monospace, Consolas, monospace; font-size: 13px; width: 32%; }
+  td.name small { display: block; color: var(--muted); font-family: system-ui, sans-serif; font-size: 12px; }
+  td.value { font-variant-numeric: tabular-nums; font-weight: 600; width: 18%; white-space: nowrap; }
+  td.ctrl { width: 50%; }
+  .ctrlrow { display: flex; align-items: center; gap: 10px; }
+  input[type=range] { flex: 1; min-width: 120px; accent-color: var(--accent); }
+  /* Feedback slider: knob = value you set, filled track = value the SOURCE reports as applied (--fill) */
+  input[type=range].fb { -webkit-appearance: none; appearance: none; height: 22px; background: transparent; }
+  input[type=range].fb::-webkit-slider-runnable-track {
+    height: 8px; border-radius: 4px;
+    background: linear-gradient(to right, var(--accent) 0 var(--fill, 0%), var(--line) var(--fill, 0%) 100%); }
+  input[type=range].fb::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; width: 18px; height: 18px; margin-top: -5px; border-radius: 50%;
+    background: var(--panel); border: 2px solid var(--accent); box-shadow: 0 1px 3px rgba(0, 0, 0, .35); }
+  input[type=range].fb::-moz-range-track { height: 8px; border-radius: 4px;
+    background: linear-gradient(to right, var(--accent) 0 var(--fill, 0%), var(--line) var(--fill, 0%) 100%); }
+  input[type=range].fb::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%;
+    background: var(--panel); border: 2px solid var(--accent); }
+  input[type=number], select { font: inherit; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px;
+                               background: var(--bg); color: var(--text); }
+  input[type=number] { width: 90px; }
+  .st { font-size: 12px; color: var(--muted); min-width: 64px; }
+  .st.clamped { color: var(--warn); } .st.err { color: var(--err); }
+  /* Status cards: auto-fit grid, ~4 per row on a desktop window, 1 on a phone */
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; padding: 12px; }
+  .card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--bg); min-width: 0; }
+  .card .cname { font-family: ui-monospace, Consolas, monospace; font-size: 12px; overflow: hidden;
+                 text-overflow: ellipsis; white-space: nowrap; }
+  .card .cid { color: var(--muted); font-size: 11px; }
+  .card .cval { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; margin-top: 6px;
+                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #log { font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: var(--muted);
+         max-height: 160px; overflow: auto; padding: 8px 14px; white-space: pre-wrap; }
+  .note { color: var(--muted); padding: 12px 14px; }
+  @media (max-width: 640px) {
+    td.name, td.value, td.ctrl { display: block; width: auto; border-bottom: none; padding: 4px 14px; }
+    tr { display: block; border-bottom: 1px solid var(--line); padding: 6px 0; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>VSAF Control</h1>
+  <button id="connect">Connect SOURCE</button>
+  <button id="disconnect" class="secondary" disabled>Disconnect</button>
+  <span id="conn" class="chip">not connected</span>
+  <span id="fresh" class="chip">status: -</span>
+</header>
+<main>
+  <div id="unsupported" class="note" hidden>
+    This browser has no WebHID. Use Chrome or Edge on Windows, macOS or Linux, and open the page via
+    <code>http://localhost</code> (run <code>serve.py</code>).
+  </div>
+  <section id="controls-sec" hidden><h2>Controls</h2><table id="controls"></table></section>
+  <section id="status-sec" hidden><h2>Status</h2><div id="status" class="cards"></div></section>
+  <section><h2>Log</h2><div id="log"></div></section>
+</main>
+<script>
+"use strict";
+// Protocol: apps/audio_VSAF/main/usb_ctrl_hid.hpp (63-byte reports, little-endian)
+const VID = 0x303A, PID = 0x4002, USAGE_PAGE = 0xFF00;
+const OP = { GET: 1, SET: 2, DESC: 3, ENUM: 4, STATUS: 5 };
+const STATUS_NAMES = ["ok", "clamped", "read_only", "unknown", "invalid", "bad_op"];
+const TYPE_NAMES = ["int", "float", "enum"];
+const CHANNELS = ["L", "R", "C", "LS", "RS", "Sub"];
+
+let device = null;
+let params = [];          // descriptors in table order
+let byId = new Map();     // id -> descriptor
+let tag = 0;
+const pending = new Map();  // tag -> {resolve, timer}
+let lastSeq = 0, lastSeqTime = 0;
+
+const $ = (id) => document.getElementById(id);
+function log(msg) {
+  const el = $("log");
+  const t = new Date().toLocaleTimeString();
+  el.textContent = `${t}  ${msg}\n` + el.textContent.slice(0, 6000);
+}
+function setConn(text, cls) { const c = $("conn"); c.textContent = text; c.className = "chip " + (cls || ""); }
+
+// ---------- transport ----------
+function request(op, idOrIndex, value = 0, enumIndex = 0) {
+  const t = (tag = (tag + 1) & 0xFF);
+  const buf = new ArrayBuffer(63);
+  const dv = new DataView(buf);
+  dv.setUint8(0, op); dv.setUint8(1, t); dv.setUint16(2, idOrIndex, true);
+  if (op === OP.SET) dv.setFloat32(4, value, true);
+  if (op === OP.ENUM) dv.setUint8(4, enumIndex);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { pending.delete(t); reject(new Error("timeout")); }, 800);
+    pending.set(t, { resolve, timer });
+    device.sendReport(1, new Uint8Array(buf)).catch((e) => { clearTimeout(timer); pending.delete(t); reject(e); });
+  });
+}
+async function requestRetry(...args) {
+  for (let i = 0; i < 3; i++) {
+    try { return await request(...args); } catch (e) { if (i === 2) throw e; }
+  }
+}
+const utf8 = new TextDecoder("utf-8");
+function readString(dv, off, len) {  // NUL-padded UTF-8 (e.g. the unit "°C")
+  const bytes = new Uint8Array(dv.buffer, dv.byteOffset + off, len);
+  const end = bytes.indexOf(0);
+  return utf8.decode(end < 0 ? bytes : bytes.subarray(0, end));
+}
+function onInputReport(e) {
+  const dv = e.data;
+  if (e.reportId === 2) {
+    const p = pending.get(dv.getUint8(1));
+    if (p) { clearTimeout(p.timer); pending.delete(dv.getUint8(1)); p.resolve(dv); }
+  } else if (e.reportId === 3) {
+    onStatus(dv);
+  }
+}
+
+// ---------- parameter table ----------
+async function loadTable() {
+  params = []; byId = new Map();
+  const first = await requestRetry(OP.DESC, 0);
+  const count = first.getUint8(5);
+  for (let i = 0; i < count; i++) {
+    const dv = i === 0 ? first : await requestRetry(OP.DESC, i);
+    if (dv.getUint8(2) !== 0) continue;
+    const d = {
+      index: i, id: dv.getUint16(6, true), type: TYPE_NAMES[dv.getUint8(8)], rw: dv.getUint8(9) === 1,
+      min: dv.getFloat32(10, true), max: dv.getFloat32(14, true), def: dv.getFloat32(18, true),
+      enumCount: dv.getUint8(22), name: readString(dv, 23, 24), unit: readString(dv, 47, 8),
+      decimals: dv.getUint8(55), labels: [], value: NaN,
+    };
+    for (let k = 0; k < d.enumCount; k++) {
+      const r = await requestRetry(OP.ENUM, d.id, 0, k);
+      d.labels.push(readString(r, 6, 24));
+    }
+    params.push(d); byId.set(d.id, d);
+  }
+  buildUi();
+  log(`parameter table: ${params.length} parameters`);
+  await request(OP.STATUS, 0).catch(() => {});  // ask for an immediate status push
+}
+
+function fmt(d, v) {
+  if (Number.isNaN(v)) return "-";
+  if (d.type === "enum") return d.labels[Math.round(v)] ?? String(v);
+  if (d.name === "net.peers_mask") {
+    const on = CHANNELS.filter((_, c) => (Math.round(v) >> c) & 1);
+    return on.length ? on.join(" ") : "none";
+  }
+  if (d.name === "audio.rms_dbfs" && v <= -100) return "off";
+  const s = d.type === "int" ? String(Math.round(v)) : v.toFixed(d.decimals);
+  return d.unit ? `${s} ${d.unit}` : s;
+}
+
+function buildUi() {
+  const ctl = $("controls"), st = $("status");
+  ctl.innerHTML = ""; st.innerHTML = "";
+  for (const d of params) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td class="name">${d.name}<small>0x${d.id.toString(16).padStart(4, "0")}</small></td>` +
+                   `<td class="value" id="v${d.id}">-</td>`;
+    if (d.rw) {
+      const td = document.createElement("td"); td.className = "ctrl";
+      td.appendChild(makeControl(d)); tr.appendChild(td); ctl.appendChild(tr);
+    } else {
+      // Read-only: a small card (name, id, live value)
+      const card = document.createElement("div"); card.className = "card";
+      card.title = d.name;
+      card.innerHTML = `<div class="cname">${d.name}</div><div class="cid">0x${d.id.toString(16).padStart(4, "0")}</div>` +
+                       `<div class="cval" id="v${d.id}">-</div>`;
+      st.appendChild(card);
+    }
+  }
+  $("controls-sec").hidden = !ctl.children.length;
+  $("status-sec").hidden = !st.children.length;
+}
+
+function makeControl(d) {
+  const row = document.createElement("div"); row.className = "ctrlrow";
+  const stEl = document.createElement("span"); stEl.className = "st"; stEl.id = `s${d.id}`;
+  let input;
+  if (d.type === "enum") {
+    input = document.createElement("select");
+    d.labels.forEach((l, i) => { const o = document.createElement("option"); o.value = i; o.textContent = l; input.appendChild(o); });
+    input.addEventListener("change", () => setParam(d, Number(input.value)));
+  } else if (d.type === "float") {
+    input = document.createElement("input"); input.type = "range"; input.className = "fb";
+    input.title = "Knob: value you set. Filled track: value the SOURCE reports as applied.";
+    input.min = d.min; input.max = d.max; input.step = Math.pow(10, -Math.max(d.decimals, 0));
+    // While dragging: at most 10 sets per second; the final position is always sent
+    let lastSent = 0, timer = null;
+    input.addEventListener("input", () => {
+      const now = performance.now();
+      clearTimeout(timer);
+      if (now - lastSent >= 100) { lastSent = now; setParam(d, Number(input.value)); }
+      else timer = setTimeout(() => { lastSent = performance.now(); setParam(d, Number(input.value)); }, 100 - (now - lastSent));
+    });
+  } else {
+    input = document.createElement("input"); input.type = "number";
+    input.min = d.min; input.max = d.max; input.step = 1;
+    input.addEventListener("change", () => setParam(d, Number(input.value)));
+  }
+  input.id = `c${d.id}`;
+  d.editing = false;
+  input.addEventListener("focus", () => (d.editing = true));
+  input.addEventListener("blur", () => (d.editing = false));
+  input.addEventListener("pointerdown", () => (d.editing = true));
+  input.addEventListener("pointerup", () => setTimeout(() => (d.editing = false), 300));
+  row.appendChild(input); row.appendChild(stEl);
+  return row;
+}
+
+async function setParam(d, value) {
+  const stEl = $(`s${d.id}`);
+  try {
+    const dv = await requestRetry(OP.SET, d.id, value);
+    const status = STATUS_NAMES[dv.getUint8(2)] ?? "?";
+    const applied = dv.getFloat32(5, true);
+    showValue(d, applied, true);
+    stEl.textContent = status; stEl.className = "st " + (status === "ok" ? "" : status === "clamped" ? "clamped" : "err");
+    log(`set ${d.name} = ${value} -> applied ${fmt(d, applied)} (${status})`);
+  } catch (e) {
+    stEl.textContent = "no reply"; stEl.className = "st err";
+    log(`set ${d.name}: ${e.message}`);
+  }
+}
+
+function showValue(d, v, fromSet = false) {
+  d.value = v;
+  const el = $(`v${d.id}`); if (el) el.textContent = fmt(d, v);
+  const c = $(`c${d.id}`);
+  if (!c) return;
+  if (c.type === "range") {
+    // Filled track = read-back; the knob (what you set) is only moved while you are not using the slider
+    const pct = d.max > d.min ? Math.min(100, Math.max(0, ((v - d.min) / (d.max - d.min)) * 100)) : 0;
+    c.style.setProperty("--fill", pct.toFixed(2) + "%");
+    if (!d.editing) c.value = String(v);
+  } else if (!d.editing || fromSet) {
+    c.value = d.type === "enum" ? String(Math.round(v)) : String(v);
+  }
+}
+
+function onStatus(dv) {  // report v2: [0] version, [1..4] seq, [5] n, then n x (u8 index, f32 value)
+  if (dv.getUint8(0) !== 2) return;
+  const seq = dv.getUint32(1, true), n = dv.getUint8(5);
+  for (let k = 0; k < n; k++) {
+    const d = params[dv.getUint8(6 + 5 * k)];
+    if (d) showValue(d, dv.getFloat32(7 + 5 * k, true));
+  }
+  if (seq !== lastSeq) { lastSeq = seq; lastSeqTime = performance.now(); }
+}
+setInterval(() => {
+  const f = $("fresh");
+  if (!device) { f.textContent = "status: -"; f.className = "chip"; return; }
+  const age = lastSeqTime ? (performance.now() - lastSeqTime) / 1000 : Infinity;
+  f.textContent = lastSeqTime ? `status #${lastSeq}, ${age.toFixed(1)} s old` : "status: waiting";
+  f.className = "chip " + (age < 2.5 ? "ok" : "warn");
+}, 500);
+
+// ---------- connect ----------
+async function openDevice(dev) {
+  if (!dev.opened) await dev.open();
+  device = dev;
+  dev.addEventListener("inputreport", onInputReport);
+  setConn(`connected: ${dev.productName || "VSAF SOURCE"}`, "ok");
+  $("connect").disabled = true; $("disconnect").disabled = false;
+  log("connected");
+  try { await loadTable(); } catch (e) { log(`reading the parameter table failed: ${e.message}`); }
+}
+async function closeDevice() {
+  if (!device) return;
+  try { await device.close(); } catch (e) {}
+  device = null; lastSeqTime = 0;
+  setConn("not connected"); $("connect").disabled = false; $("disconnect").disabled = true;
+  log("disconnected");
+}
+const filters = [{ vendorId: VID, productId: PID, usagePage: USAGE_PAGE }];
+$("connect").addEventListener("click", async () => {
+  try {
+    const devs = await navigator.hid.requestDevice({ filters });
+    if (devs.length) await openDevice(devs[0]);
+  } catch (e) { log(`connect: ${e.message}`); setConn("connect failed", "err"); }
+});
+$("disconnect").addEventListener("click", closeDevice);
+
+if (!("hid" in navigator)) {
+  $("unsupported").hidden = false; $("connect").disabled = true;
+} else {
+  navigator.hid.addEventListener("disconnect", (e) => { if (e.device === device) { closeDevice(); setConn("SOURCE unplugged", "warn"); } });
+  navigator.hid.addEventListener("connect", async (e) => { if (!device) { log("SOURCE plugged in"); await openDevice(e.device).catch((x) => log(x.message)); } });
+  navigator.hid.getDevices().then(async (devs) => {  // reconnect without the chooser if permission is remembered
+    const d = devs.find((x) => x.vendorId === VID && x.productId === PID && x.collections.some((c) => c.usagePage === USAGE_PAGE));
+    if (d) await openDevice(d).catch((x) => log(x.message));
+  });
+}
+</script>
+</body>
+</html>

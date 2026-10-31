@@ -34,6 +34,7 @@ struct Desc {
     const char* const* enum_names;   ///< ENUM only: labels, enum_count entries
     uint8_t enum_count;
     const char* help;                ///< One-line description
+    uint8_t decimals;                ///< Display precision (decimal places), for the console and UIs
 };
 
 /** @brief Result of a write. */

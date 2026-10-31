@@ -65,6 +65,8 @@ void EspNowBroadcastEngine::runSrcDspLoop() {
             m_acc_overruns.fetch_add(ticks - 1, std::memory_order_relaxed);
         }
         if (m_state.load(std::memory_order_acquire) != NetworkState::CAST) {
+            // No audio while paused: the master gain may take its target at once (no ramp needed)
+            m_master_now_db.store(m_master_gain_db.load(std::memory_order_relaxed), std::memory_order_relaxed);
             continue;
         }
 
@@ -222,10 +224,22 @@ void EspNowBroadcastEngine::srcRunDsp(SrcFrame& f) {
         usb_audio_get_gain(&tgt_l, &tgt_r);
     }
 #endif
-    // Master volume (parameter audio.master_db / console vol): USB audio and the test synth, not caltone
+    // Master volume (parameter audio.master_db / console vol): USB audio and the test synth, not caltone.
+    // Slew-rate limited like the SINK output gain: the gain in effect moves toward the target by <= 1 dB per
+    // 10 ms frame (100 dB/s); towards mute it drops to silence below -60 dB, from mute it starts at -60 dB.
+    // The per-sample ramp below smooths each 1 dB step over the frame.
     {
-        const float mdb = m_master_gain_db.load(std::memory_order_relaxed);
-        const float mg = (mdb <= -96.0f) ? 0.0f : std::pow(10.0f, mdb / 20.0f);
+        const float tgt = m_master_gain_db.load(std::memory_order_relaxed);
+        float cur = m_master_now_db.load(std::memory_order_relaxed);
+        if (tgt <= -96.0f && cur <= -60.0f) {
+            cur = tgt;
+        } else if (cur < tgt) {
+            cur = std::min(tgt, (cur <= -96.0f ? -60.0f : cur) + 1.0f);
+        } else if (cur > tgt) {
+            cur = std::max(tgt, cur - 1.0f);
+        }
+        m_master_now_db.store(cur, std::memory_order_relaxed);
+        const float mg = (cur <= -96.0f) ? 0.0f : std::pow(10.0f, cur / 20.0f);
         tgt_l *= mg;
         tgt_r *= mg;
     }

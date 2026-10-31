@@ -42,7 +42,7 @@ set(requires
 )
 
 if(CONFIG_IDF_TARGET_ESP32S3)
-    list(APPEND srcs "usb_audio.cpp")
+    list(APPEND srcs "usb_audio.cpp" "usb_ctrl_hid.cpp")
 endif()
 
 # REQUIRES is evaluated before Kconfig (CONFIG_*) values exist, so gate it on the build target.

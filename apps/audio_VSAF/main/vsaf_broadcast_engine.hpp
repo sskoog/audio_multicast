@@ -331,6 +331,8 @@ public:
     /** @brief SOURCE master volume (dB, -96 = mute .. 0), applied in the DSP stage to all channels (ramped). */
     void setMasterGainDb(float db) { m_master_gain_db.store(std::clamp(db, -96.0f, 0.0f), std::memory_order_relaxed); }
     float getMasterGainDb() const { return m_master_gain_db.load(std::memory_order_relaxed); }
+    /** @brief Master gain currently in effect (dB): follows the target at 100 dB/s (DSP stage, once per frame). */
+    float getMasterGainNowDb() const { return m_master_now_db.load(std::memory_order_relaxed); }
 
     // Audio Metering
     int16_t getAudioFrameRMS_int16() { return m_audio_meter.getAudioFrameRMS_int16(); }
@@ -775,7 +777,8 @@ private: // SOURCE: max |tick - grid| (us) since last read
     Audio::CalSignal           m_cal[2];
     std::atomic<uint8_t>       m_cal_active{0};
     std::atomic<bool>          m_cal_on{false};
-    std::atomic<float>         m_master_gain_db{0.0f};
+    std::atomic<float>         m_master_gain_db{0.0f};   // target (set)
+    std::atomic<float>         m_master_now_db{0.0f};    // in effect (slew-rate limited, DSP stage)
     bool                       m_is_stereo;
 
     wifi_phy_mode_t            m_tx_phy_mode;

@@ -10,6 +10,9 @@
 #include "diagnostics.hpp"
 // #include "lc3_benchmark.hpp" (Disabled)
 #include "usb_audio.hpp"
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#include "usb_ctrl_hid.hpp"
+#endif
 #include "stats_test.hpp"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -410,6 +413,9 @@ extern "C" void app_main(void) {
     } else if (cfg->node_role == NODE_ROLE_SOURCE) {
         // Initialize USB Audio + CDC for SOURCE
         usb_audio_init();
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+        usb_ctrl_hid_start();  // VSAF control over USB HID (parameter table, WebHID page)
+#endif
     }
 
     // Console first (log hook + RAM log ring + CLI task), so a misbehaving engine start can still be

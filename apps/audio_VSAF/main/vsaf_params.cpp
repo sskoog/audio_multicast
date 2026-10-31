@@ -44,27 +44,27 @@ constexpr uint16_t ID_RF_CHANNEL = 0x1002;
 
 const Desc kTable[] = {
     {ID_CPU_PCT, "sys.cpu_pct", "%", Type::INT, Access::RO, 0, 100, 0, nullptr, 0,
-     "CPU load: SOURCE (DSP + encode) / 2 cores, SINK decode / frame"},
-    {ID_TEMP_C, "sys.temp_c", "C", Type::FLOAT, Access::RO, -40, 125, 0, nullptr, 0, "On-chip temperature"},
-    {ID_PEERS_ONLINE, "net.peers_online", "", Type::INT, Access::RO, 0, 6, 0, nullptr, 0, "SINKs online"},
+     "CPU load: SOURCE (DSP + encode) / 2 cores, SINK decode / frame", 0},
+    {ID_TEMP_C, "sys.temp_c", "\xC2\xB0" "C", Type::FLOAT, Access::RO, -40, 125, 0, nullptr, 0, "On-chip temperature", 0},
+    {ID_PEERS_ONLINE, "net.peers_online", "", Type::INT, Access::RO, 0, 6, 0, nullptr, 0, "SINKs online", 0},
     {ID_PEERS_MASK, "net.peers_mask", "", Type::INT, Access::RO, 0, 63, 0, nullptr, 0,
-     "Online channels, bit c = channel c (0 L, 1 R, 2 C, 3 LS, 4 RS, 5 Sub)"},
-    {ID_DSP_MS, "dsp.time_ms", "ms", Type::FLOAT, Access::RO, 0, 10, 0, nullptr, 0, "DSP stage per frame"},
+     "Online channels, bit c = channel c (0 L, 1 R, 2 C, 3 LS, 4 RS, 5 Sub)", 0},
+    {ID_DSP_MS, "dsp.time_ms", "ms", Type::FLOAT, Access::RO, 0, 10, 0, nullptr, 0, "DSP stage per frame", 2},
     {ID_ENC_HQ_MS, "enc.hq_ms", "ms", Type::FLOAT, Access::RO, 0, 20, 0, nullptr, 0,
-     "HQ + sub LC3 encode per frame, both cores"},
+     "HQ + sub LC3 encode per frame, both cores", 2},
     {ID_ENC_MQ_MS, "enc.mq_ms", "ms", Type::FLOAT, Access::RO, 0, 20, 0, nullptr, 0,
-     "MQ (redundancy) LC3 encode per frame, both cores"},
+     "MQ (redundancy) LC3 encode per frame, both cores", 2},
     {ID_TX_END_MS, "rf.tx_end_ms", "ms", Type::FLOAT, Access::RO, 0, 10, 0, nullptr, 0,
-     "Last packet of the frame on air, after the frame tick (deadline 9.5 ms)"},
-    {ID_TX_PKTS_S, "rf.tx_pkts_s", "1/s", Type::INT, Access::RO, 0, 1000, 0, nullptr, 0, "Packets sent per second"},
+     "Last packet of the frame on air, after the frame tick (deadline 9.5 ms)", 2},
+    {ID_TX_PKTS_S, "rf.tx_pkts_s", "1/s", Type::INT, Access::RO, 0, 1000, 0, nullptr, 0, "Packets sent per second", 0},
     {ID_RMS_DBFS, "audio.rms_dbfs", "dBFS", Type::FLOAT, Access::RO, -100, 0, -100, nullptr, 0,
-     "Audio RMS (SOURCE input / SINK output), -100 = silent or off"},
+     "Audio RMS (SOURCE input / SINK output), -100 = silent or off", 1},
     {ID_MASTER_DB, "audio.master_db", "dB", Type::FLOAT, Access::RW, -96, 0, 0, nullptr, 0,
-     "Master volume on the SOURCE (all channels), -96 = mute; ramped"},
+     "Master volume on the SOURCE (all channels), -96 = mute; set = target, read = in effect (100 dB/s ramp)", 1},
     {ID_SOURCE_MODE, "source.mode", "", Type::ENUM, Access::RW, 0, 2, 1, kModeNames, 3,
-     "SOURCE input / state: pause (IDLE), cast (USB audio), synth (test synth)"},
+     "SOURCE input / state: pause (IDLE), cast (USB audio), synth (test synth)", 0},
     {ID_RF_CHANNEL, "rf.channel", "", Type::INT, Access::RW, 1, 13, 13, nullptr, 0,
-     "Wi-Fi channel (applied at the next frame boundary)"},
+     "Wi-Fi channel (applied at the next frame boundary)", 0},
 };
 constexpr size_t kCount = sizeof(kTable) / sizeof(kTable[0]);
 
@@ -139,7 +139,7 @@ bool get(uint16_t id, float& value) {
         case ID_TX_END_MS: value = s.tx_end_ms; return true;
         case ID_TX_PKTS_S: value = s.tx_pkts_s; return true;
         case ID_RMS_DBFS: value = s.rms_dbfs; return true;
-        case ID_MASTER_DB: value = s_engine ? s_engine->getMasterGainDb() : 0.0f; return true;
+        case ID_MASTER_DB: value = s_engine ? s_engine->getMasterGainNowDb() : 0.0f; return true;  // in effect (ramped)
         case ID_SOURCE_MODE: value = currentMode(); return true;
         case ID_RF_CHANNEL: value = s_engine ? s_engine->getWifiChannel() : 0; return true;
         default: return false;
@@ -157,7 +157,7 @@ SetStatus set(uint16_t id, float value, float& applied) {
     switch (id) {
         case ID_MASTER_DB:
             s_engine->setMasterGainDb(v);
-            applied = s_engine->getMasterGainDb();
+            applied = s_engine->getMasterGainNowDb();  // in effect now; it reaches the target at 100 dB/s
             return st;
         case ID_SOURCE_MODE: {
             const auto m = static_cast<Mode>(static_cast<int>(v));
@@ -202,10 +202,10 @@ void formatValue(const Desc& d, float value, char* out, size_t out_len) {
     if (d.type == Type::ENUM) {
         const int i = static_cast<int>(value);
         snprintf(out, out_len, "%s", (i >= 0 && i < d.enum_count) ? d.enum_names[i] : "?");
-    } else if (d.type == Type::INT) {
+    } else if (d.type == Type::INT || d.decimals == 0) {
         snprintf(out, out_len, "%ld", static_cast<long>(std::lround(value)));
     } else {
-        snprintf(out, out_len, "%.2f", static_cast<double>(value));
+        snprintf(out, out_len, "%.*f", static_cast<int>(d.decimals), static_cast<double>(value));
     }
 }
 

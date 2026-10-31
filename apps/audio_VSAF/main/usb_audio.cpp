@@ -5,6 +5,7 @@
 #include "esp_rom_sys.h"
 #include "tinyusb.h"
 #include "tusb.h"
+#include "usb_ctrl_hid.hpp"
 #include "soc/rtc_cntl_reg.h"
 #include "freertos/FreeRTOS.h"
 #include <atomic>
@@ -33,6 +34,7 @@ enum {
     ITF_NUM_CDC_DATA,
     ITF_NUM_AUDIO_CONTROL,
     ITF_NUM_AUDIO_STREAMING,
+    ITF_NUM_HID,               // VSAF control (vendor HID, usb_ctrl_hid.cpp); last, so CDC / audio keep their numbers
     ITF_NUM_TOTAL
 };
 
@@ -42,6 +44,8 @@ enum {
 #define EPNUM_CDC_IN      0x82
 #define EPNUM_AUDIO_OUT   0x03
 #define EPNUM_AUDIO_FB    0x83
+#define EPNUM_HID_OUT     0x04
+#define EPNUM_HID_IN      0x84
 
 // String descriptor indices
 enum {
@@ -51,7 +55,7 @@ enum {
     STRID_SERIAL,
     STRID_CDC_INTERFACE,
     STRID_AUDIO_INTERFACE,
-    STRID_MAC
+    STRID_HID_INTERFACE
 };
 
 // -----------------------------------------------------------------------------
@@ -105,7 +109,9 @@ enum {
   /* Standard AS Isochronous Synch Endpoint Descriptor (4.6.2.1) - Feedback IN */ \
   TUD_AUDIO10_DESC_STD_AS_ISO_SYNC_EP(_epfb, 0)
 
-#define TUSB_DESC_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + TUD_AUDIO_SPEAKER_DESC_LEN(3))
+static const uint8_t s_hid_report_desc[] = {VSAF_HID_REPORT_DESC};
+
+#define TUSB_DESC_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + TUD_AUDIO_SPEAKER_DESC_LEN(3) + TUD_HID_INOUT_DESC_LEN)
 
 const uint8_t uac_cdc_configuration_descriptor[] = {
     // Config number, interface count, string index, total length, attribute, power in mA
@@ -115,8 +121,17 @@ const uint8_t uac_cdc_configuration_descriptor[] = {
     TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, STRID_CDC_INTERFACE, EPNUM_CDC_NOTIF, 8, EPNUM_CDC_OUT, EPNUM_CDC_IN, 64),
 
     // Audio Speaker (UAC1) supporting 16, 32, and 48 kHz with Asynchronous Feedback EP
-    TUD_AUDIO_SPEAKER_DESCRIPTOR(ITF_NUM_AUDIO_CONTROL, STRID_AUDIO_INTERFACE, AUDIO_BYTES_PER_SAMP, AUDIO_BPS, EPNUM_AUDIO_OUT, AUDIO_EP_SIZE, EPNUM_AUDIO_FB, 16000, 32000, 48000)
+    TUD_AUDIO_SPEAKER_DESCRIPTOR(ITF_NUM_AUDIO_CONTROL, STRID_AUDIO_INTERFACE, AUDIO_BYTES_PER_SAMP, AUDIO_BPS, EPNUM_AUDIO_OUT, AUDIO_EP_SIZE, EPNUM_AUDIO_FB, 16000, 32000, 48000),
+
+    // VSAF control: vendor HID with interrupt OUT + IN, 64-byte reports, 5 ms polling
+    TUD_HID_INOUT_DESCRIPTOR(ITF_NUM_HID, STRID_HID_INTERFACE, HID_ITF_PROTOCOL_NONE, sizeof(s_hid_report_desc),
+                             EPNUM_HID_OUT, EPNUM_HID_IN, 64, 5)
 };
+
+extern "C" uint8_t const* tud_hid_descriptor_report_cb(uint8_t instance) {
+    (void)instance;
+    return s_hid_report_desc;
+}
 
 static const char *s_string_descriptors[] = {
     (char[]){0x09, 0x04}, // 0: is supported language is English (0x0409)
@@ -125,6 +140,7 @@ static const char *s_string_descriptors[] = {
     "123456",           // 3: Serials
     "CDC Console",      // 4: CDC Interface
     "Node16 audio",     // 5: Audio Interface
+    "VSAF Control",     // 6: HID control interface (WebHID page)
     NULL
 };
 
@@ -356,7 +372,7 @@ void usb_audio_init(void) {
     tinyusb_config_t tusb_cfg = {};
     tusb_cfg.descriptor.device = &s_device_descriptor;
     tusb_cfg.descriptor.string = s_string_descriptors;
-    tusb_cfg.descriptor.string_count = 6;
+    tusb_cfg.descriptor.string_count = 7;
     tusb_cfg.descriptor.full_speed_config = uac_cdc_configuration_descriptor;
     tusb_cfg.descriptor.high_speed_config = uac_cdc_configuration_descriptor;
     tusb_cfg.phy.skip_setup = false;
