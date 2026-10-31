@@ -245,7 +245,7 @@ The 10 ms frame is the master metronome (GOALS.md): every task must finish insid
 | Task | Core | Prio | Role |
 | :--- | :--- | :--- | :--- |
 | `esp_timer` callback `frameTimerCb` | 0 | 22 | Frame tick: notifies `src_dsp0` and `src_rf` (`SRC_BIT_TICK`) |
-| `src_dsp0` | 0 | 5 | USB read (or tone synth / `caltone`) -> LR4 crossover -> sub decimation -> publish frame -> encode jobs |
+| `src_dsp0` | 0 | 5 | USB read (or tone synth / `caltone`) -> USB host volume / mute and master volume (ramped) -> LR4 crossover -> sub decimation -> publish frame -> encode jobs |
 | `src_enc1` | 1 | 5 | Encode jobs of the published frame |
 | `src_rf` | 1 | 7 | Radio owner: radio health, deferred channel / PHY changes, one packet in flight |
 | Wi-Fi driver | 0 | 23 | ESP-IDF; calls the ESP-NOW send callback (TX-done) |
@@ -326,7 +326,7 @@ When packets arrive at the SINK:
 4. **Triple Packet Drop for Subwoofer (`Delta_seq = 4`)**: Recovers `t-3` (60B) -> `t-2` (60B) -> `t-1` (60B) -> pushes `t0` (60B).
 5. **Irrecoverable Burst Drop (`Delta_seq > 3`)**: SINK synthesizes LC3 PLC frames for intermediate slots via `lc3_decode(..., NULL, pcm_out)`. Every PLC frame counts as a glitch in the GOALS.md reliability target.
 
-The SINK decoder adapts to the frame size per frame (120 B HQ vs 60 B redundancy) while keeping its MDCT overlap state. Without time sync, playout is FIFO driven: a SINK leaves `SCANNING` after a prefill of 5 frames (50 ms: 2 in DMA, 3 in the FIFO). With time sync (section 6), the SINK waits up to `CONFIG_VSAF_SYNC_WAIT_MS` (1.5 s) for a control frame, and the presentation time sets the playout position. A frame is popped and decoded when the DMA needs it, i.e. about (DMA queue + staging) before its presentation time, so it must arrive by roughly PT - 12 ms = t0 + 38 ms at 50 ms latency (5 ms descriptors; with the old 10 ms descriptors it was t0 + ~23 ms, which made the t-2 / t-3 copies, arriving ~20-30 ms after t0, too late: 4 PLC in the first 80-min synced soak). A late packet is waited for (up to 6 ms) only while the DMA queue still has audio.
+The SINK decoder adapts to the frame size per frame (120 B HQ vs 60 B redundancy) while keeping its MDCT overlap state. On the C6 this needs Espressif's decoder in **VBR mode** (`is_cbr = false`): until 2026-10-25 it was opened in CBR mode with `nbyte = 120`, so every 60-byte frame failed and was concealed (the C6 subwoofer never played; C6 "recovered" redundancy frames were silent). Decoder output: 16-bit, or 32-bit (shifted to 24-bit) in the C6 24-bit mode (section 9.2). Checked 2026-10-29 with `deccmp`: on the same live frames the Espressif decoder matches liblc3 within +/-5 LSB on loud music (SNR 71-73 dB). Without time sync, playout is FIFO driven: a SINK leaves `SCANNING` after a prefill of 5 frames (50 ms: 2 in DMA, 3 in the FIFO). With time sync (section 6), the SINK waits up to `CONFIG_VSAF_SYNC_WAIT_MS` (1.5 s) for a control frame, and the presentation time sets the playout position. A frame is popped and decoded when the DMA needs it, i.e. about (DMA queue + staging) before its presentation time, so it must arrive by roughly PT - 12 ms = t0 + 38 ms at 50 ms latency (5 ms descriptors; with the old 10 ms descriptors it was t0 + ~23 ms, which made the t-2 / t-3 copies, arriving ~20-30 ms after t0, too late: 4 PLC in the first 80-min synced soak). A late packet is waited for (up to 6 ms) only while the DMA queue still has audio.
 
 ### 5.3 SINK clock-drift compensation (single-sample insert / drop)
 
@@ -423,16 +423,18 @@ How each node reads its console:
 
 | Command | Target | Description |
 | :--- | :--- | :--- |
-| `vol <0..100>` | SOURCE / SINK | Set volume percentage (0 = Mute, 100 = 0 dBFS). Broadcasts from SOURCE to all SINKs. |
+| `vol <0..100>` | SOURCE / SINK | SOURCE: master volume for all channels (parameter `audio.master_db`, section 7.5), 0..-48 dB curve, 0 = mute. SINK: local volume of that SINK, ramped at 100 dB/s. Before 2026-10-29 `vol` and `mute` had no effect on either role. |
 | `voldb <-96..0>` | SOURCE / SINK | Set volume directly in decibels. |
 | `volu8 <0..255>` | SOURCE / SINK | Set raw 8-bit volume level. |
 | `volch <ch> <0..255>` | SOURCE | Set volume for one channel (0: Left, 1: Right, 2: Center, 3: LSurr, 4: RSurr, 5: Sub). |
-| `mute` / `unmute` | Both | Smooth mute / unmute (96 dB/s slew). |
+| `mute` / `unmute` | Both | Mute / unmute (SINK: ramped at 100 dB/s). |
 | `postgain <dB>` | SINK | Software post-gain (PCM5102A calibration, see AGENTS.md). |
 | `peer list` / `peers` | SOURCE | Registered SINK peers, online status, RTT and telemetry. |
 | `start` / `play` / `cast` | SOURCE | Begin broadcast (`CAST`). |
 | `stop` / `pause` | SOURCE | Stop transmission (`IDLE`). |
 | `synth [on/off]` / `tone` | SOURCE | Internal test synthesizer instead of USB audio. |
+| `caltone pink [dBFS]` / `caltone sine [dBFS] [sat Hz] [sub Hz]` / `caltone off` | SOURCE | Calibration signal for SPL level matching, replacing the program input and bypassing the crossover: pink noise 500-2000 Hz on the satellites and 40-100 Hz on the sub, or sines (default 1 kHz / 63 Hz), all at the same RMS level (default -20, max -6 dBFS). Not affected by the master volume. Method and results in AGENTS.md. |
+| `usbvol` | SOURCE | USB host volume / mute requests (UAC1 feature unit): count, master / L / R dB, whether they are applied. Windows sends its volume slider as these requests and does not scale the PCM; the SOURCE applies the lower of master and channel volume (`CONFIG_VSAF_APPLY_USB_HOST_VOLUME`). |
 | `sr <8k..48k>` | SOURCE | Satellite sample rate. |
 | `scan` / `survey` | SOURCE | Passive channel survey 1..13 (refused while casting). |
 | `wifich <1..13>` / `channel` | SOURCE / SINK | Set Wi-Fi channel (SOURCE: applied at the next frame boundary). |
@@ -475,6 +477,49 @@ How each node reads its console:
 | `syncprobe 0\|1` | SINK | Print `[SYNC] rx` / `[SYNC] play` lines once per SOURCE second (see `tools/sync_probe.py`). |
 | `syncoff 0\|1` | SINK | Debug: ignore the time sync and use the FIFO-level fallback (section 5.3). |
 
+### 7.5 Parameter table (`param`, `vsaf_params.hpp`)
+
+One transport-independent table names, describes, reads and writes runtime parameters: the console uses it today, a USB HID (WebHID) interface or a control node can use the same calls later.
+
+- Every parameter has a **stable numeric ID** (high byte = group: 0x01 system, 0x02 SOURCE pipeline, 0x03 radio, 0x04 audio status, 0x10 controls; IDs are never reused), a dotted name, a unit, a type (int / float / enum), access (ro / rw), min, max and default.
+- **Read-only values** come from a snapshot the 1 s heartbeat publishes (with a sequence number), so a read never resets a counter.
+- **Writes** go through the same engine calls as the console commands and return the value actually applied, with a status `ok` / `clamped` / `read_only` / `unknown` / `invalid`.
+- Replies are single tagged lines, e.g. `[PARAM] id=0x1000 name=audio.master_db set=-6 applied=-6.00 status=ok`.
+
+| Command | Description |
+| :--- | :--- |
+| `param list` | All parameters with value, unit, type, access, min / max / default (`count` and `status_seq` first) |
+| `param get <name\|id>` | One parameter (`audio.master_db`, `0x1000` or `4096`) |
+| `param set <name\|id> <value>` | Write; enum values by label or index (`param set source.mode synth`) |
+
+| ID | Name | Access | Unit | Meaning |
+| :--- | :--- | :--- | :--- | :--- |
+| 0x0100 | `sys.cpu_pct` | ro | % | CPU load (heartbeat CPU %) |
+| 0x0101 | `sys.temp_c` | ro | C | On-chip temperature |
+| 0x0110 | `net.peers_online` | ro | | SINKs online |
+| 0x0111 | `net.peers_mask` | ro | | Online channels, bit c = channel c |
+| 0x0200 | `dsp.time_ms` | ro | ms | DSP stage per frame |
+| 0x0201 | `enc.hq_ms` | ro | ms | HQ + sub encode per frame, both cores |
+| 0x0202 | `enc.mq_ms` | ro | ms | MQ encode per frame, both cores |
+| 0x0300 | `rf.tx_end_ms` | ro | ms | Last packet on air after the frame tick |
+| 0x0301 | `rf.tx_pkts_s` | ro | 1/s | Packets sent per second |
+| 0x0400 | `audio.rms_dbfs` | ro | dBFS | Input RMS, -100 = silent / off |
+| 0x1000 | `audio.master_db` | rw | dB | Master volume -96..0 (-96 = mute), SOURCE DSP stage, ramped |
+| 0x1001 | `source.mode` | rw | enum | `pause` (IDLE) / `cast` (USB audio) / `synth` (test synth) |
+| 0x1002 | `rf.channel` | rw | | Wi-Fi channel 1..13, applied at the next frame boundary |
+
+### 7.6 SINK audio and I2S diagnostics
+
+| Command | Description |
+| :--- | :--- |
+| `thdn [Hz] [s]` | THD+N of a sine (play `caltone sine` on the SOURCE) at the decoder output and at the I2S input (after gain), integer Q24 meter. Tables allocated only while it runs |
+| `deccmp` | C6: capture 40 consecutive live HQ frames and dump them with the Espressif-decoded PCM as hex (`[DF]` / `[DP]` lines) for a PC comparison against liblc3 |
+| `i2scap` | Capture BCLK / WS / DOUT on the pins with the CPU (~250 ns per sample, 16-bit slots) while the SINK sends test words (left `0x4B2D`, right `0x1E87`), and report where each word starts after the WS edge (1 = Philips I2S, 0 = left-justified) |
+| `clkmeas` | CPU clock (reported and measured against esp_timer), APB, XTAL; BCLK and LRCLK counted in hardware (PCNT) over 20 x 10 ms, with their ratio |
+| `i2sdrive <0..3>` | I2S pad drive strength (~5 / 10 / 20 / 40 mA), live |
+| `i2sclk <160\|240\|xtal> [256\|384\|512]` | I2S clock source and MCLK multiple, live (short gap). 240 = C6 PLL_F240M |
+| `i2sfmt <i2s\|lj>` / `i2sbclk <norm\|inv>` / `i2sws <norm\|inv>` | Link format test hooks: Philips 1-bit delay or left-justified, BCLK / WS inversion, live |
+
 ---
 
 ## 8. Real-Time Telemetry Specification
@@ -491,7 +536,7 @@ Nodes print fixed-width 1 s heartbeats over USB serial. Test scripts parse these
 - `TXend`: when the frame's last packet finished on air, in ms after the frame tick. This is the critical path; it must stay below the 9.5 ms deadline. It is not CPU time and must not be added to the other stages.
 - `CPU %`: (DSP + EncHQ + EncRed) / (2 cores x 10 ms).
 
-### 8.2 SINK Telemetry (Node 4 shown: S3, PCM5102A, -20 dB post-gain; C6 SINKs print the same columns)
+### 8.2 SINK Telemetry (Node 4 shown: S3, PCM5102A; C6 SINKs print the same columns; post-gains in AGENTS.md)
 ```text
 |    CPU      | STATE |  CHAN  |    WIFI     | AUDIO     dBFS      SR   PD    CODEC ms  | AMP dB   PKTS  RED PLC DMA OVF UDR   | BUF+DMA   DRIFT CORR | SYNC  e_us |         TIME & SYNCHRONIZATION (ms)    |
 |  %   C  MHz |       |        | RSSI Ch PHY |  Enc    RMS   Pk   kHz   ms   Avg   Pk   |  SW  HW   1/s  rec tot UDR ovf udr   |  buf min adj    ppm  |       (us) |  Local  Master  EMA_offs RB_med RB_rng |
@@ -548,7 +593,13 @@ Node 16 has no PSRAM (512 KB SRAM), so internal RAM and the shared flash cache a
 | `CONFIG_VSAF_TX_POWER_QDBM` (`config.h`, all nodes) | 40 (10 dBm requested) | Moderate on purpose: SOURCE heating (600 packets/s) and future battery SINKs. The old value 12 ("+3 dBm") actually transmitted at 2 dBm. |
 | `CONFIG_VSAF_SCAN_DWELL_MS` / `CONFIG_VSAF_SCAN_HOLD_MS` (`config.h`, SINK) | 30 ms / 3000 ms | Channel search from the preferred channel upward, and the hold on the last channel after a stream loss (section 10). |
 
-Free internal heap with all pipeline tasks running: ~30 KB (largest block 16 KB).
+Free internal heap with all pipeline tasks running: ~29 KB (largest block 16 KB, lowest ever ~25 KB). C6 SINKs: ~77 KB.
+
+**Memory by role (rule since 2026-10-31).** The same binary runs as SOURCE or SINK, so every role-specific buffer is allocated by the role that needs it, once, at start: never inside a frame loop, never freed in steady state.
+- SOURCE: LC3 encoder bank in `init()`; PCM / DSP / packet buffers (`SrcBuffers`, 25.7 KB) in `start()` before the pipeline tasks are created (if it fails, the pipeline is not started and the error is logged).
+- SINK: LC3 decoder in `init()`; playback buffers (decode, stereo, silence, DMA staging, 24-bit packing; ~16 KB on S3) at the start of the SINK task.
+- Diagnostics (`thdn`, `i2scap`, `deccmp`, `encbench`) allocate only while the command runs, in the console task.
+- Background: as statics these buffers once took ~27 KB on every SINK and ~16 KB on the SOURCE; on 2026-10-31 the diagnostic statics left the SOURCE with 2.8 KB free and the pipeline tasks could not be created. Check `mem` on Node 16 after every change.
 
 ### 9.2 Time sync and SINK playout configuration (`config.h`)
 
@@ -559,6 +610,9 @@ Free internal heap with all pipeline tasks running: ~30 KB (largest block 16 KB)
 | `CONFIG_VSAF_DAC_DELAY_US` | 0 | SINK: fixed I2S -> analog delay added to the predicted play time. Not calibrated yet. |
 | `CONFIG_VSAF_DMA_DESC_PER_FRAME` | 2 | SINK: I2S DMA descriptors per 10 ms frame (2 = 5 ms descriptors; always 2 in the ring). |
 | `CONFIG_VSAF_JIT_MARGIN_US` | 2500 | SINK: the wait for a late packet ends this long before the DMA queue runs dry. |
+| `CONFIG_VSAF_C6_DAC_BITS` | 24 | C6 SINKs: DAC word length 16 or 24. 24: decoder at 32-bit output, 32-bit sample path like the S3 (`VSAF_SINK_PCM32`) |
+| `CONFIG_VSAF_C6_I2S_SLOT_BITS` | 24 | C6 24-bit mode: 24-bit slots (BCLK 48 x fs = 2.304 MHz, MCLK 384 x fs, 3-byte DMA samples) or 32 (BCLK 64 x fs) |
+| `CONFIG_VSAF_APPLY_USB_HOST_VOLUME` | 1 | SOURCE: apply the USB host volume / mute (Windows does not scale the PCM) |
 
 Fixed in `vsaf_time_sync.cpp` / `runSinkLoop()`: 1 s min-RTT window, 30 s holdover (SOURCE estimate and SINK control data), 5 s drift baseline, 3 ms coarse threshold, 2 us/frame offset slew, 1 ms offset jump, fine EMA 1/32 with a +/-3/4-sample deadband.
 
@@ -738,7 +792,40 @@ Per SINK in run 4: mean playout offset against PT -0.7 to -4.3 us, stdev 10-15 u
 
 Open points: SOURCE TX-done stalls (the driver misses TX-done callbacks: `tx_done_timeouts` ~2.4/s on average, now and then 5 in a row = ~12 ms off air) are the remaining glitch source; a repeat with amplifiers on; acoustic skew measurement.
 
+### 2026-10-25 / 26: speaker calibration, C6 decoder fix, volume
+
+- **SPL calibration** of all four speakers with `caltone pink -30` (new) and a dB-A meter, post-gains for all DAC types in `main.cpp` (table and method in AGENTS.md): check pass 56.9-57.5 dBA. Then all nodes +9 dB: MAX98357A GAIN pin (GPIO 0) at 15 dB on the C6 nodes, S3 post-gains +9 dB.
+- **C6 LC3 decoder in CBR mode** (`nbyte = 120`) failed on every 60-byte frame: the C6 sub (Node 24) had never played, and C6 redundancy frames were concealment. Fixed with VBR mode (section 5.2).
+- **Node 24** became a satellite on channel 3 (it was the sub); its channel is set in the node registry in `main.cpp` as well as in `config.c`.
+- **USB host volume:** Windows sends its slider as UAC1 feature-unit requests and does not scale the PCM. The firmware accepted and ignored them; now the SOURCE applies the lower of master and channel volume (`usbvol`).
+
+### 2026-10-29: C6 MAX98357A distortion investigation
+
+The C6 nodes play with a harsh, square-wave-like distortion that follows the music (silence clean, most audible at low volume); the S3 / PCM5102A nodes are clean. Ruled out, by measurement:
+
+| Suspect | Test | Result |
+| :--- | :--- | :--- |
+| C6 LC3 decoder | `deccmp`: Espressif vs liblc3 on 160 live frames | Equal within +/-1-5 LSB (SNR 71-73 dB on loud music) |
+| Decoder / gain on sines | `thdn` -27..-3 dBFS | -64..-74 dB THD+N, no clipping |
+| Gain stage, staging, I2S input | `thdn` I2S tap | -68 dB (16-bit), -71 dB (24-bit) |
+| Sample edits | `syncoff 1` + `driftcorr 0` | No audible change |
+| SOURCE channel 2 / 3 encoding | C6 on channel 0 | Same distortion |
+| I2S format on the pins | `i2scap` | Correct Philips I2S, both slots |
+| Clocks | `clkmeas` | CPU 160 MHz, BCLK 2.3033 MHz, LRCLK 48.0 kHz, ratio 48 |
+| Drive strength, clock source, bit depth | `i2sdrive`, `i2sclk`, 16 / 24 bit | No improvement (240 MHz / 384 x fs: worse) |
+| LTPF disabled in the encoder | covered by `deccmp` (same frames) | No effect |
+
+Also found: SINK `vol` / `mute` never worked (fixed: gain ramps to the target); the C6 USB console can stall after a replug on the host side (`usjdiag`: firmware writes accepted, nothing received; only a chip reset helps). Remaining suspect: bit errors on the jumper-wired DIN / BCLK link at the MAX end (errors of fixed size, so most audible at low volume; DIN idle in silence). Next test: a toggling +/-1 LSB pattern (`testpat`, not built yet).
+
+### 2026-10-31: parameter table, master volume, memory by role
+
+- Parameter table and `param list / get / set` (section 7.5), the base for a later USB HID / WebHID control interface.
+- `vol` on the SOURCE is now a real master volume (`audio.master_db`).
+- Memory by role (section 9.1): SOURCE back to ~29 KB free, C6 SINKs ~77 KB.
+
 ### Next steps
+- C6 distortion: `testpat` bit-error test on the DIN / BCLK link, then wiring (shorter wires, ground between signals, 33-100 Ohm series resistors).
+- USB HID (WebHID) control interface on top of the parameter table; flash Nodes 4 / 5 with the current firmware (volume fix).
 - Acoustic / line-in verification of the inter-speaker skew (UMM-6), then calibrate `trim` per channel and `CONFIG_VSAF_DAC_DELAY_US` (PCM5102A vs MAX98357A filter delay).
 - Measure end-to-end latency (GOALS.md priority 1); 50 ms playout latency plus USB input buffering.
 - SOURCE TX-done stalls (driver misses TX-done callbacks, ~12 ms off air when 5 in a row): the last remaining glitch source; root cause unknown.
