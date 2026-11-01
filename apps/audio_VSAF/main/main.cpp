@@ -401,11 +401,19 @@ extern "C" void app_main(void) {
         // reading was an outlier); check pass 56.9-57.5 dBA. Then all nodes +6 dB: C6 MAX98357A GAIN 3 -> 12 dB with
         // 3 dB less software gain, S3 nodes +6 dB; then GAIN 15 dB and S3 +3 dB more (all +9 dB vs. calibration). Valid for the drivers connected then (N4: one driver of pipe D,
         // N5: both drivers of pipe C, N23: one 4-ohm driver in pipe A, N24: one 4-ohm driver in pipe E).
-        // S3 (PCM5102A) nodes: -6 dB, uncalibrated default for all of them since 2026-11-01 (Nodes 4 / 5 had
-        // -24.8 / -13.0 dB from the 2026-10-25 calibration; recalibrate). C6 MAX98357A nodes keep their values.
+        // S3 (PCM5102A) nodes: SPL calibration 2026-11-01 (TASI TA650A, dBA, slow, 1.0 m; pink test tone, master
+        // -15.1 dB, dsp.hilbert.animate = bypass, one node at a time; docs/2026-11-01 sound pressure five nodes.txt).
+        // At -6 dB post-gain: N4 81.2 (one 4-ohm driver), N5 68.0, N6 67.1, N7 69.1, N8 69.6 dBA (N5..N8: two 8-ohm
+        // drivers in parallel); background 34.0 dBA. All matched to the quietest, Node 6 (-6 dB). Uncalibrated
+        // S3 nodes: -6 dB.
         float postgain_db = cfg->is_pcm5102a ? -6.0f : 0.0f;
         if (matched_node) {
             switch (matched_node->node_id) {
+                case 4:  postgain_db = -20.1f; break; // S3 PCM5102A, one 4-ohm driver
+                case 5:  postgain_db =  -6.9f; break; // S3 PCM5102A, 2 x 8 ohm
+                case 6:  postgain_db =  -6.0f; break; // S3 PCM5102A, 2 x 8 ohm (reference: quietest node)
+                case 7:  postgain_db =  -8.0f; break; // S3 PCM5102A, 2 x 8 ohm
+                case 8:  postgain_db =  -8.5f; break; // S3 PCM5102A, 2 x 8 ohm
                 case 23: postgain_db =  -3.6f; break; // C6 MAX98357A, HW gain 15 dB (from measurements 1 + 3)
                 case 24: postgain_db =  -3.0f; break; // C6 MAX98357A, HW gain 15 dB (reference: quietest node)
                 default: break;

@@ -1,0 +1,25 @@
+2026-11-01 Measured sound pressure
+
+Instrument: TASI TA650A
+Settings: dBA, slow mode
+Background noise: 34.0 dBA
+
+All speakers positioned on roughtly the same position on sofa, 1.0 m away from sound meter.
+
+Software settings:
+Pink noise.
+audio.master_db: -15.1 dB
+dsp.hilbert.animate: bypass
+
+All nodes have a post-gain of -6 dB.
+All nodes muted (node Gain = 'mute') except the one measured. 
+Measuring node: Gain = 0 dB.
+Node 5-8 use dual 8-ohm drivers connected in parallel to the AMP. 
+Node 4 use single 4-ohm driver.
+
+Node 4: 81.2 dB
+Node 5: 68.0 dB
+Node 6: 67.1 dB
+Node 7: 69.1 dBA
+Node 8: 69.6 dBA
+

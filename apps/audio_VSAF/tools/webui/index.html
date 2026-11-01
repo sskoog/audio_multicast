@@ -140,20 +140,20 @@ const CHANNELS = ["A", "B", "C", "D", "E", "SUB"];
 // Channels matrix, or into the group's own matrix when the group has ownMatrix.
 const GROUPS = [
   { key: "audio", title: "Audio source", prefixes: ["audio"] },
+  { key: "rf", title: "Radio", prefixes: ["rf"] },
+  { key: "usb", title: "USB audio", prefixes: ["usb"] },
+  { key: "chan", title: "Channels", prefixes: [] },
   // node.nN.<field> -> one row per node (shown while the node is online); node.save = store the map
   { key: "node", title: "Speakers (node -> channel)", prefixes: ["node"], ownMatrix: true },
-  { key: "cal", title: "Test tone", prefixes: ["cal"] },
   { key: "xo", title: "Crossover", prefixes: ["xo"] },
   { key: "dsp", title: "Spatial upmix", prefixes: ["dsp"], ownMatrix: true },
   { key: "sub", title: "Subwoofer effects", prefixes: ["sub"] },
-  { key: "chan", title: "Channels", prefixes: [] },
-  { key: "rf", title: "Radio", prefixes: ["rf"] },
   { key: "sync", title: "Time sync", prefixes: ["sync"] },
   { key: "net", title: "Network", prefixes: ["net"] },
-  { key: "usb", title: "USB audio", prefixes: ["usb"] },
   // dsp.time_ms (0x0200) is pipeline timing, not a DSP setting: claimed by ID before the "dsp" domain
   // (0x0220.. are sub.nccf.* diagnostics, so the range stops at 0x0210)
   { key: "pipe", title: "SOURCE pipeline", ids: [0x0200, 0x0210], prefixes: ["enc", "src"] },
+  { key: "cal", title: "Test tone", prefixes: ["cal"] },
   { key: "sys", title: "System", prefixes: ["sys"] },
   { key: "dbg", title: "Test & debug", prefixes: ["debug", "test"] },
 ];

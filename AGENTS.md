@@ -69,7 +69,17 @@ Calibration target ~57.5 dBA at -30 dBFS RMS. Afterwards all nodes were raised b
 
 Recalibrate when drivers, amplifiers or gain straps change.
 
-**Since 2026-11-01 every S3 / PCM5102A node (Nodes 1..8) uses -6 dB post-gain**, an uncalibrated default, replacing Node 4's -24.8 dB and Node 5's -13.0 dB above (Node 4 is about 19 dB louder than calibrated, Node 5 about 7 dB). Nodes 6, 7 and 8 are not calibrated yet; the C6 nodes keep their values.
+**SPL calibration 2026-11-01, S3 / PCM5102A nodes (current values)**: TASI TA650A, dBA, slow, 1.0 m, all speakers at about the same spot; pink test tone (`audio.source = noise`, `cal.mode = pink`), `audio.master_db` -15.1 dB (500-2000 Hz band at -35.1 dBFS RMS), `dsp.hilbert.animate = bypass`, one node at a time (other channels' gain = mute); background 34.0 dBA. Raw readings: `docs/2026-11-01 sound pressure five nodes.txt`. All matched to the quietest node (Node 6, reference at -6 dB): about 67.1 dBA at -35.1 dBFS RMS. Uncalibrated S3 nodes use -6 dB.
+
+| Node ID | Hardware | Level at -6 dB post-gain (dBA) | Post-gain | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| Node 4 | S3, PCM5102A + TPA3118 | 81.2 | -20.1 dB | One 4-ohm driver |
+| Node 5 | S3, PCM5102A + TPA3118 | 68.0 | -6.9 dB | Two 8-ohm drivers in parallel |
+| Node 6 | S3, PCM5102A + power amp (complete speaker) | 67.1 | -6.0 dB | Two 8-ohm drivers in parallel; reference (quietest) |
+| Node 7 | S3, PCM5102A + power amp (complete speaker) | 69.1 | -8.0 dB | Two 8-ohm drivers in parallel |
+| Node 8 | S3, PCM5102A | 69.6 | -8.5 dB | Two 8-ohm drivers in parallel |
+
+The table above (2026-10-25) is history for the S3 nodes; the C6 values (Nodes 23 / 24, prototypes) still apply.
 
 --- | :--- | :--- | :--- |
 | Node 4 | Ch 0 (Left) | -20.0 dB | Baseline reference |
