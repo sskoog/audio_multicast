@@ -48,29 +48,33 @@ static const char* TAG = "MAIN";
  * @brief Known hardware node descriptor in the cluster registry.
  */
 struct KnownNodeDescriptor {
-    uint8_t     mac[6];          // 6-byte IEEE 802.3 MAC address
-    uint8_t     node_id;         // Hardware Node ID (16, 20, 21, 23, 24, 25, 26)
-    uint8_t     target_channel;  // Assigned audio channel index (0..5)
-    const char* channel_name;    // Human-readable channel designation
+    uint8_t     mac[6];          // 6-byte IEEE 802.3 MAC address (Wi-Fi STA)
+    uint8_t     node_id;         // Node ID = its COM port number (README: node table)
+    uint8_t     default_channel; // Channel at boot: 0..4 = A..E, 5 = SUB, AudioNet::VSAF_CH_OFF; the SOURCE's node map overrides it
     const char* board_name;      // Physical board description
 };
 
 /**
- * @brief Pre-defined library of known cluster nodes and their factory MAC addresses.
+ * @brief Known cluster nodes by factory MAC address. Node IDs follow the COM port; channels A..E / SUB are the
+ *        spatial upmix outputs and carry no left / right / center meaning. One node per channel: the defaults
+ *        must not collide (the SOURCE's node map, set on the WebHID page, decides at runtime).
  */
 static constexpr KnownNodeDescriptor KNOWN_NODE_LIBRARY[] = {
-    // SINK Nodes (Audio Channels 0 to 5)
-    { {0xE8, 0x3D, 0xC1, 0xFB, 0xE8, 0x3C},  4, 0, "Left",            "XIAO ESP32-S3 PCM5102A"  },
-    { {0xE8, 0x3D, 0xC1, 0xFC, 0x8B, 0x50},  5, 1, "Right",           "XIAO ESP32-S3 PCM5102A"  },
-    { {0xB0, 0xA6, 0x04, 0x99, 0x38, 0x44}, 23, 2, "Center",          "Waveshare ESP32-C6-Zero" },
-    { {0xB0, 0xA6, 0x04, 0x99, 0x18, 0xE4}, 24, 3, "Surround Left",   "Waveshare ESP32-C6-Zero" },  // was the Ch 5 sub until 2026-10-25
-    { {0x98, 0xA3, 0x16, 0x9D, 0x57, 0xEC}, 21, 2, "Center",          "ESP32-C6-WROOM-1 DevKit" },
-    { {0xE8, 0x3D, 0xC1, 0xFB, 0xDC, 0xC4}, 25, 3, "Surround Left",   "Heemol ESP32-C6 Mini"    },
-    { {0x98, 0xA3, 0x16, 0xAC, 0x13, 0x38}, 26, 4, "Surround Right",  "Heemol ESP32-C6 Mini"    },
-    { {0xAC, 0xEB, 0xE6, 0x23, 0xDC, 0x24}, 20, 5, "Subwoofer",       "Waveshare ESP32-C6-LCD"  },
+    // SINK nodes
+    { {0xE8, 0x3D, 0xC1, 0xFB, 0xD5, 0x3C},  6, 2,           "XIAO ESP32-S3 Plus, complete speaker" },
+    { {0xE8, 0x3D, 0xC1, 0xFB, 0xDC, 0xC4},  7, 3,           "XIAO ESP32-S3 Plus, complete speaker" },
+    { {0xE8, 0x3D, 0xC1, 0xFC, 0x8F, 0x44},  8, 4,           "XIAO ESP32-S3 Plus, PCM5102A"         },
+    { {0xE8, 0x3D, 0xC1, 0xFB, 0xE8, 0x3C},  4, 0,           "XIAO ESP32-S3 Plus PCM5102A (prototype)" },
+    { {0xE8, 0x3D, 0xC1, 0xFC, 0x8B, 0x50},  5, 1,           "XIAO ESP32-S3 Plus PCM5102A (prototype)" },
+    { {0xB0, 0xA6, 0x04, 0x99, 0x38, 0x44}, 23, AudioNet::VSAF_CH_OFF, "Waveshare ESP32-C6-Zero, MAX98357A (prototype)" },
+    { {0xB0, 0xA6, 0x04, 0x99, 0x18, 0xE4}, 24, AudioNet::VSAF_CH_OFF, "Waveshare ESP32-C6-Zero, MAX98357A (prototype)" },
+    { {0x98, 0xA3, 0x16, 0x9D, 0x57, 0xEC}, 21, AudioNet::VSAF_CH_OFF, "ESP32-C6-WROOM-1 DevKit"              },
+    { {0x98, 0xA3, 0x16, 0xAC, 0x13, 0x38}, 26, AudioNet::VSAF_CH_OFF, "Heemol ESP32-C6 Mini"                 },
+    { {0xAC, 0xEB, 0xE6, 0x23, 0xDC, 0x24}, 20, AudioNet::VSAF_CH_OFF, "Waveshare ESP32-C6-LCD (prototype)" },  // no SUB node yet
+    // Node 25 (Heemol ESP32-C6 Mini): MAC unknown; the one listed before (E8:3D:C1:FB:DC:C4) is Node 7's
 
     // SOURCE Node (Master Broadcaster)
-    { {0xE0, 0x72, 0xA1, 0xD8, 0x4C, 0xD0}, 16, 0xFF, "Source Master", "Seeed Studio XIAO ESP32-S3" },
+    { {0xE0, 0x72, 0xA1, 0xD8, 0x4C, 0xD0}, 16, AudioNet::VSAF_CH_OFF, "Seeed Studio XIAO ESP32-S3 (SOURCE)" },
 };
 
 /**
@@ -377,16 +381,18 @@ extern "C" void app_main(void) {
         esp_read_mac(base_mac, ESP_MAC_WIFI_STA);
 
         const KnownNodeDescriptor* matched_node = find_known_node_by_mac(base_mac);
-        if (matched_node && matched_node->target_channel <= 5) {
-            s_unicast_engine->setTargetChannel(matched_node->target_channel);
-            ESP_LOGI(TAG, "Recognized node %d (%s) -> Assigned Channel %d (%s) [MAC: %02X:%02X:%02X:%02X:%02X:%02X]",
-                     matched_node->node_id, matched_node->board_name,
-                     matched_node->target_channel, matched_node->channel_name,
+        if (matched_node) {
+            s_unicast_engine->setNodeId(matched_node->node_id);
+            s_unicast_engine->setTargetChannel(matched_node->default_channel);
+            ESP_LOGI(TAG, "Recognized node %d (%s) -> default channel %s [MAC: %02X:%02X:%02X:%02X:%02X:%02X]",
+                     matched_node->node_id, matched_node->board_name, AudioNet::vsaf_channel_name(matched_node->default_channel),
                      base_mac[0], base_mac[1], base_mac[2], base_mac[3], base_mac[4], base_mac[5]);
         } else {
-            s_unicast_engine->setTargetChannel(cfg->default_channel); // Fallback to config's default audio channel
-            ESP_LOGW(TAG, "Unrecognized SINK MAC %02X:%02X:%02X:%02X:%02X:%02X! Defaulting to Channel %d",
-                     base_mac[0], base_mac[1], base_mac[2], base_mac[3], base_mac[4], base_mac[5], cfg->default_channel);
+            // Unknown board: node id from config.c (generic fallback), no channel until the SOURCE assigns one
+            s_unicast_engine->setNodeId(cfg->node_id);
+            s_unicast_engine->setTargetChannel(AudioNet::VSAF_CH_OFF);
+            ESP_LOGW(TAG, "Unrecognized SINK MAC %02X:%02X:%02X:%02X:%02X:%02X: node %d, no channel until assigned",
+                     base_mac[0], base_mac[1], base_mac[2], base_mac[3], base_mac[4], base_mac[5], cfg->node_id);
         }
 
         // Per-node software post-gain: matches the acoustic level of all speakers (DACs, amplifiers, gain straps and
@@ -395,11 +401,11 @@ extern "C" void app_main(void) {
         // reading was an outlier); check pass 56.9-57.5 dBA. Then all nodes +6 dB: C6 MAX98357A GAIN 3 -> 12 dB with
         // 3 dB less software gain, S3 nodes +6 dB; then GAIN 15 dB and S3 +3 dB more (all +9 dB vs. calibration). Valid for the drivers connected then (N4: one driver of pipe D,
         // N5: both drivers of pipe C, N23: one 4-ohm driver in pipe A, N24: one 4-ohm driver in pipe E).
-        float postgain_db = cfg->is_pcm5102a ? -34.0f : 0.0f; // uncalibrated default: quiet on PCM5102A + TPA3118
+        // S3 (PCM5102A) nodes: -6 dB, uncalibrated default for all of them since 2026-11-01 (Nodes 4 / 5 had
+        // -24.8 / -13.0 dB from the 2026-10-25 calibration; recalibrate). C6 MAX98357A nodes keep their values.
+        float postgain_db = cfg->is_pcm5102a ? -6.0f : 0.0f;
         if (matched_node) {
             switch (matched_node->node_id) {
-                case 4:  postgain_db = -24.8f; break; // S3 PCM5102A + TPA3118
-                case 5:  postgain_db = -13.0f; break; // S3 PCM5102A + TPA3118
                 case 23: postgain_db =  -3.6f; break; // C6 MAX98357A, HW gain 15 dB (from measurements 1 + 3)
                 case 24: postgain_db =  -3.0f; break; // C6 MAX98357A, HW gain 15 dB (reference: quietest node)
                 default: break;
@@ -413,6 +419,17 @@ extern "C" void app_main(void) {
     } else if (cfg->node_role == NODE_ROLE_SOURCE) {
         // Initialize USB Audio + CDC for SOURCE
         usb_audio_init();
+        // Default node -> channel map = the registry's default channels; a map saved from the WebHID page
+        // (node.save) replaces it, node.reset deletes the saved one
+        uint8_t defaults[AudioNet::VSAF_MAX_NODES];
+        std::memset(defaults, AudioNet::VSAF_CH_KEEP, sizeof(defaults));
+        for (const auto& node : KNOWN_NODE_LIBRARY) {
+            if (node.node_id < AudioNet::VSAF_MAX_NODES && node.node_id != cfg->node_id) {
+                defaults[node.node_id] = node.default_channel;
+            }
+        }
+        s_unicast_engine->setNodeDefaults(defaults);
+        s_unicast_engine->loadNodeMap();
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
         usb_ctrl_hid_start();  // VSAF control over USB HID (parameter table, WebHID page)
 #endif

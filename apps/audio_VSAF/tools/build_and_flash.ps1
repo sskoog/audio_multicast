@@ -42,7 +42,9 @@ if ($Port -eq "") {
 }
 
 if ($Chip -eq "") {
-    if ($Role -eq "SOURCE" -or $targetPort -eq "COM16" -or $targetPort -eq "COM116" -or $targetPort -eq "COM4" -or $targetPort -eq "COM5" -or $NodeId -eq 4 -or $NodeId -eq 5) {
+    # S3: the SOURCE (Node 16) and Nodes 1..8 (node ID = COM port number); everything else is a C6
+    $s3Ports = @("COM16", "COM116", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8")
+    if ($Role -eq "SOURCE" -or $s3Ports -contains $targetPort -or ($NodeId -ge 1 -and $NodeId -le 8)) {
         $Chip = "esp32s3"
     } else {
         $Chip = "esp32c6"

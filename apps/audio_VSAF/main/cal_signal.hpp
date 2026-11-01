@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 
 namespace Audio {
 
@@ -45,9 +46,12 @@ public:
             m_sat.design(48000.0f, 500.0f, 2000.0f);
             m_sub.design(48000.0f, 40.0f, 100.0f);
             m_sub.rng = 0x9E3779B9u;  // own noise sequence (uncorrelated with the satellite band)
-            // Normalize the band-limited noise to the requested RMS (measured over 2 s of the same generator)
-            m_sat_gain = rms / measureRms(m_sat, 96000);
-            m_sub_gain = rms / measureRms(m_sub, 96000);
+            // Normalize the band-limited noise to the requested RMS. Computed, not measured: the generator is a
+            // linear filter chain on white noise, so its output RMS is exactly sqrt(var_white * sum(h[n]^2)).
+            // (Measuring 2 s of noise took ~0.6 s of CPU in the caller's task, which starved the idle task on a
+            // busy core 0 past the 1 s task watchdog: the SOURCE rebooted when pink was selected during audio.)
+            m_sat_gain = rms / m_sat.outputRms();
+            m_sub_gain = rms / m_sub.outputRms();
         }
     }
 
@@ -115,25 +119,34 @@ private:
         }
         float next() {
             rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
-            const float white = static_cast<float>(static_cast<int32_t>(rng)) * (1.0f / 2147483648.0f);
+            return filter(static_cast<float>(static_cast<int32_t>(rng)) * (1.0f / 2147483648.0f));
+        }
+        /** @brief Pink filter + band-pass for one white-noise sample (linear, time-invariant). */
+        float filter(float white) {
             p0 = 0.99765f * p0 + white * 0.0990460f;
             p1 = 0.96300f * p1 + white * 0.2965164f;
             p2 = 0.57000f * p2 + white * 1.0526913f;
             const float pink = p0 + p1 + p2 + white * 0.1848f;
             return lp2.run(lp1.run(hp2.run(hp1.run(pink))));
         }
-    };
-
-    static float measureRms(BandPink& g, int n) {
-        for (int i = 0; i < n / 4; ++i) g.next();  // let the filters settle
-        double acc = 0;
-        for (int i = 0; i < n; ++i) {
-            const float v = g.next();
-            acc += static_cast<double>(v) * v;
+        /**
+         * @brief Expected output RMS for the white-noise input of next() (uniform in [-1, 1): variance 1/3).
+         * Linear chain: RMS = sqrt(var * sum(h[n]^2)), h = impulse response of filter(). 8192 samples: the
+         * slowest pole (0.99765, pink filter) has decayed to ~4e-9 by then. A few ms of CPU, no state change.
+         */
+        float outputRms() const {
+            BandPink g = *this;  // same coefficients, own (cleared) state
+            g.p0 = g.p1 = g.p2 = 0;
+            for (Biquad* b : {&g.hp1, &g.hp2, &g.lp1, &g.lp2}) b->x1 = b->x2 = b->y1 = b->y2 = 0;
+            float energy = 0.0f;
+            for (int n = 0; n < 8192; ++n) {
+                const float h = g.filter(n == 0 ? 1.0f : 0.0f);
+                energy += h * h;
+            }
+            const float rms = std::sqrt(energy / 3.0f);
+            return rms > 1e-9f ? rms : 1.0f;
         }
-        const float rms = static_cast<float>(std::sqrt(acc / n));
-        return rms > 1e-9f ? rms : 1.0f;
-    }
+    };
 
     static int16_t clamp16(float v) {
         if (v > 32767.0f) return 32767;

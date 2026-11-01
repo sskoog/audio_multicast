@@ -45,6 +45,10 @@ const int8_t kTxPowerQdbm[] = {8, 20, 28, 34, 44, 52, 56, 60, 66, 72, 80};
 const char* const kTxPowerNames[] = {"2", "5", "7", "8.5", "11", "13", "14", "15", "16.5", "18", "20"};
 const char* const kTxFaultNames[] = {"once", "wifi", "reboot"};
 const char* const kCalNames[] = {"synth", "pink", "sine"};  // = EspNowBroadcastEngine::ToneKind
+const char* const kNodeChNames[] = {"off", "A", "B", "C", "D", "E", "SUB"};  // index 0 = off, 1.. = channel 0..
+const char* const kStereoNames[] = {"mono", "stereo"};
+const char* const kZcOrderNames[] = {"0", "2", "4"};  // post-flip low-pass, 0 = none
+const int kZcOrders[] = {0, 2, 4};
 const char* const kHpOrderNames[] = {"0", "1", "2", "3", "4"};  // 0 = no high-pass
 const char* const kLpOrderNames[] = {"2", "3", "4", "6"};
 const int kLpOrders[] = {2, 3, 4, 6};
@@ -76,55 +80,67 @@ const Desc kTable[] = {
     {0x0110, "net.peers_online", "", Type::INT, Access::RO, 0, 6, 0, nullptr, 0,
      "SINKs online", 0},
     {0x0111, "net.peers_mask", "", Type::INT, Access::RO, 0, 63, 0, nullptr, 0,
-     "Online channels, bit c = channel c (0 L, 1 R, 2 C, 3 LS, 4 RS, 5 Sub)", 0},
-    {0x0130, "net.ch0_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
-     "Channel 0 (L) uplink RSSI of its last reply", 0},
-    {0x0131, "net.ch1_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
-     "Channel 1 (R) uplink RSSI of its last reply", 0},
-    {0x0132, "net.ch2_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
-     "Channel 2 (C) uplink RSSI of its last reply", 0},
-    {0x0133, "net.ch3_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
-     "Channel 3 (LS) uplink RSSI of its last reply", 0},
-    {0x0134, "net.ch4_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
-     "Channel 4 (RS) uplink RSSI of its last reply", 0},
-    {0x0135, "net.ch5_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
-     "Channel 5 (Sub) uplink RSSI of its last reply", 0},
-    {0x0140, "net.ch0_dl_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
-     "Channel 0 (L) downlink RSSI the SINK measured on its REQ_ACK packet (SOURCE TX power shows here)", 0},
-    {0x0141, "net.ch1_dl_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
-     "Channel 1 (R) downlink RSSI the SINK measured on its REQ_ACK packet (SOURCE TX power shows here)", 0},
-    {0x0142, "net.ch2_dl_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
-     "Channel 2 (C) downlink RSSI the SINK measured on its REQ_ACK packet (SOURCE TX power shows here)", 0},
-    {0x0143, "net.ch3_dl_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
-     "Channel 3 (LS) downlink RSSI the SINK measured on its REQ_ACK packet (SOURCE TX power shows here)", 0},
-    {0x0144, "net.ch4_dl_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
-     "Channel 4 (RS) downlink RSSI the SINK measured on its REQ_ACK packet (SOURCE TX power shows here)", 0},
-    {0x0145, "net.ch5_dl_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
-     "Channel 5 (Sub) downlink RSSI the SINK measured on its REQ_ACK packet (SOURCE TX power shows here)", 0},
-    {0x0150, "net.ch0_reply_loss_pct", "%", Type::FLOAT, Access::RO, 0, 100, 0, nullptr, 0,
-     "Channel 0 (L) telemetry replies missing in the last second (REQ_ACK packet or reply lost)", 1},
-    {0x0151, "net.ch1_reply_loss_pct", "%", Type::FLOAT, Access::RO, 0, 100, 0, nullptr, 0,
-     "Channel 1 (R) telemetry replies missing in the last second (REQ_ACK packet or reply lost)", 1},
-    {0x0152, "net.ch2_reply_loss_pct", "%", Type::FLOAT, Access::RO, 0, 100, 0, nullptr, 0,
-     "Channel 2 (C) telemetry replies missing in the last second (REQ_ACK packet or reply lost)", 1},
-    {0x0153, "net.ch3_reply_loss_pct", "%", Type::FLOAT, Access::RO, 0, 100, 0, nullptr, 0,
-     "Channel 3 (LS) telemetry replies missing in the last second (REQ_ACK packet or reply lost)", 1},
-    {0x0154, "net.ch4_reply_loss_pct", "%", Type::FLOAT, Access::RO, 0, 100, 0, nullptr, 0,
-     "Channel 4 (RS) telemetry replies missing in the last second (REQ_ACK packet or reply lost)", 1},
-    {0x0155, "net.ch5_reply_loss_pct", "%", Type::FLOAT, Access::RO, 0, 100, 0, nullptr, 0,
-     "Channel 5 (Sub) telemetry replies missing in the last second (REQ_ACK packet or reply lost)", 1},
-    {0x0160, "net.ch0_replies_missed", "", Type::INT, Access::RO, 0, 1e9, 0, nullptr, 0,
-     "Channel 0 (L) telemetry replies missing since boot / clear", 0},
-    {0x0161, "net.ch1_replies_missed", "", Type::INT, Access::RO, 0, 1e9, 0, nullptr, 0,
-     "Channel 1 (R) telemetry replies missing since boot / clear", 0},
-    {0x0162, "net.ch2_replies_missed", "", Type::INT, Access::RO, 0, 1e9, 0, nullptr, 0,
-     "Channel 2 (C) telemetry replies missing since boot / clear", 0},
-    {0x0163, "net.ch3_replies_missed", "", Type::INT, Access::RO, 0, 1e9, 0, nullptr, 0,
-     "Channel 3 (LS) telemetry replies missing since boot / clear", 0},
-    {0x0164, "net.ch4_replies_missed", "", Type::INT, Access::RO, 0, 1e9, 0, nullptr, 0,
-     "Channel 4 (RS) telemetry replies missing since boot / clear", 0},
-    {0x0165, "net.ch5_replies_missed", "", Type::INT, Access::RO, 0, 1e9, 0, nullptr, 0,
-     "Channel 5 (Sub) telemetry replies missing since boot / clear", 0},
+     "Online channels, bit c = channel c (0..4 = A..E, 5 = SUB)", 0},
+    {0x0170, "net.chA_node", "", Type::INT, Access::RO, 0, 31, 0, nullptr, 0,
+     "Channel A: node that plays it (- = none)", 0},
+    {0x0171, "net.chB_node", "", Type::INT, Access::RO, 0, 31, 0, nullptr, 0,
+     "Channel B: node that plays it (- = none)", 0},
+    {0x0172, "net.chC_node", "", Type::INT, Access::RO, 0, 31, 0, nullptr, 0,
+     "Channel C: node that plays it (- = none)", 0},
+    {0x0173, "net.chD_node", "", Type::INT, Access::RO, 0, 31, 0, nullptr, 0,
+     "Channel D: node that plays it (- = none)", 0},
+    {0x0174, "net.chE_node", "", Type::INT, Access::RO, 0, 31, 0, nullptr, 0,
+     "Channel E: node that plays it (- = none)", 0},
+    {0x0175, "net.chSUB_node", "", Type::INT, Access::RO, 0, 31, 0, nullptr, 0,
+     "Channel SUB: node that plays it (- = none)", 0},
+    {0x0130, "net.chA_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
+     "Channel A uplink RSSI of its last reply", 0},
+    {0x0131, "net.chB_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
+     "Channel B uplink RSSI of its last reply", 0},
+    {0x0132, "net.chC_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
+     "Channel C uplink RSSI of its last reply", 0},
+    {0x0133, "net.chD_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
+     "Channel D uplink RSSI of its last reply", 0},
+    {0x0134, "net.chE_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
+     "Channel E uplink RSSI of its last reply", 0},
+    {0x0135, "net.chSUB_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
+     "Channel SUB uplink RSSI of its last reply", 0},
+    {0x0140, "net.chA_dl_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
+     "Channel A downlink RSSI the SINK measured on its REQ_ACK packet (SOURCE TX power shows here)", 0},
+    {0x0141, "net.chB_dl_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
+     "Channel B downlink RSSI the SINK measured on its REQ_ACK packet (SOURCE TX power shows here)", 0},
+    {0x0142, "net.chC_dl_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
+     "Channel C downlink RSSI the SINK measured on its REQ_ACK packet (SOURCE TX power shows here)", 0},
+    {0x0143, "net.chD_dl_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
+     "Channel D downlink RSSI the SINK measured on its REQ_ACK packet (SOURCE TX power shows here)", 0},
+    {0x0144, "net.chE_dl_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
+     "Channel E downlink RSSI the SINK measured on its REQ_ACK packet (SOURCE TX power shows here)", 0},
+    {0x0145, "net.chSUB_dl_rssi_dbm", "dBm", Type::INT, Access::RO, -127, 0, -127, nullptr, 0,
+     "Channel SUB downlink RSSI the SINK measured on its REQ_ACK packet (SOURCE TX power shows here)", 0},
+    {0x0150, "net.chA_reply_loss_pct", "%", Type::FLOAT, Access::RO, 0, 100, 0, nullptr, 0,
+     "Channel A telemetry replies missing in the last second (REQ_ACK packet or reply lost)", 1},
+    {0x0151, "net.chB_reply_loss_pct", "%", Type::FLOAT, Access::RO, 0, 100, 0, nullptr, 0,
+     "Channel B telemetry replies missing in the last second (REQ_ACK packet or reply lost)", 1},
+    {0x0152, "net.chC_reply_loss_pct", "%", Type::FLOAT, Access::RO, 0, 100, 0, nullptr, 0,
+     "Channel C telemetry replies missing in the last second (REQ_ACK packet or reply lost)", 1},
+    {0x0153, "net.chD_reply_loss_pct", "%", Type::FLOAT, Access::RO, 0, 100, 0, nullptr, 0,
+     "Channel D telemetry replies missing in the last second (REQ_ACK packet or reply lost)", 1},
+    {0x0154, "net.chE_reply_loss_pct", "%", Type::FLOAT, Access::RO, 0, 100, 0, nullptr, 0,
+     "Channel E telemetry replies missing in the last second (REQ_ACK packet or reply lost)", 1},
+    {0x0155, "net.chSUB_reply_loss_pct", "%", Type::FLOAT, Access::RO, 0, 100, 0, nullptr, 0,
+     "Channel SUB telemetry replies missing in the last second (REQ_ACK packet or reply lost)", 1},
+    {0x0160, "net.chA_replies_missed", "", Type::INT, Access::RO, 0, 1e9, 0, nullptr, 0,
+     "Channel A telemetry replies missing since boot / clear", 0},
+    {0x0161, "net.chB_replies_missed", "", Type::INT, Access::RO, 0, 1e9, 0, nullptr, 0,
+     "Channel B telemetry replies missing since boot / clear", 0},
+    {0x0162, "net.chC_replies_missed", "", Type::INT, Access::RO, 0, 1e9, 0, nullptr, 0,
+     "Channel C telemetry replies missing since boot / clear", 0},
+    {0x0163, "net.chD_replies_missed", "", Type::INT, Access::RO, 0, 1e9, 0, nullptr, 0,
+     "Channel D telemetry replies missing since boot / clear", 0},
+    {0x0164, "net.chE_replies_missed", "", Type::INT, Access::RO, 0, 1e9, 0, nullptr, 0,
+     "Channel E telemetry replies missing since boot / clear", 0},
+    {0x0165, "net.chSUB_replies_missed", "", Type::INT, Access::RO, 0, 1e9, 0, nullptr, 0,
+     "Channel SUB telemetry replies missing since boot / clear", 0},
     {0x0200, "dsp.time_ms", "ms", Type::FLOAT, Access::RO, 0, 10, 0, nullptr, 0,
      "DSP stage per frame", 2},
     {0x0201, "enc.hq_ms", "ms", Type::FLOAT, Access::RO, 0, 20, 0, nullptr, 0,
@@ -139,16 +155,6 @@ const Desc kTable[] = {
      "Synthetic DSP load per frame (console dspload)", 0},
     {0x0211, "debug.enc_cores", "", Type::INT, Access::RW, 1, 2, 2, nullptr, 0,
      "LC3 encode on core 0 only (1) or both cores (2) (console enccores)", 0},
-    {0x0220, "dsp.sub_voiced", "", Type::ENUM, Access::RO, 0, 1, 0, kNoYes, static_cast<uint8_t>(sizeof(kNoYes) / sizeof(kNoYes[0])),
-     "Subharmonic NCCF voiced pitch lock active", 0},
-    {0x0221, "dsp.sub_f0_hz", "Hz", Type::FLOAT, Access::RO, 0, 200, 0, nullptr, 0,
-     "Subharmonic NCCF tracked fundamental f0", 1},
-    {0x0222, "dsp.sub_fsub_hz", "Hz", Type::FLOAT, Access::RO, 0, 100, 0, nullptr, 0,
-     "Subharmonic synthesized octave-down frequency (f0 / 2)", 1},
-    {0x0223, "dsp.sub_nccf_peak", "", Type::FLOAT, Access::RO, -1, 1, 0, nullptr, 0,
-     "Subharmonic NCCF normalized cross-correlation peak", 2},
-    {0x0224, "dsp.sub_duck_gain", "", Type::FLOAT, Access::RO, 0, 1, 1, nullptr, 0,
-     "Subharmonic direct-bass ducking gain", 2},
     {0x0300, "rf.tx_end_ms", "ms", Type::FLOAT, Access::RO, 0, 10, 0, nullptr, 0,
      "Last packet of the frame on air, after the frame tick (deadline 9.5 ms)", 2},
     {0x0301, "rf.tx_pkts_s", "1/s", Type::INT, Access::RO, 0, 1000, 0, nullptr, 0,
@@ -189,72 +195,134 @@ const Desc kTable[] = {
      "USB host mute", 0},
     {0x1001, "audio.source", "", Type::ENUM, Access::RW, 0, 2, 1, kModeNames, static_cast<uint8_t>(sizeof(kModeNames) / sizeof(kModeNames[0])),
      "SOURCE input / state: pause (IDLE), cast (USB audio), noise (test tone of cal.mode)", 0},
-    {0x1000, "audio.master_db", "dB", Type::FLOAT, Access::RW, -96, 0, 0, nullptr, 0,
+    {0x1007, "audio.stereo", "", Type::ENUM, Access::RW, 0, 1, 1, kStereoNames, static_cast<uint8_t>(sizeof(kStereoNames) / sizeof(kStereoNames[0])),
+     "SOURCE input: stereo, or mono (left channel on both sides)", 0},
+    {0x1000, "audio.master_db", "dB", Type::FLOAT, Access::RW, -96, 0, -6, nullptr, 0,
      "Master volume (all channels), -96 = mute; set = target, read = in effect (100 dB/s ramp)", 1},
     {0x1005, "audio.mute", "", Type::ENUM, Access::RW, 0, 1, 0, kOffOn, static_cast<uint8_t>(sizeof(kOffOn) / sizeof(kOffOn[0])),
      "Master mute, ramped (console mute / unmute)", 0},
-    {0x1010, "audio.ch0_db", "dB", Type::FLOAT, Access::RW, -96, 0, 0, nullptr, 0,
-     "Channel 0 (L) gain on the SOURCE, ramped 100 dB/s (console volch); not applied to caltone", 1},
-    {0x1011, "audio.ch1_db", "dB", Type::FLOAT, Access::RW, -96, 0, 0, nullptr, 0,
-     "Channel 1 (R) gain on the SOURCE, ramped 100 dB/s (console volch); not applied to caltone", 1},
-    {0x1012, "audio.ch2_db", "dB", Type::FLOAT, Access::RW, -96, 0, 0, nullptr, 0,
-     "Channel 2 (C) gain on the SOURCE, ramped 100 dB/s (console volch); not applied to caltone", 1},
-    {0x1013, "audio.ch3_db", "dB", Type::FLOAT, Access::RW, -96, 0, 0, nullptr, 0,
-     "Channel 3 (LS) gain on the SOURCE, ramped 100 dB/s (console volch); not applied to caltone", 1},
-    {0x1014, "audio.ch4_db", "dB", Type::FLOAT, Access::RW, -96, 0, 0, nullptr, 0,
-     "Channel 4 (RS) gain on the SOURCE, ramped 100 dB/s (console volch); not applied to caltone", 1},
-    {0x1015, "audio.ch5_db", "dB", Type::FLOAT, Access::RW, -96, 0, 0, nullptr, 0,
-     "Channel 5 (Sub) gain on the SOURCE, ramped 100 dB/s (console volch); not applied to caltone", 1},
+    {0x1402, "node.n1.channel", "", Type::ENUM, Access::RW, 0, 6, 0, kNodeChNames, static_cast<uint8_t>(sizeof(kNodeChNames) / sizeof(kNodeChNames[0])),
+     "Node 1: channel it plays (one node per channel: a taken channel swaps); node.save keeps it", 0},
+    {0x1403, "node.n1.online", "", Type::ENUM, Access::RO, 0, 1, 0, kNoYes, static_cast<uint8_t>(sizeof(kNoYes) / sizeof(kNoYes[0])),
+     "Node 1: announced itself within the last 3 s", 0},
+    {0x1404, "node.n2.channel", "", Type::ENUM, Access::RW, 0, 6, 0, kNodeChNames, static_cast<uint8_t>(sizeof(kNodeChNames) / sizeof(kNodeChNames[0])),
+     "Node 2: channel it plays (one node per channel: a taken channel swaps); node.save keeps it", 0},
+    {0x1405, "node.n2.online", "", Type::ENUM, Access::RO, 0, 1, 0, kNoYes, static_cast<uint8_t>(sizeof(kNoYes) / sizeof(kNoYes[0])),
+     "Node 2: announced itself within the last 3 s", 0},
+    {0x1406, "node.n3.channel", "", Type::ENUM, Access::RW, 0, 6, 0, kNodeChNames, static_cast<uint8_t>(sizeof(kNodeChNames) / sizeof(kNodeChNames[0])),
+     "Node 3: channel it plays (one node per channel: a taken channel swaps); node.save keeps it", 0},
+    {0x1407, "node.n3.online", "", Type::ENUM, Access::RO, 0, 1, 0, kNoYes, static_cast<uint8_t>(sizeof(kNoYes) / sizeof(kNoYes[0])),
+     "Node 3: announced itself within the last 3 s", 0},
+    {0x1408, "node.n4.channel", "", Type::ENUM, Access::RW, 0, 6, 0, kNodeChNames, static_cast<uint8_t>(sizeof(kNodeChNames) / sizeof(kNodeChNames[0])),
+     "Node 4: channel it plays (one node per channel: a taken channel swaps); node.save keeps it", 0},
+    {0x1409, "node.n4.online", "", Type::ENUM, Access::RO, 0, 1, 0, kNoYes, static_cast<uint8_t>(sizeof(kNoYes) / sizeof(kNoYes[0])),
+     "Node 4: announced itself within the last 3 s", 0},
+    {0x140A, "node.n5.channel", "", Type::ENUM, Access::RW, 0, 6, 0, kNodeChNames, static_cast<uint8_t>(sizeof(kNodeChNames) / sizeof(kNodeChNames[0])),
+     "Node 5: channel it plays (one node per channel: a taken channel swaps); node.save keeps it", 0},
+    {0x140B, "node.n5.online", "", Type::ENUM, Access::RO, 0, 1, 0, kNoYes, static_cast<uint8_t>(sizeof(kNoYes) / sizeof(kNoYes[0])),
+     "Node 5: announced itself within the last 3 s", 0},
+    {0x140C, "node.n6.channel", "", Type::ENUM, Access::RW, 0, 6, 0, kNodeChNames, static_cast<uint8_t>(sizeof(kNodeChNames) / sizeof(kNodeChNames[0])),
+     "Node 6: channel it plays (one node per channel: a taken channel swaps); node.save keeps it", 0},
+    {0x140D, "node.n6.online", "", Type::ENUM, Access::RO, 0, 1, 0, kNoYes, static_cast<uint8_t>(sizeof(kNoYes) / sizeof(kNoYes[0])),
+     "Node 6: announced itself within the last 3 s", 0},
+    {0x140E, "node.n7.channel", "", Type::ENUM, Access::RW, 0, 6, 0, kNodeChNames, static_cast<uint8_t>(sizeof(kNodeChNames) / sizeof(kNodeChNames[0])),
+     "Node 7: channel it plays (one node per channel: a taken channel swaps); node.save keeps it", 0},
+    {0x140F, "node.n7.online", "", Type::ENUM, Access::RO, 0, 1, 0, kNoYes, static_cast<uint8_t>(sizeof(kNoYes) / sizeof(kNoYes[0])),
+     "Node 7: announced itself within the last 3 s", 0},
+    {0x1410, "node.n8.channel", "", Type::ENUM, Access::RW, 0, 6, 0, kNodeChNames, static_cast<uint8_t>(sizeof(kNodeChNames) / sizeof(kNodeChNames[0])),
+     "Node 8: channel it plays (one node per channel: a taken channel swaps); node.save keeps it", 0},
+    {0x1411, "node.n8.online", "", Type::ENUM, Access::RO, 0, 1, 0, kNoYes, static_cast<uint8_t>(sizeof(kNoYes) / sizeof(kNoYes[0])),
+     "Node 8: announced itself within the last 3 s", 0},
+    {0x1428, "node.n20.channel", "", Type::ENUM, Access::RW, 0, 6, 0, kNodeChNames, static_cast<uint8_t>(sizeof(kNodeChNames) / sizeof(kNodeChNames[0])),
+     "Node 20: channel it plays (one node per channel: a taken channel swaps); node.save keeps it", 0},
+    {0x1429, "node.n20.online", "", Type::ENUM, Access::RO, 0, 1, 0, kNoYes, static_cast<uint8_t>(sizeof(kNoYes) / sizeof(kNoYes[0])),
+     "Node 20: announced itself within the last 3 s", 0},
+    {0x142A, "node.n21.channel", "", Type::ENUM, Access::RW, 0, 6, 0, kNodeChNames, static_cast<uint8_t>(sizeof(kNodeChNames) / sizeof(kNodeChNames[0])),
+     "Node 21: channel it plays (one node per channel: a taken channel swaps); node.save keeps it", 0},
+    {0x142B, "node.n21.online", "", Type::ENUM, Access::RO, 0, 1, 0, kNoYes, static_cast<uint8_t>(sizeof(kNoYes) / sizeof(kNoYes[0])),
+     "Node 21: announced itself within the last 3 s", 0},
+    {0x142E, "node.n23.channel", "", Type::ENUM, Access::RW, 0, 6, 0, kNodeChNames, static_cast<uint8_t>(sizeof(kNodeChNames) / sizeof(kNodeChNames[0])),
+     "Node 23: channel it plays (one node per channel: a taken channel swaps); node.save keeps it", 0},
+    {0x142F, "node.n23.online", "", Type::ENUM, Access::RO, 0, 1, 0, kNoYes, static_cast<uint8_t>(sizeof(kNoYes) / sizeof(kNoYes[0])),
+     "Node 23: announced itself within the last 3 s", 0},
+    {0x1430, "node.n24.channel", "", Type::ENUM, Access::RW, 0, 6, 0, kNodeChNames, static_cast<uint8_t>(sizeof(kNodeChNames) / sizeof(kNodeChNames[0])),
+     "Node 24: channel it plays (one node per channel: a taken channel swaps); node.save keeps it", 0},
+    {0x1431, "node.n24.online", "", Type::ENUM, Access::RO, 0, 1, 0, kNoYes, static_cast<uint8_t>(sizeof(kNoYes) / sizeof(kNoYes[0])),
+     "Node 24: announced itself within the last 3 s", 0},
+    {0x1432, "node.n25.channel", "", Type::ENUM, Access::RW, 0, 6, 0, kNodeChNames, static_cast<uint8_t>(sizeof(kNodeChNames) / sizeof(kNodeChNames[0])),
+     "Node 25: channel it plays (one node per channel: a taken channel swaps); node.save keeps it", 0},
+    {0x1433, "node.n25.online", "", Type::ENUM, Access::RO, 0, 1, 0, kNoYes, static_cast<uint8_t>(sizeof(kNoYes) / sizeof(kNoYes[0])),
+     "Node 25: announced itself within the last 3 s", 0},
+    {0x1434, "node.n26.channel", "", Type::ENUM, Access::RW, 0, 6, 0, kNodeChNames, static_cast<uint8_t>(sizeof(kNodeChNames) / sizeof(kNodeChNames[0])),
+     "Node 26: channel it plays (one node per channel: a taken channel swaps); node.save keeps it", 0},
+    {0x1435, "node.n26.online", "", Type::ENUM, Access::RO, 0, 1, 0, kNoYes, static_cast<uint8_t>(sizeof(kNoYes) / sizeof(kNoYes[0])),
+     "Node 26: announced itself within the last 3 s", 0},
+    {0x1480, "node.save", "", Type::INT, Access::ACTION, 0, 1, 0, nullptr, 0,
+     "Store the node -> channel map in the SOURCE flash (loaded at boot)", 0},
+    {0x1481, "node.reset", "", Type::INT, Access::ACTION, 0, 1, 0, nullptr, 0,
+     "Delete the saved node -> channel map and go back to the defaults (node registry)", 0},
+    {0x1010, "audio.chA_db", "dB", Type::FLOAT, Access::RW, -96, 0, 0, nullptr, 0,
+     "Channel A gain on the SOURCE, ramped 100 dB/s (console volch); not applied to caltone", 1},
+    {0x1011, "audio.chB_db", "dB", Type::FLOAT, Access::RW, -96, 0, 0, nullptr, 0,
+     "Channel B gain on the SOURCE, ramped 100 dB/s (console volch); not applied to caltone", 1},
+    {0x1012, "audio.chC_db", "dB", Type::FLOAT, Access::RW, -96, 0, 0, nullptr, 0,
+     "Channel C gain on the SOURCE, ramped 100 dB/s (console volch); not applied to caltone", 1},
+    {0x1013, "audio.chD_db", "dB", Type::FLOAT, Access::RW, -96, 0, 0, nullptr, 0,
+     "Channel D gain on the SOURCE, ramped 100 dB/s (console volch); not applied to caltone", 1},
+    {0x1014, "audio.chE_db", "dB", Type::FLOAT, Access::RW, -96, 0, 0, nullptr, 0,
+     "Channel E gain on the SOURCE, ramped 100 dB/s (console volch); not applied to caltone", 1},
+    {0x1015, "audio.chSUB_db", "dB", Type::FLOAT, Access::RW, -96, 0, 0, nullptr, 0,
+     "Channel SUB gain on the SOURCE, ramped 100 dB/s (console volch); not applied to caltone", 1},
     {0x1100, "sync.latency_ms", "ms", Type::INT, Access::RW, 20, 200, 50, nullptr, 0,
      "Playout latency (console latency)", 0},
-    {0x1110, "sync.ch0_trim_us", "us", Type::INT, Access::RW, -30000, 30000, 0, nullptr, 0,
-     "Channel 0 (L) presentation-time trim, + = later (console trim)", 0},
-    {0x1111, "sync.ch1_trim_us", "us", Type::INT, Access::RW, -30000, 30000, 0, nullptr, 0,
-     "Channel 1 (R) presentation-time trim, + = later (console trim)", 0},
-    {0x1112, "sync.ch2_trim_us", "us", Type::INT, Access::RW, -30000, 30000, 0, nullptr, 0,
-     "Channel 2 (C) presentation-time trim, + = later (console trim)", 0},
-    {0x1113, "sync.ch3_trim_us", "us", Type::INT, Access::RW, -30000, 30000, 0, nullptr, 0,
-     "Channel 3 (LS) presentation-time trim, + = later (console trim)", 0},
-    {0x1114, "sync.ch4_trim_us", "us", Type::INT, Access::RW, -30000, 30000, 0, nullptr, 0,
-     "Channel 4 (RS) presentation-time trim, + = later (console trim)", 0},
-    {0x1115, "sync.ch5_trim_us", "us", Type::INT, Access::RW, -30000, 30000, 0, nullptr, 0,
-     "Channel 5 (Sub) presentation-time trim, + = later (console trim)", 0},
-    {0x1120, "sync.ch0_rtt_us", "us", Type::INT, Access::RO, 0, 20000, 0, nullptr, 0,
-     "Channel 0 (L) best two-step round trip, 0 = no estimate", 0},
-    {0x1121, "sync.ch1_rtt_us", "us", Type::INT, Access::RO, 0, 20000, 0, nullptr, 0,
-     "Channel 1 (R) best two-step round trip, 0 = no estimate", 0},
-    {0x1122, "sync.ch2_rtt_us", "us", Type::INT, Access::RO, 0, 20000, 0, nullptr, 0,
-     "Channel 2 (C) best two-step round trip, 0 = no estimate", 0},
-    {0x1123, "sync.ch3_rtt_us", "us", Type::INT, Access::RO, 0, 20000, 0, nullptr, 0,
-     "Channel 3 (LS) best two-step round trip, 0 = no estimate", 0},
-    {0x1124, "sync.ch4_rtt_us", "us", Type::INT, Access::RO, 0, 20000, 0, nullptr, 0,
-     "Channel 4 (RS) best two-step round trip, 0 = no estimate", 0},
-    {0x1125, "sync.ch5_rtt_us", "us", Type::INT, Access::RO, 0, 20000, 0, nullptr, 0,
-     "Channel 5 (Sub) best two-step round trip, 0 = no estimate", 0},
-    {0x1130, "sync.ch0_drift_ppm", "ppm", Type::FLOAT, Access::RO, -200, 200, 0, nullptr, 0,
-     "Channel 0 (L) SINK clock vs SOURCE", 2},
-    {0x1131, "sync.ch1_drift_ppm", "ppm", Type::FLOAT, Access::RO, -200, 200, 0, nullptr, 0,
-     "Channel 1 (R) SINK clock vs SOURCE", 2},
-    {0x1132, "sync.ch2_drift_ppm", "ppm", Type::FLOAT, Access::RO, -200, 200, 0, nullptr, 0,
-     "Channel 2 (C) SINK clock vs SOURCE", 2},
-    {0x1133, "sync.ch3_drift_ppm", "ppm", Type::FLOAT, Access::RO, -200, 200, 0, nullptr, 0,
-     "Channel 3 (LS) SINK clock vs SOURCE", 2},
-    {0x1134, "sync.ch4_drift_ppm", "ppm", Type::FLOAT, Access::RO, -200, 200, 0, nullptr, 0,
-     "Channel 4 (RS) SINK clock vs SOURCE", 2},
-    {0x1135, "sync.ch5_drift_ppm", "ppm", Type::FLOAT, Access::RO, -200, 200, 0, nullptr, 0,
-     "Channel 5 (Sub) SINK clock vs SOURCE", 2},
-    {0x1140, "sync.ch0_err_us", "us", Type::INT, Access::RO, -32767, 32767, 0, nullptr, 0,
-     "Channel 0 (L) playout error reported by the SINK (+ = late), - = unknown", 0},
-    {0x1141, "sync.ch1_err_us", "us", Type::INT, Access::RO, -32767, 32767, 0, nullptr, 0,
-     "Channel 1 (R) playout error reported by the SINK (+ = late), - = unknown", 0},
-    {0x1142, "sync.ch2_err_us", "us", Type::INT, Access::RO, -32767, 32767, 0, nullptr, 0,
-     "Channel 2 (C) playout error reported by the SINK (+ = late), - = unknown", 0},
-    {0x1143, "sync.ch3_err_us", "us", Type::INT, Access::RO, -32767, 32767, 0, nullptr, 0,
-     "Channel 3 (LS) playout error reported by the SINK (+ = late), - = unknown", 0},
-    {0x1144, "sync.ch4_err_us", "us", Type::INT, Access::RO, -32767, 32767, 0, nullptr, 0,
-     "Channel 4 (RS) playout error reported by the SINK (+ = late), - = unknown", 0},
-    {0x1145, "sync.ch5_err_us", "us", Type::INT, Access::RO, -32767, 32767, 0, nullptr, 0,
-     "Channel 5 (Sub) playout error reported by the SINK (+ = late), - = unknown", 0},
+    {0x1110, "sync.chA_trim_us", "us", Type::INT, Access::RW, -30000, 30000, 0, nullptr, 0,
+     "Channel A presentation-time trim, + = later (console trim)", 0},
+    {0x1111, "sync.chB_trim_us", "us", Type::INT, Access::RW, -30000, 30000, 0, nullptr, 0,
+     "Channel B presentation-time trim, + = later (console trim)", 0},
+    {0x1112, "sync.chC_trim_us", "us", Type::INT, Access::RW, -30000, 30000, 0, nullptr, 0,
+     "Channel C presentation-time trim, + = later (console trim)", 0},
+    {0x1113, "sync.chD_trim_us", "us", Type::INT, Access::RW, -30000, 30000, 0, nullptr, 0,
+     "Channel D presentation-time trim, + = later (console trim)", 0},
+    {0x1114, "sync.chE_trim_us", "us", Type::INT, Access::RW, -30000, 30000, 0, nullptr, 0,
+     "Channel E presentation-time trim, + = later (console trim)", 0},
+    {0x1115, "sync.chSUB_trim_us", "us", Type::INT, Access::RW, -30000, 30000, 0, nullptr, 0,
+     "Channel SUB presentation-time trim, + = later (console trim)", 0},
+    {0x1120, "sync.chA_rtt_us", "us", Type::INT, Access::RO, 0, 20000, 0, nullptr, 0,
+     "Channel A best two-step round trip, 0 = no estimate", 0},
+    {0x1121, "sync.chB_rtt_us", "us", Type::INT, Access::RO, 0, 20000, 0, nullptr, 0,
+     "Channel B best two-step round trip, 0 = no estimate", 0},
+    {0x1122, "sync.chC_rtt_us", "us", Type::INT, Access::RO, 0, 20000, 0, nullptr, 0,
+     "Channel C best two-step round trip, 0 = no estimate", 0},
+    {0x1123, "sync.chD_rtt_us", "us", Type::INT, Access::RO, 0, 20000, 0, nullptr, 0,
+     "Channel D best two-step round trip, 0 = no estimate", 0},
+    {0x1124, "sync.chE_rtt_us", "us", Type::INT, Access::RO, 0, 20000, 0, nullptr, 0,
+     "Channel E best two-step round trip, 0 = no estimate", 0},
+    {0x1125, "sync.chSUB_rtt_us", "us", Type::INT, Access::RO, 0, 20000, 0, nullptr, 0,
+     "Channel SUB best two-step round trip, 0 = no estimate", 0},
+    {0x1130, "sync.chA_drift_ppm", "ppm", Type::FLOAT, Access::RO, -200, 200, 0, nullptr, 0,
+     "Channel A SINK clock vs SOURCE", 2},
+    {0x1131, "sync.chB_drift_ppm", "ppm", Type::FLOAT, Access::RO, -200, 200, 0, nullptr, 0,
+     "Channel B SINK clock vs SOURCE", 2},
+    {0x1132, "sync.chC_drift_ppm", "ppm", Type::FLOAT, Access::RO, -200, 200, 0, nullptr, 0,
+     "Channel C SINK clock vs SOURCE", 2},
+    {0x1133, "sync.chD_drift_ppm", "ppm", Type::FLOAT, Access::RO, -200, 200, 0, nullptr, 0,
+     "Channel D SINK clock vs SOURCE", 2},
+    {0x1134, "sync.chE_drift_ppm", "ppm", Type::FLOAT, Access::RO, -200, 200, 0, nullptr, 0,
+     "Channel E SINK clock vs SOURCE", 2},
+    {0x1135, "sync.chSUB_drift_ppm", "ppm", Type::FLOAT, Access::RO, -200, 200, 0, nullptr, 0,
+     "Channel SUB SINK clock vs SOURCE", 2},
+    {0x1140, "sync.chA_err_us", "us", Type::INT, Access::RO, -32767, 32767, 0, nullptr, 0,
+     "Channel A playout error reported by the SINK (+ = late), - = unknown", 0},
+    {0x1141, "sync.chB_err_us", "us", Type::INT, Access::RO, -32767, 32767, 0, nullptr, 0,
+     "Channel B playout error reported by the SINK (+ = late), - = unknown", 0},
+    {0x1142, "sync.chC_err_us", "us", Type::INT, Access::RO, -32767, 32767, 0, nullptr, 0,
+     "Channel C playout error reported by the SINK (+ = late), - = unknown", 0},
+    {0x1143, "sync.chD_err_us", "us", Type::INT, Access::RO, -32767, 32767, 0, nullptr, 0,
+     "Channel D playout error reported by the SINK (+ = late), - = unknown", 0},
+    {0x1144, "sync.chE_err_us", "us", Type::INT, Access::RO, -32767, 32767, 0, nullptr, 0,
+     "Channel E playout error reported by the SINK (+ = late), - = unknown", 0},
+    {0x1145, "sync.chSUB_err_us", "us", Type::INT, Access::RO, -32767, 32767, 0, nullptr, 0,
+     "Channel SUB playout error reported by the SINK (+ = late), - = unknown", 0},
     {0x1200, "cal.mode", "", Type::ENUM, Access::RW, 0, 2, 0, kCalNames, static_cast<uint8_t>(sizeof(kCalNames) / sizeof(kCalNames[0])),
      "Test tone played while audio.source = noise: synth, pink (500-2000 Hz + 40-100 Hz), sine (cal.sat_hz + cal.sub_hz); level = audio.master_db", 0},
     {0x1202, "cal.sat_hz", "Hz", Type::INT, Access::RW, 100, 10000, 1000, nullptr, 0,
@@ -279,34 +347,98 @@ const Desc kTable[] = {
      "Satellite spatial wet/dry blend (0 = dry HPF, 1 = full Hilbert upmix)", 2},
     {0x1311, "dsp.side_widening", "", Type::FLOAT, Access::RW, 0, 2, 1, nullptr, 0,
      "Satellite Side (L-R) width gain before quadrature steering", 2},
-    {0x1320, "dsp.ch0_azimuth_deg", "deg", Type::FLOAT, Access::RW, -360, 360, -90, nullptr, 0,
-     "Channel 0 (L) Hilbert spatial steering angle", 1},
-    {0x1321, "dsp.ch1_azimuth_deg", "deg", Type::FLOAT, Access::RW, -360, 360, 90, nullptr, 0,
-     "Channel 1 (R) Hilbert spatial steering angle", 1},
-    {0x1322, "dsp.ch2_azimuth_deg", "deg", Type::FLOAT, Access::RW, -360, 360, 0, nullptr, 0,
-     "Channel 2 (C) Hilbert spatial steering angle", 1},
-    {0x1323, "dsp.ch3_azimuth_deg", "deg", Type::FLOAT, Access::RW, -360, 360, -135, nullptr, 0,
-     "Channel 3 (LS) Hilbert spatial steering angle", 1},
-    {0x1324, "dsp.ch4_azimuth_deg", "deg", Type::FLOAT, Access::RW, -360, 360, 135, nullptr, 0,
-     "Channel 4 (RS) Hilbert spatial steering angle", 1},
-    {0x1330, "dsp.ch0_dfs_hz", "Hz", Type::FLOAT, Access::RW, -20, 20, 0, nullptr, 0,
-     "Channel 0 (L) Barberpole single-sideband frequency shift", 2},
-    {0x1331, "dsp.ch1_dfs_hz", "Hz", Type::FLOAT, Access::RW, -20, 20, 0, nullptr, 0,
-     "Channel 1 (R) Barberpole single-sideband frequency shift", 2},
-    {0x1332, "dsp.ch2_dfs_hz", "Hz", Type::FLOAT, Access::RW, -20, 20, 0, nullptr, 0,
-     "Channel 2 (C) Barberpole single-sideband frequency shift", 2},
-    {0x1333, "dsp.ch3_dfs_hz", "Hz", Type::FLOAT, Access::RW, -20, 20, 0, nullptr, 0,
-     "Channel 3 (LS) Barberpole single-sideband frequency shift", 2},
-    {0x1334, "dsp.ch4_dfs_hz", "Hz", Type::FLOAT, Access::RW, -20, 20, 0, nullptr, 0,
-     "Channel 4 (RS) Barberpole single-sideband frequency shift", 2},
+    {0x1320, "dsp.chA_azimuth_deg", "deg", Type::FLOAT, Access::RW, -360, 360, -90, nullptr, 0,
+     "Channel A Hilbert spatial steering angle", 1},
+    {0x1321, "dsp.chB_azimuth_deg", "deg", Type::FLOAT, Access::RW, -360, 360, 90, nullptr, 0,
+     "Channel B Hilbert spatial steering angle", 1},
+    {0x1322, "dsp.chC_azimuth_deg", "deg", Type::FLOAT, Access::RW, -360, 360, 0, nullptr, 0,
+     "Channel C Hilbert spatial steering angle", 1},
+    {0x1323, "dsp.chD_azimuth_deg", "deg", Type::FLOAT, Access::RW, -360, 360, -135, nullptr, 0,
+     "Channel D Hilbert spatial steering angle", 1},
+    {0x1324, "dsp.chE_azimuth_deg", "deg", Type::FLOAT, Access::RW, -360, 360, 135, nullptr, 0,
+     "Channel E Hilbert spatial steering angle", 1},
+    {0x1330, "dsp.chA_dfs_hz", "Hz", Type::FLOAT, Access::RW, -20, 20, 0, nullptr, 0,
+     "Channel A Barberpole single-sideband frequency shift", 2},
+    {0x1331, "dsp.chB_dfs_hz", "Hz", Type::FLOAT, Access::RW, -20, 20, 0, nullptr, 0,
+     "Channel B Barberpole single-sideband frequency shift", 2},
+    {0x1332, "dsp.chC_dfs_hz", "Hz", Type::FLOAT, Access::RW, -20, 20, 0, nullptr, 0,
+     "Channel C Barberpole single-sideband frequency shift", 2},
+    {0x1333, "dsp.chD_dfs_hz", "Hz", Type::FLOAT, Access::RW, -20, 20, 0, nullptr, 0,
+     "Channel D Barberpole single-sideband frequency shift", 2},
+    {0x1334, "dsp.chE_dfs_hz", "Hz", Type::FLOAT, Access::RW, -20, 20, 0, nullptr, 0,
+     "Channel E Barberpole single-sideband frequency shift", 2},
     {0x1302, "sub.mode", "", Type::ENUM, Access::RW, 0, 2, 0, kSubModeNames, static_cast<uint8_t>(sizeof(kSubModeNames) / sizeof(kSubModeNames[0])),
      "Subwoofer subharmonic resonator: bypass (LR4 LPF), zc (flipper), nccf (pitch-locked)", 0},
     {0x1303, "sub.dry_gain", "", Type::FLOAT, Access::RW, 0, 2, 0, nullptr, 0,
-     "Subharmonic resonator dry LPF bass linear gain", 2},
+     "Subwoofer effects: dry (input) bass gain, linear; zero-crossing flipper and NCCF synth", 2},
     {0x1304, "sub.wet_gain", "", Type::FLOAT, Access::RW, 0, 2, 1, nullptr, 0,
-     "Subharmonic resonator wet octave-down linear gain", 2},
+     "Subwoofer effects: generated f0/2 subharmonic gain, linear; zero-crossing flipper and NCCF synth", 2},
     {0x1305, "sub.zc_lpf_hz", "Hz", Type::FLOAT, Access::RW, 50, 200, 100, nullptr, 0,
      "Zero-crossing flipper post-LPF smoothing cutoff", 1},
+    {0x1340, "sub.zc.post_lp_order", "", Type::ENUM, Access::RW, 0, 2, 1, kZcOrderNames, static_cast<uint8_t>(sizeof(kZcOrderNames) / sizeof(kZcOrderNames[0])),
+     "Zero-crossing flipper: post-flip Butterworth low-pass order (0 = none)", 0},
+    {0x1341, "sub.zc.adaptive_thresh", "", Type::ENUM, Access::RW, 0, 1, 1, kOffOn, static_cast<uint8_t>(sizeof(kOffOn) / sizeof(kOffOn[0])),
+     "Zero-crossing flipper: adaptive (envelope) Schmitt threshold, off = sub.zc.thresh", 0},
+    {0x1342, "sub.zc.thresh", "", Type::FLOAT, Access::RW, 0, 0.05, 1e-05, nullptr, 0,
+     "Zero-crossing flipper: static arming threshold (normalized amplitude) when adaptive is off", 5},
+    {0x1343, "sub.zc.adaptive_ratio", "", Type::FLOAT, Access::RW, 0.05, 0.5, 0.2, nullptr, 0,
+     "Zero-crossing flipper: adaptive hysteresis as a fraction of the envelope", 2},
+    {0x1344, "sub.zc.adaptive_release_ms", "ms", Type::FLOAT, Access::RW, 5, 200, 30, nullptr, 0,
+     "Zero-crossing flipper: envelope release time", 0},
+    {0x1345, "sub.zc.period_guard", "", Type::ENUM, Access::RW, 0, 1, 0, kOffOn, static_cast<uint8_t>(sizeof(kOffOn) / sizeof(kOffOn[0])),
+     "Zero-crossing flipper: ignore crossings outside sub.zc.gate_min_hz .. gate_max_hz", 0},
+    {0x1346, "sub.zc.gate_floor_db", "dBFS", Type::FLOAT, Access::RW, -90, -20, -70, nullptr, 0,
+     "Zero-crossing flipper: noise floor below which the threshold does not drop", 1},
+    {0x1347, "sub.zc.gate_min_hz", "Hz", Type::FLOAT, Access::RW, 20, 100, 45, nullptr, 0,
+     "Zero-crossing flipper: period guard lowest fundamental", 1},
+    {0x1348, "sub.zc.gate_max_hz", "Hz", Type::FLOAT, Access::RW, 80, 250, 150, nullptr, 0,
+     "Zero-crossing flipper: period guard highest fundamental", 1},
+    {0x1350, "sub.nccf.f_min_hz", "Hz", Type::FLOAT, Access::RW, 42, 100, 45, nullptr, 0,
+     "NCCF synth: lowest fundamental the pitch tracker looks for", 1},
+    {0x1351, "sub.nccf.f_max_hz", "Hz", Type::FLOAT, Access::RW, 60, 200, 120, nullptr, 0,
+     "NCCF synth: highest fundamental the pitch tracker looks for", 1},
+    {0x1352, "sub.nccf.voicing_thresh_on", "", Type::FLOAT, Access::RW, 0.1, 0.98, 0.65, nullptr, 0,
+     "NCCF synth: NCCF peak above which the bass counts as voiced", 2},
+    {0x1353, "sub.nccf.voicing_thresh_off", "", Type::FLOAT, Access::RW, 0.1, 0.98, 0.5, nullptr, 0,
+     "NCCF synth: NCCF peak below which it stops being voiced (hysteresis)", 2},
+    {0x1354, "sub.nccf.hangover_frames", "", Type::INT, Access::RW, 0, 20, 2, nullptr, 0,
+     "NCCF synth: 10 ms frames the pitch is held after the correlation drops", 0},
+    {0x1355, "sub.nccf.lag_first_peak_weight", "", Type::FLOAT, Access::RW, 0, 0.5, 0.1, nullptr, 0,
+     "NCCF synth: lag preference against sub-octave (2 x T0) errors", 2},
+    {0x1356, "sub.nccf.hierarchical_search", "", Type::ENUM, Access::RW, 0, 1, 1, kOffOn, static_cast<uint8_t>(sizeof(kOffOn) / sizeof(kOffOn[0])),
+     "NCCF synth: coarse-to-fine lag search", 0},
+    {0x1357, "sub.nccf.coarse_step", "", Type::INT, Access::RW, 1, 8, 4, nullptr, 0,
+     "NCCF synth: coarse lag search stride (samples at 8 kHz)", 0},
+    {0x1358, "sub.nccf.fine_radius", "", Type::INT, Access::RW, 1, 8, 4, nullptr, 0,
+     "NCCF synth: fine search radius around coarse peaks (samples)", 0},
+    {0x1359, "sub.nccf.harmonic_3x_check", "", Type::ENUM, Access::RW, 0, 1, 1, kOffOn, static_cast<uint8_t>(sizeof(kOffOn) / sizeof(kOffOn[0])),
+     "NCCF synth: 3 x lag harmonic disambiguation", 0},
+    {0x135A, "sub.nccf.harmonic_3x_beta", "", Type::FLOAT, Access::RW, 0.3, 0.99, 0.7, nullptr, 0,
+     "NCCF synth: relative correlation threshold of the 3 x check", 2},
+    {0x135B, "sub.nccf.sub_ducking", "", Type::ENUM, Access::RW, 0, 1, 1, kOffOn, static_cast<uint8_t>(sizeof(kOffOn) / sizeof(kOffOn[0])),
+     "NCCF synth: duck the synth when the input already has sub-bass", 0},
+    {0x135C, "sub.nccf.sub_duck_cutoff_hz", "Hz", Type::FLOAT, Access::RW, 20, 80, 45, nullptr, 0,
+     "NCCF synth: sub-bass band of the ducking correlator", 1},
+    {0x135D, "sub.nccf.sub_duck_thresh_ratio", "", Type::FLOAT, Access::RW, 0.01, 1, 0.25, nullptr, 0,
+     "NCCF synth: sub-bass energy ratio at which the synth is fully ducked", 2},
+    {0x135E, "sub.nccf.env_attack_ms", "ms", Type::FLOAT, Access::RW, 1, 100, 20, nullptr, 0,
+     "NCCF synth: envelope follower attack", 0},
+    {0x135F, "sub.nccf.env_decay_ms", "ms", Type::FLOAT, Access::RW, 10, 500, 80, nullptr, 0,
+     "NCCF synth: envelope follower decay", 0},
+    {0x1360, "sub.nccf.dry_hpf", "", Type::ENUM, Access::RW, 0, 1, 0, kOffOn, static_cast<uint8_t>(sizeof(kOffOn) / sizeof(kOffOn[0])),
+     "NCCF synth: 2nd-order high-pass on the dry bass path", 0},
+    {0x1361, "sub.nccf.dry_hpf_hz", "Hz", Type::FLOAT, Access::RW, 40, 200, 80, nullptr, 0,
+     "NCCF synth: dry path high-pass cutoff", 1},
+    {0x0220, "sub.nccf.voiced", "", Type::ENUM, Access::RO, 0, 1, 0, kNoYes, static_cast<uint8_t>(sizeof(kNoYes) / sizeof(kNoYes[0])),
+     "Subharmonic NCCF voiced pitch lock active", 0},
+    {0x0221, "sub.nccf.f0_hz", "Hz", Type::FLOAT, Access::RO, 0, 200, 0, nullptr, 0,
+     "Subharmonic NCCF tracked fundamental f0", 1},
+    {0x0222, "sub.nccf.fsub_hz", "Hz", Type::FLOAT, Access::RO, 0, 100, 0, nullptr, 0,
+     "Subharmonic synthesized octave-down frequency (f0 / 2)", 1},
+    {0x0223, "sub.nccf.peak", "", Type::FLOAT, Access::RO, -1, 1, 0, nullptr, 0,
+     "Subharmonic NCCF normalized cross-correlation peak", 2},
+    {0x0224, "sub.nccf.duck_gain", "", Type::FLOAT, Access::RO, 0, 1, 1, nullptr, 0,
+     "Subharmonic direct-bass ducking gain", 2},
 };
 constexpr size_t kCount = sizeof(kTable) / sizeof(kTable[0]);
 
@@ -405,6 +537,39 @@ bool get(uint16_t id, float& value) {
         value = e ? e->getRepliesMissed(static_cast<uint8_t>(id - 0x0160)) : 0;
         return true;
     }
+    if (id >= 0x1400 && id < 0x1440) {
+        const uint8_t node = static_cast<uint8_t>((id - 0x1400) / 2);
+        if (!e) { value = NAN; return true; }
+        if ((id - 0x1400) & 1) {
+            value = e->isNodeOnline(node) ? 1 : 0;
+        } else {
+            const uint8_t c = e->getNodeChannel(node);
+            value = (c == VSAF_CH_KEEP) ? NAN : (c == VSAF_CH_OFF ? 0.0f : static_cast<float>(c + 1));
+        }
+        return true;
+    }
+    if (id >= 0x0170 && id < 0x0176) {
+        const uint8_t n = e ? e->getChannelNode(static_cast<uint8_t>(id - 0x0170)) : 0xFF;
+        value = (n == 0xFF) ? NAN : n;
+        return true;
+    }
+    if (id >= 0x1350 && id < 0x1362) {
+        value = e ? e->getNccfParam(static_cast<EspNowBroadcastEngine::NccfParam>(id - 0x1350)) : NAN;
+        return true;
+    }
+    if (id >= 0x1340 && id < 0x1349) {
+        using ZP = EspNowBroadcastEngine::ZcParam;
+        const auto zp = static_cast<ZP>(id - 0x1340);
+        value = e ? e->getZcParam(zp) : NAN;
+        if (zp == ZP::POST_LP_ORDER) {  // order -> enum index
+            const int o = static_cast<int>(value);
+            value = NAN;
+            for (size_t i = 0; i < sizeof(kZcOrders) / sizeof(kZcOrders[0]); ++i) {
+                if (kZcOrders[i] == o) value = i;
+            }
+        }
+        return true;
+    }
     if (id >= 0x0130 && id < 0x0136) {
         const SinkPeerConfig* p = e ? e->getPeer(id - 0x0130) : nullptr;
         value = (p && p->status == PeerStatus::ONLINE) ? p->last_rssi : -127;
@@ -460,7 +625,7 @@ bool get(uint16_t id, float& value) {
         case 0x0103: value = kb(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)); return true;
         case 0x0104: value = kb(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)); return true;
         case 0x0105: value = kb(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)); return true;
-        case 0x01F0: case 0x01F1: case 0x01F2: case 0x1F00: value = 0; return true;  // actions
+        case 0x01F0: case 0x01F1: case 0x01F2: case 0x1F00: case 0x1480: case 0x1481: value = 0; return true;  // actions
         case 0x0110: value = s.peers_online; return true;
         case 0x0111: value = s.peers_mask; return true;
         case 0x0200: value = s.dsp_ms; return true;
@@ -524,6 +689,7 @@ bool get(uint16_t id, float& value) {
         case 0x1203: value = e ? e->getCalSignal().subHz() : 63; return true;
         case 0x1300: value = e ? e->getXoHpHz() : 100; return true;
         case 0x1306: value = e ? e->getXoHpOrder() : 2; return true;
+        case 0x1007: value = (e && e->isStereo()) ? 1 : 0; return true;
         case 0x1307: value = e ? e->getXoLpHz() : 100; return true;
         case 0x1308: {
             value = NAN;
@@ -556,7 +722,16 @@ SetStatus set(uint16_t id, float value, float& applied) {
     if (d->type != Type::FLOAT) v = std::round(v);
     const SetStatus st = (v != value) ? SetStatus::CLAMPED : SetStatus::OK;
     const int iv = static_cast<int>(v);
-    if (id >= 0x1010 && id < 0x1016) {
+    if (id >= 0x1400 && id < 0x1440 && ((id - 0x1400) & 1) == 0) {
+        const uint8_t node = static_cast<uint8_t>((id - 0x1400) / 2);
+        e->setNodeChannel(node, iv == 0 ? VSAF_CH_OFF : static_cast<uint8_t>(iv - 1));
+    } else if (id >= 0x1350 && id < 0x1362) {
+        e->setNccfParam(static_cast<EspNowBroadcastEngine::NccfParam>(id - 0x1350), v);
+    } else if (id >= 0x1340 && id < 0x1349) {
+        using ZP = EspNowBroadcastEngine::ZcParam;
+        const auto zp = static_cast<ZP>(id - 0x1340);
+        e->setZcParam(zp, zp == ZP::POST_LP_ORDER ? static_cast<float>(kZcOrders[iv]) : v);
+    } else if (id >= 0x1010 && id < 0x1016) {
         e->setChannelGainDb(id - 0x1010, v);
     } else if (id >= 0x1110 && id < 0x1116) {
         e->setChannelTrimUs(static_cast<uint8_t>(id - 0x1110), static_cast<int16_t>(iv));
@@ -571,6 +746,12 @@ SetStatus set(uint16_t id, float value, float& applied) {
                 e->resetErrorCounters();
                 break;
             case 0x01F1: scheduleRestart(false); break;
+            case 0x1480:
+                if (e->saveNodeMap() != ESP_OK) return SetStatus::INVALID;
+                break;
+            case 0x1481:
+                if (e->resetNodeMap() != ESP_OK) return SetStatus::INVALID;
+                break;
             case 0x01F2: scheduleRestart(true); break;
             case 0x1F00:
                 if (iv == 0) e->requestTxFaultInjection();
@@ -613,6 +794,7 @@ SetStatus set(uint16_t id, float value, float& applied) {
             }
             case 0x1300: e->setXoHpHz(v); break;
             case 0x1306: e->setXoHpOrder(iv); break;
+            case 0x1007: e->setStereo(iv != 0); break;
             case 0x1307: e->setXoLpHz(v); break;
             case 0x1308: e->setXoLpOrder(kLpOrders[iv]); break;
             case 0x1301: e->setDspHilbertBypass(iv == 0); break;

@@ -15,7 +15,7 @@ static constexpr uint16_t VSAF_TYPE_SINK_TELEMETRY  = 0x1360; // Telemetry reply
 static constexpr uint8_t NODE_ID_SOURCE          = 0x0;
 static constexpr uint8_t NODE_ID_BROADCAST       = 0x7;
 static constexpr size_t  MAX_SINK_NODES          = 6;
-static constexpr size_t  NUM_SATELLITE_CHANNELS  = 5; // Ch 0..4 (Left, Right, Center, Surround Left, Surround Right)
+static constexpr size_t  NUM_SATELLITE_CHANNELS  = 5; // Ch 0..4 = A..E (spatial upmix outputs)
 static constexpr uint8_t SUBWOOFER_CHANNEL_ID    = 5; // Ch 5 (Subwoofer)
 static constexpr size_t  LC3_FRAME_OCTETS_HQ     = 120; // 96 kbps @ 10ms 48k
 static constexpr size_t  LC3_FRAME_OCTETS_RED    = 60;  // 48 kbps @ 10ms 48k
@@ -133,6 +133,47 @@ struct __attribute__((packed)) vsaf_control_t {
     uint16_t reserved;
 };
 static_assert(sizeof(vsaf_control_t) == 88, "Control packet must be exactly 88 bytes");
+
+// ---------------------------------------------------------------------------------------------------------------
+// Node -> channel assignment (VSAF 3.2). Audio channels are named by the spatial upmix outputs: A..E = channel ids
+// 0..4 (satellites), SUB = 5. Nodes are named by their ID (= COM port number, MAC table in config.c / README).
+// - Every SINK announces itself once per second (node id + channel it plays), also while assigned to no channel.
+// - The SOURCE broadcasts the node -> channel map once per second; a SINK switches when its entry changes.
+// One node per channel: two nodes on one channel would both answer its REQ_ACK packets and mix the time sync.
+// ---------------------------------------------------------------------------------------------------------------
+static constexpr uint16_t VSAF_TYPE_SINK_ANNOUNCE = 0x1370; // SINK -> SOURCE, 1 Hz
+static constexpr uint16_t VSAF_TYPE_NODE_MAP      = 0x1371; // SOURCE -> all SINKs, 1 Hz
+static constexpr uint8_t  VSAF_MAX_NODES          = 32;     // node ids 0..31
+static constexpr uint8_t  VSAF_CH_OFF             = 0xFF;   // node assigned to no channel (standby: silent, no replies)
+static constexpr uint8_t  VSAF_CH_KEEP            = 0xFE;   // map entry: no assignment, the node keeps its own channel
+static constexpr uint8_t  VSAF_ANNOUNCE_FLAG_STREAMING = 0x01;  // SINK is playing (state STREAM)
+
+/** @brief Channel name: "A".."E", "SUB", "off" (VSAF_CH_OFF) or "?". */
+inline const char* vsaf_channel_name(uint8_t ch) {
+    static const char* const kNames[] = {"A", "B", "C", "D", "E", "SUB"};
+    return ch < MAX_SINK_NODES ? kNames[ch] : (ch == VSAF_CH_OFF ? "off" : "?");
+}
+
+struct __attribute__((packed)) vsaf_sink_announce_t {
+    uint16_t type_id;                      // 0x1370
+    uint8_t  node_id;                      // SINK node id (0..31)
+    uint8_t  channel;                      // channel it plays (0..5) or VSAF_CH_OFF
+    uint8_t  flags;                        // VSAF_ANNOUNCE_FLAG_*
+    uint8_t  reserved;
+    uint16_t crc16;                        // Checksum over the preceding 6 bytes
+};
+static_assert(sizeof(vsaf_sink_announce_t) == 8, "Announce packet must be exactly 8 bytes");
+
+static constexpr uint8_t VSAF_NODE_MAP_VERSION = 1;
+struct __attribute__((packed)) vsaf_node_map_t {
+    uint16_t type_id;                      // 0x1371
+    uint8_t  version;                      // VSAF_NODE_MAP_VERSION
+    uint8_t  seq;                          // map packet counter
+    uint8_t  channel[VSAF_MAX_NODES];      // per node id: 0..5, VSAF_CH_OFF, or VSAF_CH_KEEP
+    uint16_t crc16;                        // Checksum over the preceding 36 bytes
+    uint16_t reserved;
+};
+static_assert(sizeof(vsaf_node_map_t) == 40, "Node map packet must be exactly 40 bytes");
 
 // Fast CCITT-16 CRC
 inline uint16_t calc_crc16(const uint8_t* data, size_t len) {

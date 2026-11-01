@@ -53,12 +53,13 @@ static const char* getState5Char(AudioNet::NetworkState state) {
 
 static const char* getChannelStr(uint8_t ch) {
     switch (ch) {
-        case 0:  return "LEFT";
-        case 1:  return "RGHT";
-        case 2:  return "CNTR";
-        case 3:  return "LSUR";
-        case 4:  return "RSUR";
+        case 0:  return "CH-A";
+        case 1:  return "CH-B";
+        case 2:  return "CH-C";
+        case 3:  return "CH-D";
+        case 4:  return "CH-E";
         case 5:  return "SUB";
+        case AudioNet::VSAF_CH_OFF: return "OFF";
         default: return "CH?";
     }
 }
@@ -291,6 +292,7 @@ void SystemDiagnostics::tick() {
                      "  %-6.6s    %4.4s  %4.4s  %4.4s  %5.5s ",
                      input_str, tx_pkts_str, ack_pct_str, ack_fails_str, tx_tot_str);
             m_unicast_engine.updateReplyLossWindow();
+            m_unicast_engine.resolveNodeConflicts();  // one node per channel (node -> channel map)
             AudioNet::Params::publishStatus(snap);
         } else {
             // SINK specifics: Target Channel string

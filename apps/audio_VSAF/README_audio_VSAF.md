@@ -48,33 +48,67 @@ Main building blocks:
 
 ## 2. Hardware Topology & Node Registry
 
-| Node ID | Board / Form Factor | SoC Architecture | Flash / RAM | Factory MAC Address | Default COM Port | Network Role, DAC & Aux Hardware Configuration |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Node 1**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa Dual-Core + FPU) | 8 MB / 8 MB PSRAM | TBD | **COM1** | Audio SINK (Ch 0: Left / Spare): PCM5102A 24-bit I2S DAC, TPA3118 Mono Power Amp (GPIO 3 Mute control, -20.0 dB post-gain), User LED (GPIO 21), Wio-SX1262 B2B LoRa header. |
-| **Node 2**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa Dual-Core + FPU) | 8 MB / 8 MB PSRAM | TBD | **COM2** | Audio SINK (Ch 1: Right / Spare): PCM5102A 24-bit I2S DAC, TPA3118 Mono Power Amp (GPIO 3 Mute control, -20.0 dB post-gain), User LED (GPIO 21), Wio-SX1262 B2B LoRa header. |
-| **Node 3**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa Dual-Core + FPU) | 8 MB / 8 MB PSRAM | TBD | **COM3** | Audio SINK (Ch 2: Center / Spare): PCM5102A 24-bit I2S DAC, TPA3118 Mono Power Amp (GPIO 3 Mute control, -20.0 dB post-gain), User LED (GPIO 21), Wio-SX1262 B2B LoRa header. |
-| **Node 4**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa Dual-Core + FPU) | 8 MB / 8 MB PSRAM | `E8:3D:C1:FB:E8:3C` | **COM4** | **Audio SINK (Ch 0: Left)**: PCM5102A 24-bit I2S DAC, TPA3118 Mono Power Amp (GPIO 3 Mute control, -20.0 dB post-gain), User LED (GPIO 21), Wio-SX1262 B2B LoRa header. |
-| **Node 5**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa Dual-Core + FPU) | 8 MB / 8 MB PSRAM | `E8:3D:C1:FC:8B:50` | **COM5** | **Audio SINK (Ch 1: Right)**: PCM5102A 24-bit I2S DAC, TPA3118 Mono Power Amp (GPIO 3 Mute control, -9.0 dB post-gain), User LED (GPIO 21), Wio-SX1262 B2B LoRa header. |
-| **Node 16** | Seeed Studio XIAO ESP32-S3 | ESP32-S3 (Xtensa Dual-Core + FPU) | 4 MB / 512 KB (no PSRAM) | `E0:72:A1:D8:4C:D0` | **COM16** (Bootloader)<br>**COM116** (Runtime App) | **Audio SOURCE**: UAC1 USB Audio Speaker (48 kHz 16-bit Stereo), dual-core DSP + LC3 pipeline (5 satellites dual-rate + sub), RF task, round-robin telemetry collector, User LED (GPIO 21). |
-| **Node 20** | Waveshare ESP32-C6-LCD-1.47 | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `AC:EB:E6:23:DC:24` | **COM20** | **Audio SINK / Subwoofer (Ch 5)**: MAX98357A I2S Mono DAC (+3 dB gain), ST7789 1.47" LCD Console Display, WS2812B RGB LED (GPIO 8), 8 kHz decimated LC3 decoding. |
-| **Node 21** | ESP32-C6-WROOM-1 DevKit | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `98:A3:16:9D:57:EC` | **COM21** (Flash)<br>**COM121** (App) | Audio SINK (Ch 2: Center) / USB Host Bridge: MAX98357A I2S DAC (+3 dB gain), CP2102N UART bridge + Native USB. |
-| **Node 23** | Waveshare ESP32-C6-Zero | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `B0:A6:04:99:38:44` | **COM23** | **Audio SINK (Ch 2: Center)**: MAX98357A I2S Mono DAC (GAIN on GPIO 0, set to 15 dB), WS2812B RGB LED (GPIO 8). |
-| **Node 24** | Waveshare ESP32-C6-Zero | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `B0:A6:04:99:18:E4` | **COM24** | **Audio SINK (Ch 3: Surround Left)**, satellite driver (was the Ch 5 subwoofer until 2026-10-25): MAX98357A I2S Mono DAC (GAIN on GPIO 0, set to 15 dB), WS2812B RGB LED (GPIO 8). |
-| **Node 25** | Heemol ESP32-C6 Mini | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `E8:3D:C1:FB:DC:C4` | **COM25** (or COM10) | Audio SINK (Ch 3: Surround Left) / Test Node: MAX98357A I2S DAC (+3 dB gain), discrete User LED (GPIO 15). |
-| **Node 26** | Heemol ESP32-C6 Mini | ESP32-C6 (160 MHz RISC-V) | 8 MB / 512 KB | `98:A3:16:AC:13:38` | **COM26** (or COM22) | Audio SINK (Ch 4: Surround Right) / Test Node: MAX98357A I2S DAC (+3 dB gain), discrete User LED (GPIO 15). |
+**Node ID = COM port number** of the node on the development PC (Node 16 also enumerates as COM116). The firmware
+identifies a node by its Wi-Fi STA MAC address (`config.c`: pins / DAC per board, `main.cpp`: registry with the
+default channel and post-gain: -6 dB on every S3 / PCM5102A node until they are calibrated). Audio channels are
+**not** tied to nodes: see 2.1.
 
-### 2.1 Channel Assignment & Routing Matrix
+| MAC address (Wi-Fi STA) | Node ID | COM port | Board | DAC / amplifier | Default channel | Notes |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `E8:3D:C1:FB:D5:3C` | **6** | COM6 | XIAO ESP32-S3 Plus (8 MB PSRAM) | PCM5102A + power amp, drivers, battery | C | Complete speaker; has precedence over the prototypes |
+| `E8:3D:C1:FB:DC:C4` | **7** | COM7 | XIAO ESP32-S3 Plus (8 MB PSRAM) | PCM5102A + power amp, drivers, battery | D | Complete speaker; has precedence over the prototypes |
+| `E8:3D:C1:FC:8F:44` | **8** | COM8 | XIAO ESP32-S3 Plus (8 MB PSRAM) | PCM5102A | E | |
+| `E8:3D:C1:FB:E8:3C` | 4 | COM4 | XIAO ESP32-S3 Plus + Wio-SX1262 | PCM5102A + TPA3118 (GPIO 3 mute) | A | Prototype |
+| `E8:3D:C1:FC:8B:50` | 5 | COM5 | XIAO ESP32-S3 Plus + Wio-SX1262 | PCM5102A + TPA3118 (GPIO 3 mute) | B | Prototype |
+| `B0:A6:04:99:38:44` | 23 | COM23 | Waveshare ESP32-C6-Zero | MAX98357A (GAIN 15 dB, GPIO 0) | off | Prototype; removed from the setup 2026-11-01 (MAX98357A noise) |
+| `B0:A6:04:99:18:E4` | 24 | COM24 | Waveshare ESP32-C6-Zero | MAX98357A (GAIN 15 dB, GPIO 0) | off | Prototype; removed from the setup 2026-11-01 (MAX98357A noise) |
+| `E0:72:A1:D8:4C:D0` | 16 | COM16 (boot) / COM116 (app) | XIAO ESP32-S3 (4 MB flash, no PSRAM) | - | - | **SOURCE**: UAC1 USB speaker, DSP + LC3 pipeline, RF task, USB HID control |
+| `AC:EB:E6:23:DC:24` | 20 | COM20 | Waveshare ESP32-C6-LCD-1.47 | MAX98357A | off | Prototype (ST7789 LCD); no SUB node yet |
+| `98:A3:16:9D:57:EC` | 21 | COM21 / COM121 | ESP32-C6-WROOM-1 DevKit | MAX98357A | off | Prototype / USB host bridge |
+| `98:A3:16:AC:13:38` | 26 | COM26 | Heemol ESP32-C6 Mini | MAX98357A | off | Test node |
+| unknown | 25 | COM25 | Heemol ESP32-C6 Mini | MAX98357A | - | MAC unknown (the MAC listed until 2026-11-01 is Node 7's) |
+| unknown | 1, 2, 3 | COM1..3 | XIAO ESP32-S3 Plus + Wio-SX1262 | PCM5102A + TPA3118 | - | Not yet registered; an unknown S3 board runs as node 1 with no channel |
+
+Adding a node: a MAC branch in `config.c` (under the right `CONFIG_IDF_TARGET_*`), an entry in `KNOWN_NODE_LIBRARY`
+(`main.cpp`, default channel must not collide), a post-gain case in `main.cpp`, this table and AGENTS.md, and the
+node in the flash scripts (`KNOWN_NODES` of the parallel flash script; `build_and_flash.ps1` picks the chip by port).
+
+### 2.1 Channels and the node -> channel map (VSAF 3.2)
+
+The six audio channels are the spatial upmix outputs; they carry no left / right / center meaning:
 
 ```text
-Channel 0: Left Satellite (Ch 0, High-Pass @ 100 Hz LR4, 48 kHz, Packet Type 0x1337)
-Channel 1: Right Satellite (Ch 1, High-Pass @ 100 Hz LR4, 48 kHz, Packet Type 0x1337)
-Channel 2: Center Satellite (Ch 2, High-Pass @ 100 Hz LR4, 48 kHz, Packet Type 0x1337)
-Channel 3: Surround Left Satellite (Ch 3, High-Pass @ 100 Hz LR4, 48 kHz, Packet Type 0x1337)
-Channel 4: Surround Right Satellite (Ch 4, High-Pass @ 100 Hz LR4, 48 kHz, Packet Type 0x1337)
-Channel 5: Subwoofer (Ch 5, Polyphase Decimated LP @ 100 Hz LR4, 8 kHz, Packet Type 0x1338)
+A, B, C, D, E: satellites (wire channel id 0..4, high-pass + Hilbert upmix, 48 kHz, packet type 0x1337)
+SUB:           subwoofer  (wire channel id 5, low-pass + 6:1 decimation, 8 kHz stream by default, packet type 0x1338)
 ```
 
-Until the spatial upmix exists (GOALS.md priority 2), the SOURCE fills ch 2 (Center) and ch 3 (Surround L) with the left signal and ch 4 (Surround R) with the right signal. All 5 satellite streams are encoded independently, so the CPU load is already that of real 5.1.
+**SUB stream rate** (`CONFIG_ESPNOW_SUB_SAMPLE_RATE_HZ` in `config.h`, chosen at build time: 8000 (default), 16000, 24000, 32000
+or 48000 Hz). The SOURCE's sub DSP (low-pass, 6:1 decimation, subharmonic effects) always runs at 8 kHz, its content is
+below 200 Hz; above 8 kHz the SOURCE interpolates it to the stream rate before the LC3 encoder. The SINK decodes at the
+rate the packet header carries and interpolates to 48 kHz. Both use `polyphase_resampler.hpp`: rational L/M polyphase FIR
+(Kaiser-windowed sinc, 16 taps per branch, cutoff 0.45 x the lower rate, branches normalized to unity DC gain, Q20
+integer coefficients, so it runs on the C6 without FPU). Host test, tone in, frame by frame: gain 0.000 dB, images /
+aliasing / frame-boundary errors 82..107 dB below the tone (the 6x sample repeat used before 2026-11-01 left images
+about 30-40 dB down). Filter delay (about 1 ms from 8 kHz, 0.25 ms from 32 kHz, SOURCE + SINK) is taken off the SUB's
+presentation time on the SINK, so the SUB keeps its alignment with the satellites. Higher stream rates cost SOURCE CPU
+(the sub encoder works at the stream rate) and internal RAM (encoder state).
+
+Any node can play any channel, chosen at runtime:
+- The SOURCE's map starts as the registry's default channels (table above), or the map saved with **Save**
+  (`node.save`, NVS); **Reset** (`node.reset`) deletes the saved map and goes back to the defaults.
+- Each SINK boots on its default channel (2), announces itself once per second (`0x1370`) and follows the SOURCE's
+  node -> channel map, broadcast once per second (`0x1371`). A change flushes the SINK's buffer and re-buffers from
+  the new channel (no concealment of the switch).
+- One node per channel: two nodes on one channel would both answer its REQ_ACK packets and mix its time sync.
+  Assigning a channel that another node plays swaps the two. `off` = standby (silent, no telemetry replies).
+  If two online nodes still end up on one channel (e.g. a new node whose default is taken in the saved map), the
+  SOURCE moves one of them once per second: the node with a map entry keeps the channel (else the one already
+  playing, else the lower node id); the other gets the lowest satellite channel A..E no online node plays, or off.
+  Channels held only by offline nodes count as free.
+- WebHID page, card "Speakers": one row per online node with off / A..E / SUB buttons; **Save** (`node.save`) stores
+  the map in the SOURCE's NVS (loaded at boot; a flash write may delay one audio frame). Console on a SINK:
+  `ch <A..E | SUB | off>` (until the next map entry for that node).
+- The time sync of the channels involved restarts on a change (their clock estimates belonged to the previous node).
 
 ### 2.2 Pinout & Auxiliary Hardware Wiring Reference
 
@@ -237,6 +271,14 @@ Broadcast by the SOURCE every 10th frame (100 ms), after the 6 audio packets and
 | 84 | `crc16` (u16), `reserved` (u16) | CRC over bytes 0..83 |
 
 ---
+
+### 3.6 Node Announce (`vsaf_sink_announce_t`, `0x1370`, 8 Bytes) and Node Map (`vsaf_node_map_t`, `0x1371`, 40 Bytes), VSAF 3.2
+
+- **Announce** (every SINK, once per second, sent from the control-frame handler when `ctrl.seq % 10 == node_id % 10`):
+  `type_id`, `node_id`, `channel` (0..5 or 0xFF = off), `flags` (bit 0 = streaming), reserved, CRC-16.
+- **Node map** (SOURCE, once per second, in the control-frame slot of frames 5, 105, ..., which carry no control
+  frame): `type_id`, `version` (1), `seq`, `channel[32]` per node id (0..5, 0xFF = off, 0xFE = no assignment: the node
+  keeps its channel), CRC-16, reserved.
 
 ## 4. SOURCE Real-Time Pipeline (`vsaf_source_pipeline.cpp`)
 
@@ -426,7 +468,7 @@ How each node reads its console:
 | `vol <0..100>` | SOURCE / SINK | SOURCE: master volume for all channels (parameter `audio.master_db`, section 7.5), 0..-48 dB curve, 0 = mute. SINK: local volume of that SINK, ramped at 100 dB/s. Before 2026-10-29 `vol` and `mute` had no effect on either role. |
 | `voldb <-96..0>` | SOURCE / SINK | Set volume directly in decibels (SOURCE: master volume). |
 | `volu8 <0..255>` | SOURCE / SINK | Set raw 8-bit volume level (SOURCE: master volume, same curve as `vol`). |
-| `volch <ch> <dB>` | SOURCE | Gain of one channel on the SOURCE, -96..0 dB (0: Left, 1: Right, 2: Center, 3: LSurr, 4: RSurr, 5: Sub; parameter `audio.chN_db`), ramped at 100 dB/s, not applied to `caltone`. |
+| `volch <A..E\|SUB> <dB>` | SOURCE | Gain of one channel on the SOURCE, -96..0 dB (parameter `audio.chX_db`), ramped at 100 dB/s, not applied to `caltone`. |
 | `mute` / `unmute` | Both | Mute / unmute, ramped at 100 dB/s (SOURCE: master mute, parameter `audio.mute`; the master volume is kept). Before 2026-10-31 the SOURCE `mute`, `unmute`, `voldb`, `volu8` and `volch` had no effect. |
 | `postgain <dB>` | SINK | Software post-gain (PCM5102A calibration, see AGENTS.md). |
 | `peer list` / `peers` | SOURCE | Registered SINK peers, online status, RTT and telemetry. |
@@ -439,7 +481,7 @@ How each node reads its console:
 | `wifich <1..13>` / `channel` | SOURCE / SINK | Set Wi-Fi channel (SOURCE: applied at the next frame boundary). |
 | `phy <mode>` | SOURCE | TX PHY rate (default HT20 MCS3), applied at the next frame boundary. |
 | `txp` / `txpower <dBm>` | Both | TX power in dBm (2..20 or `max`; default 10 dBm). The reply shows ESP-IDF's readback, taken once right after the change. The radio quantizes the setting to fixed levels and no public API reports the applied level (section 10). The SOURCE heartbeat `GAIN` column shows the same cached value; nothing is polled. |
-| `ch <0..5>` | SINK | Switch the received audio channel. |
+| `ch <A..E\|SUB\|off>` | SINK | Channel this SINK plays until the SOURCE's node map assigns another (2.1). |
 | `driftcorr 0\|1` | SINK | Clock-drift compensation off / on (default on, section 5.3). |
 | `clear` / `cls` | Both | Reset frame, PLC and error counters. |
 | `bootloader` / `download` | Both | Reboot into the ROM bootloader for flashing (Node 16: also triggered by the 1200-baud touch). |
@@ -471,7 +513,7 @@ How each node reads its console:
 | Command | Target | Description |
 | :--- | :--- | :--- |
 | `ptp` | Both | SOURCE: per channel valid, offset (SINK - SOURCE), drift (ppm), best RTT, samples in window / total, two-step and t1 misses, `holdover` (estimates served from an older sample, section 6.1), trim, reported playout error, plus frame-tick jitter. SINK: sync state, offset in use, drift, control-frame age, latency, trim, filtered / max playout error since the last `ptp`, coarse and fine correction counts with coarse causes, the last 8 coarse events, DMA queue min / max, DMA rebases, unsynced frames. Both: RX hardware-timestamp probe. |
-| `trim <ch> <us>` | SOURCE | Per-channel presentation-time trim (-30000..30000 us), sent in the control frame. + = that speaker plays later. |
+| `trim <A..E\|SUB> <us>` | SOURCE | Per-channel presentation-time trim (-30000..30000 us), sent in the control frame. + = that speaker plays later. |
 | `latency <ms>` | SOURCE | Playout latency 20..200 ms (default 50). A frame must arrive by ~latency - 12 ms after t0; t-1 / t-2 / t-3 copies arrive ~10 / 20 / 30 ms after t0, so below ~45 ms the t-3 sub copy and below ~35 ms t-2 come too late. |
 | `syncprobe 0\|1` | SINK | Print `[SYNC] rx` / `[SYNC] play` lines once per SOURCE second (see `tools/sync_probe.py`). |
 | `syncoff 0\|1` | SINK | Debug: ignore the time sync and use the FIFO-level fallback (section 5.3). |
@@ -480,7 +522,7 @@ How each node reads its console:
 
 One transport-independent table names, describes, reads and writes runtime parameters: the console uses it today, a USB HID (WebHID) interface or a control node can use the same calls later.
 
-- Every parameter has a **stable numeric ID** (high byte = group: 0x01 system / network, 0x02 SOURCE pipeline, 0x03 radio status, 0x04 audio / USB status, 0x10 audio / source / radio controls, 0x11 time sync, 0x12 calibration signal, 0x1F tests; IDs are never reused), a dotted name, a unit, a type (int / float / enum), access, min, max, default and display decimals.
+- Names are dotted (`<domain>.<field>` or `<domain>.<sub>.<field>`, at most 30 characters). Every parameter has a **stable numeric ID** (high byte = group: 0x01 system / network, 0x02 SOURCE pipeline, 0x03 radio status, 0x04 audio / USB status, 0x10 audio / source / radio controls, 0x11 time sync, 0x12 calibration signal, 0x1F tests; IDs are never reused), a dotted name, a unit, a type (int / float / enum), access, min, max, default and display decimals.
 - **Access**: `ro` (status), `rw` (setting) or `act` (action: a write runs it, e.g. reboot; a read returns 0).
 - The table covers every SOURCE console command that sets or reports a value (99 parameters). Text-only diagnostics (`timing`, `tasks`, `ptp`, `peer list`, `txstat`, `mem`, `log`, `encbench`, `scan`) stay console-only; SINK-only commands (`postgain`, `ch`, `driftcorr`, `syncoff`, I2S tests) are not in it. The runtime sample-rate switch (`sr`, ID 0x1006) was removed on 2026-10-31: the pipeline only supports 48 kHz satellites, other rates gave corrupt audio. `octets` and `peer enable / disable` have no effect in VSAF 3.x (every channel is broadcast and polled for telemetry in turn) and are left out (IDs 0x0120..0x0125 are retired).
 - **Read-only values** come from a snapshot the 1 s heartbeat publishes (with a sequence number), from counters, or from values cached when the 100 ms control frame is built, so a read never resets a counter or changes state.
@@ -493,7 +535,7 @@ One transport-independent table names, describes, reads and writes runtime param
 | `param get <name\|id>` | One parameter (`audio.master_db`, `0x1000` or `4096`) |
 | `param set <name\|id> <value>` | Write; enum values by label or index (`param set audio.source noise`) |
 
-`N` = channel 0..5 (L, R, C, LS, RS, Sub). `param list` prints the full table with ranges.
+`X` = channel A..E or SUB (ids 0..5; satellite-only parameters A..E). `param list` prints the full table with ranges.
 
 | ID | Name | Access | Unit | Meaning (console equivalent) |
 | :--- | :--- | :--- | :--- | :--- |
@@ -501,9 +543,10 @@ One transport-independent table names, describes, reads and writes runtime param
 | 0x0102..0x0105 | `sys.uptime_s`, `sys.heap_free_kb`, `sys.heap_min_kb`, `sys.heap_block_kb` | ro | s, KB | Uptime, internal heap free / lowest / largest block (`mem`) |
 | 0x01F0..0x01F2 | `sys.clear_counters`, `sys.reboot`, `sys.bootloader` | act | | `clear`, `reboot`, `bootloader` (reboots run 300 ms after the reply) |
 | 0x0110 / 0x0111 | `net.peers_online`, `net.peers_mask` | ro | | SINKs online, bit c = channel c |
-| 0x0130+N | `net.chN_rssi_dbm` | ro | dBm | Uplink RSSI of the channel's last reply (follows the SINK's TX power), -127 = offline |
-| 0x0140+N | `net.chN_dl_rssi_dbm` | ro | dBm | Downlink RSSI the SINK measured on its REQ_ACK packet, from the reply (follows the SOURCE TX power) |
-| 0x0150+N / 0x0160+N | `net.chN_reply_loss_pct`, `net.chN_replies_missed` | ro | %, | Telemetry replies missing in the last second / since boot or `clear`: a REQ_ACK still unanswered when the next one to that channel goes out (60 ms later), i.e. that audio packet or its reply was lost. Only while the channel is online. About 16.7 requests per second per channel, so one miss = 6 % |
+| 0x0170+N | `net.chX_node` | ro | | Node that plays channel X (from its announce) |
+| 0x0130+N | `net.chX_rssi_dbm` | ro | dBm | Uplink RSSI of the channel's last reply (follows the SINK's TX power), -127 = offline |
+| 0x0140+N | `net.chX_dl_rssi_dbm` | ro | dBm | Downlink RSSI the SINK measured on its REQ_ACK packet, from the reply (follows the SOURCE TX power) |
+| 0x0150+N / 0x0160+N | `net.chX_reply_loss_pct`, `net.chX_replies_missed` | ro | %, | Telemetry replies missing in the last second / since boot or `clear`: a REQ_ACK still unanswered when the next one to that channel goes out (60 ms later), i.e. that audio packet or its reply was lost. Only while the channel is online. About 16.7 requests per second per channel, so one miss = 6 % |
 | 0x0200..0x0202 | `dsp.time_ms`, `enc.hq_ms`, `enc.mq_ms` | ro | ms | Stage times per frame (`timing`) |
 | 0x0203 / 0x0204 | `src.overruns`, `src.deadline_skips` | ro | | Frames lost / packets not sent in the last timing window (`timing`) |
 | 0x0210 / 0x0211 | `debug.dsp_load_us`, `debug.enc_cores` | rw | us | `dspload`, `enccores` |
@@ -513,23 +556,30 @@ One transport-independent table names, describes, reads and writes runtime param
 | 0x1F00 | `test.txfault` | act | once / wifi / reboot | `txfault`, `txfault wifi`, `txfault reboot` |
 | 0x0400 | `audio.rms_dbfs` | ro | dBFS | Input RMS, -100 = silent / off |
 | 0x0410..0x0412 | `usb.streaming`, `usb.host_vol_db`, `usb.host_mute` | ro | , dB | USB host streaming, volume as applied, mute (`usbvol`) |
-| 0x1000 | `audio.master_db` | rw | dB | Master volume -96..0 (`vol`, `voldb`); read = gain in effect (ramped) |
+| 0x1000 | `audio.master_db` | rw | dB | Master volume -96..0 (`vol`, `voldb`), -6 dB at boot (not saved); read = gain in effect (ramped) |
 | 0x1005 | `audio.mute` | rw | off / on | `mute` / `unmute` |
-| 0x1010+N | `audio.chN_db` | rw | dB | Channel gain on the SOURCE (`volch`), ramped |
+| 0x1400 + 2 x node, +1 | `node.n<id>.channel`, `node.n<id>.online` | rw, ro | off / A..E / SUB, no / yes | Node -> channel map (2.1) for the registry node ids; a taken channel swaps |
+| 0x1480 | `node.save` | act | | Store the node map in NVS |
+| 0x1481 | `node.reset` | act | | Delete the saved node map, back to the registry defaults |
+| 0x1010+N | `audio.chX_db` | rw | dB | Channel gain on the SOURCE (`volch`), ramped |
 | 0x1001 | `audio.source` | rw | enum | `pause` (IDLE) / `cast` (USB audio) / `noise` (test tone of `cal.mode`) |
+| 0x1007 | `audio.stereo` | rw | enum | Input `stereo` or `mono` (left channel on both sides) |
 | 0x1100 | `sync.latency_ms` | rw | ms | `latency` |
-| 0x1110+N | `sync.chN_trim_us` | rw | us | `trim` |
-| 0x1120+N / 0x1130+N / 0x1140+N | `sync.chN_rtt_us`, `sync.chN_drift_ppm`, `sync.chN_err_us` | ro | us, ppm, us | Best RTT, SINK clock drift, playout error reported by the SINK (`ptp`) |
+| 0x1110+N | `sync.chX_trim_us` | rw | us | `trim` |
+| 0x1120+N / 0x1130+N / 0x1140+N | `sync.chX_rtt_us`, `sync.chX_drift_ppm`, `sync.chX_err_us` | ro | us, ppm, us | Best RTT, SINK clock drift, playout error reported by the SINK (`ptp`) |
 | 0x1200, 0x1202, 0x1203 | `cal.mode`, `cal.sat_hz`, `cal.sub_hz` | rw | enum, Hz | Test tone: synth (default) / pink / sine, sine frequencies (`caltone`). Level = `audio.master_db` (`cal.level_dbfs`, 0x1201, retired) |
 | 0x1300, 0x1306 | `xo.hp_hilbert_hz`, `xo.hp_hilbert_order` | rw | Hz, enum | Crossover: satellite high-pass before the Hilbert transform, 70..200 Hz, order 0 (none) .. 4 (default 2) |
 | 0x1307, 0x1308 | `xo.lp_sub_hz`, `xo.lp_sub_order` | rw | Hz, enum | Crossover: sub low-pass in the 48 -> 8 kHz downsampling (also its anti-alias filter), 70..200 Hz, Butterworth order 2 / 3 / 4 (default) / 6 |
 | 0x1301, 0x1312, 0x1313, 0x1310, 0x1311 | `dsp.hilbert.animate`, `dsp.lfo_hz`, `dsp.lfo_span_deg`, `dsp.mix_wet`, `dsp.side_widening` | rw | enum, Hz, deg | Spatial upmix: bypass / on, azimuth LFO rate and span, wet / dry mix, side (L-R) widening |
-| 0x1320+N, 0x1330+N | `dsp.chN_azimuth_deg`, `dsp.chN_dfs_hz` | rw | deg, Hz | Per satellite: steering angle, single-sideband frequency shift |
-| 0x1302..0x1305 | `sub.mode`, `sub.dry_gain`, `sub.wet_gain`, `sub.zc_lpf_hz` | rw | enum, , , Hz | Subwoofer effects: bypass / zc / nccf subharmonic resonator, dry / wet gain, zero-crossing post low-pass |
+| 0x1320+N, 0x1330+N | `dsp.chX_azimuth_deg`, `dsp.chX_dfs_hz` | rw | deg, Hz | Per satellite: steering angle, single-sideband frequency shift |
+| 0x1302, 0x1303, 0x1304, 0x1305 | `sub.mode`, `sub.dry_gain`, `sub.wet_gain`, `sub.zc_lpf_hz` | rw | enum, , , Hz | Subwoofer effects: bypass / zc (zero-crossing flipper) / nccf (pitch-tracked synth); dry (input) bass and f0/2 subharmonic gain, linear 0..2, for both effects (only one runs at a time); flipper post low-pass cutoff |
+| 0x1340..0x1348 | `sub.zc.post_lp_order`, `.adaptive_thresh`, `.thresh`, `.adaptive_ratio`, `.adaptive_release_ms`, `.period_guard`, `.gate_floor_db`, `.gate_min_hz`, `.gate_max_hz` | rw | enum, off / on, , , ms, off / on, dBFS, Hz, Hz | Zero-crossing flipper (`sub.mode = zc`): post-flip low-pass order 0 / 2 / 4, adaptive or static (`thresh`) Schmitt threshold, adaptive hysteresis ratio and envelope release, period guard (crossings outside `gate_min_hz` .. `gate_max_hz` ignored), noise floor |
+| 0x1350..0x1361 | `sub.nccf.f_min_hz`, `.f_max_hz`, `.voicing_thresh_on`, `.voicing_thresh_off`, `.hangover_frames`, `.lag_first_peak_weight`, `.hierarchical_search`, `.coarse_step`, `.fine_radius`, `.harmonic_3x_check`, `.harmonic_3x_beta`, `.sub_ducking`, `.sub_duck_cutoff_hz`, `.sub_duck_thresh_ratio`, `.env_attack_ms`, `.env_decay_ms`, `.dry_hpf`, `.dry_hpf_hz` | rw | Hz, , , , frames, , off / on, samples, samples, off / on, , off / on, Hz, , ms, ms, off / on, Hz | NCCF pitch-tracked synth (`sub.mode = nccf`, `SubharmonicNccfConfig`; `use_` / `enable_` / `apply_` dropped from the switch names) |
+| 0x0220..0x0224 | `sub.nccf.voiced`, `.f0_hz`, `.fsub_hz`, `.peak`, `.duck_gain` | ro | , Hz, Hz, , | NCCF synth state: voiced, detected f0, synthesized f0/2, NCCF peak, ducking gain (were `dsp.sub_*`) |
 
 #### USB HID and the WebHID page
 
-The SOURCE (S3) exposes the same table as a vendor USB HID interface (`usb_ctrl_hid.hpp`, usage page 0xFF00, 63-byte reports): request ops GET / SET / DESC / ENUM / STATUS, and it pushes values on its own (rw parameters at 10 Hz, all parameters on every new 1 s snapshot). `tools/webui/index.html` builds its UI from the table: one section per name prefix, a channel matrix for the `chN_` parameters, feedback sliders (knob = set, filled track = value in effect), status cards, and buttons with confirmation for actions. Run `python tools/webui/serve.py` and open `http://localhost:8000` in Chrome or Edge (WebHID needs a secure context, i.e. localhost or https).
+The SOURCE (S3) exposes the same table as a vendor USB HID interface (`usb_ctrl_hid.hpp`, usage page 0xFF00, 63-byte reports): request ops GET / SET / DESC / ENUM / STATUS, and it pushes values on its own (rw parameters at 2 Hz, all parameters on every new 1 s snapshot). `tools/webui/index.html` builds its UI from the table: one section per name prefix, a channel matrix for the `chN_` parameters, feedback sliders (knob = set, filled track = value in effect), status cards, and buttons with confirmation for actions. Run `python tools/webui/serve.py` and open `http://localhost:8000` in Chrome or Edge (WebHID needs a secure context, i.e. localhost or https).
 
 ### 7.6 SINK audio and I2S diagnostics
 

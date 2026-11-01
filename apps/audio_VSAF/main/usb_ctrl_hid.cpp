@@ -100,9 +100,9 @@ void handle_request(const uint8_t* rq) {
             put_f32(out + 14, d.max);
             put_f32(out + 18, d.def);
             out[22] = d.enum_count;
-            strncpy(reinterpret_cast<char*>(out + 23), d.name, 24);
-            strncpy(reinterpret_cast<char*>(out + 47), d.unit, 8);
-            out[55] = d.decimals;
+            strncpy(reinterpret_cast<char*>(out + 23), d.name, 30);  // names <= 30 characters (+ NUL)
+            strncpy(reinterpret_cast<char*>(out + 54), d.unit, 8);
+            out[62] = d.decimals;
             break;
         }
         case VSAF_HID_OP_ENUM: {
@@ -129,7 +129,7 @@ void handle_request(const uint8_t* rq) {
 
 /**
  * @brief Push parameter values as (index, value) pairs, 11 per report.
- * @param rw_only true: only read-write parameters (10 Hz control refresh); false: all parameters.
+ * @param rw_only true: only read-write parameters (2 Hz control refresh); false: all parameters.
  */
 void send_values(bool rw_only) {
     namespace P = AudioNet::Params;
@@ -176,8 +176,8 @@ void ctrl_task(void*) {
             sent_seq = seq;
             send_values(false);
         }
-        // Controls at 10 Hz
-        if (xTaskGetTickCount() - last_fast >= pdMS_TO_TICKS(100)) {
+        // Settings at 2 Hz (a SET reply carries the applied value at once; this catches changes made elsewhere)
+        if (xTaskGetTickCount() - last_fast >= pdMS_TO_TICKS(500)) {
             last_fast = xTaskGetTickCount();
             send_values(true);
         }

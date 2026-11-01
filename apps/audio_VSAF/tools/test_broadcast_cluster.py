@@ -182,7 +182,7 @@ def run_tests():
     l_found, r_found = False, False
 
     for line in reversed(l_lines):
-        if "STRM" in line and "LEFT" in line:
+        if "STRM" in line:  # any channel (channels are assigned at runtime)
             # Format: | SW HW PKTS PLC DMA FIFO_UDR FIFO_OVR |
             m = re.search(r"\|\s*([0-9\-]+)\s+([0-9\+\-]+)\s+(\d+)\s+(\d+)\s+([0-9\-]+)\s+(\d+)\s+(\d+)\s*\|", line)
             if m:
@@ -192,7 +192,7 @@ def run_tests():
                 break
 
     for line in reversed(r_lines):
-        if "STRM" in line and "RGHT" in line:
+        if "STRM" in line:  # any channel (channels are assigned at runtime)
             m = re.search(r"\|\s*([0-9\-]+)\s+([0-9\+\-]+)\s+(\d+)\s+(\d+)\s+([0-9\-]+)\s+(\d+)\s+(\d+)\s*\|", line)
             if m:
                 r_rx_rate = int(m.group(3))

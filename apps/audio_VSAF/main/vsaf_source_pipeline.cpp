@@ -226,7 +226,7 @@ void EspNowBroadcastEngine::srcRunDsp(SrcFrame& f) {
             memset(reinterpret_cast<uint8_t*>(m_src->pcm_stereo_in) + bytes_read, 0, bytes_needed - bytes_read);
         }
     }
-    const bool stereo = m_is_stereo || m_tone_test_mode;
+    const bool stereo = m_is_stereo.load(std::memory_order_relaxed) || m_tone_test_mode;
     const int64_t t_start = esp_timer_get_time();
 
     // USB host volume / mute (CONFIG_VSAF_APPLY_USB_HOST_VOLUME): Windows sends the slider as feature-unit
@@ -466,11 +466,18 @@ void EspNowBroadcastEngine::srcDoJob(SrcFrame& f, const SrcJob& job) {
             const float g1 = f.ch_g1[SUBWOOFER_CHANNEL_ID] * 32768.0f;
             const float step = (n8k > 0) ? ((g1 - g0) / static_cast<float>(n8k)) : 0.0f;
             float g = g0;
+#if CONFIG_ESPNOW_SUB_SAMPLE_RATE_HZ != 8000
+            int16_t* pcm_sub = m_src->sub_dsp_i16;  // 8 kHz, interpolated to the stream rate below
+#else
             int16_t* pcm_sub = m_src->pcm_sub[par];
+#endif
             for (size_t i = 0; i < n8k; ++i) {
                 g += step;
                 pcm_sub[i] = static_cast<int16_t>(std::clamp(m_src->sub_8k_f32[i] * g, -32768.0f, 32767.0f));
             }
+#if CONFIG_ESPNOW_SUB_SAMPLE_RATE_HZ != 8000
+            m_src->sub_rs.process(pcm_sub, n8k, m_src->pcm_sub[par], -32768, 32767);
+#endif
             const uint32_t d_us = static_cast<uint32_t>(esp_timer_get_time() - t_dsp);
             const uint32_t tot_dsp = f.dsp_us.fetch_add(d_us, std::memory_order_relaxed) + d_us;
             if (f.dsp_done.fetch_add(1, std::memory_order_acq_rel) + 1 == SRC_NUM_PKTS) {
@@ -480,11 +487,11 @@ void EspNowBroadcastEngine::srcDoJob(SrcFrame& f, const SrcJob& job) {
 #endif
         vsaf_sub_packet_t& p = m_src->pkt_sub[par];
         p.type_id = VSAF_TYPE_AUDIO_SUBWOOFER;
-        p.packet_flags = make_packet_flags(SUBWOOFER_CHANNEL_ID, 8000, 10000, false);
+        p.packet_flags = make_packet_flags(SUBWOOFER_CHANNEL_ID, CONFIG_ESPNOW_SUB_SAMPLE_RATE_HZ, 10000, false);
         p.seq = seq;
         p.t_tx1_us = static_cast<uint32_t>(f.t_grid_us);  // frame time t0(N) on the 10 ms grid: same in all 6 packets
         int64_t t = esp_timer_get_time();
-        m_lc3_codec.encodeFrame(m_src->pcm_sub[par], 80, p.data_t0, LC3_FRAME_OCTETS_SUB, &actual,
+        m_lc3_codec.encodeFrame(m_src->pcm_sub[par], VSAF_SUB_FRAME_SAMPLES, p.data_t0, LC3_FRAME_OCTETS_SUB, &actual,
                                 Codec::Lc3CodecEngine::SUB_ENCODER_INDEX, 1);
         m_acc_enc_sub.add(static_cast<uint32_t>(esp_timer_get_time() - t));
 
@@ -782,16 +789,28 @@ void EspNowBroadcastEngine::runSrcRfLoop() {
             }
         }
 
-        // 4b. Control frame (time sync estimates + playout parameters) every 10th frame, after the audio packets
-        const bool ctrl_due = (cur_no % SRC_CONTROL_EVERY_FRAMES) == 0;
+        // 4b. Control frame (time sync estimates + playout parameters) every 10th frame, after the audio packets;
+        //     the node -> channel map takes the same slot once per second on a frame without a control frame
+        const bool map_due = (cur_no % 100) == 5;
+        const bool ctrl_due = (cur_no % SRC_CONTROL_EVERY_FRAMES) == 0 || map_due;
         if (f && frame_open && n_sent == SRC_NUM_PKTS && !busy && ctrl_due && !ctrl_sent &&
             (now - f->t0_us) < SRC_TX_DEADLINE_US) {
-            srcBuildControl(m_ctrl_pkt);
+            const uint8_t* pkt;
+            size_t pkt_len;
+            if (map_due) {
+                srcBuildNodeMap(m_map_pkt);
+                pkt = reinterpret_cast<const uint8_t*>(&m_map_pkt);
+                pkt_len = sizeof(m_map_pkt);
+            } else {
+                srcBuildControl(m_ctrl_pkt);
+                pkt = reinterpret_cast<const uint8_t*>(&m_ctrl_pkt);
+                pkt_len = sizeof(m_ctrl_pkt);
+            }
             m_src_tx_done_flag.store(false, std::memory_order_release);
             const int64_t ts = esp_timer_get_time();
             ctrl_sent = true;
             if (!m_sim_wedge.load(std::memory_order_relaxed) &&
-                esp_now_send(s_broadcast_mac, reinterpret_cast<const uint8_t*>(&m_ctrl_pkt), sizeof(m_ctrl_pkt)) == ESP_OK) {
+                esp_now_send(s_broadcast_mac, pkt, pkt_len) == ESP_OK) {
                 busy = true;
                 t_submit = ts;
                 inflight_kind = 2;
@@ -1124,6 +1143,90 @@ void EspNowBroadcastEngine::setDspZcPostLpfHz(float hz) {
 float EspNowBroadcastEngine::getDspZcPostLpfHz() const {
     return m_sub_dsp ? m_sub_dsp->zc_flipper().config().post_lpf_cutoff_hz : 100.0f;
 }
+void EspNowBroadcastEngine::setZcParam(ZcParam p, float v) {
+    if (!m_sub_dsp) return;
+    // The flipper clamps and slews (set_config); this replaces one field of the staged configuration
+    auto c = m_sub_dsp->zc_flipper().target_config();
+    switch (p) {
+        case ZcParam::POST_LP_ORDER: c.post_lpf_order = static_cast<int>(v); break;
+        case ZcParam::ADAPTIVE_THRESH: c.use_adaptive_thresh = v != 0.0f; break;
+        case ZcParam::THRESH: c.static_thresh = std::max(0.0f, v); break;
+        case ZcParam::ADAPTIVE_RATIO: c.hysteresis_ratio = v; break;
+        case ZcParam::ADAPTIVE_RELEASE_MS: c.release_ms = v; break;
+        case ZcParam::PERIOD_GUARD: c.use_period_guard = v != 0.0f; break;
+        case ZcParam::GATE_FLOOR_DB: c.min_floor_db = v; break;
+        case ZcParam::GATE_MIN_HZ: c.guard_f_min_hz = v; break;
+        case ZcParam::GATE_MAX_HZ: c.guard_f_max_hz = v; break;
+    }
+    m_sub_dsp->zc_flipper().set_config(c);
+}
+void EspNowBroadcastEngine::setNccfParam(NccfParam p, float v) {
+    if (!m_sub_dsp) return;
+    // The synth clamps and slews (set_config); this replaces one field of the staged configuration
+    auto c = m_sub_dsp->nccf_synth().target_config();
+    switch (p) {
+        case NccfParam::F_MIN_HZ: c.f_min_hz = v; break;
+        case NccfParam::F_MAX_HZ: c.f_max_hz = v; break;
+        case NccfParam::VOICING_ON: c.voicing_thresh_on = v; break;
+        case NccfParam::VOICING_OFF: c.voicing_thresh_off = v; break;
+        case NccfParam::HANGOVER: c.hangover_frames = static_cast<int>(std::lround(v)); break;
+        case NccfParam::LAG_WEIGHT: c.lag_first_peak_weight = v; break;
+        case NccfParam::HIERARCHICAL: c.use_hierarchical_search = v != 0.0f; break;
+        case NccfParam::COARSE_STEP: c.coarse_step = static_cast<int>(std::lround(v)); break;
+        case NccfParam::FINE_RADIUS: c.fine_radius = static_cast<int>(std::lround(v)); break;
+        case NccfParam::HARMONIC_3X: c.enable_3x_harmonic_check = v != 0.0f; break;
+        case NccfParam::HARMONIC_3X_BETA: c.harmonic_3x_beta = v; break;
+        case NccfParam::SUB_DUCKING: c.use_sub_ducking = v != 0.0f; break;
+        case NccfParam::DUCK_CUTOFF_HZ: c.sub_duck_cutoff_hz = v; break;
+        case NccfParam::DUCK_THRESH_RATIO: c.sub_duck_thresh_ratio = v; break;
+        case NccfParam::ENV_ATTACK_MS: c.env_attack_ms = v; break;
+        case NccfParam::ENV_DECAY_MS: c.env_decay_ms = v; break;
+        case NccfParam::DRY_HPF: c.apply_dry_hpf = v != 0.0f; break;
+        case NccfParam::DRY_HPF_HZ: c.dry_hpf_hz = v; break;
+    }
+    m_sub_dsp->nccf_synth().set_config(c);
+}
+float EspNowBroadcastEngine::getNccfParam(NccfParam p) const {
+    const audio_dsp::SubharmonicNccfConfig c =
+        m_sub_dsp ? m_sub_dsp->nccf_synth().config() : audio_dsp::SubharmonicNccfConfig{};
+    switch (p) {
+        case NccfParam::F_MIN_HZ: return c.f_min_hz;
+        case NccfParam::F_MAX_HZ: return c.f_max_hz;
+        case NccfParam::VOICING_ON: return c.voicing_thresh_on;
+        case NccfParam::VOICING_OFF: return c.voicing_thresh_off;
+        case NccfParam::HANGOVER: return static_cast<float>(c.hangover_frames);
+        case NccfParam::LAG_WEIGHT: return c.lag_first_peak_weight;
+        case NccfParam::HIERARCHICAL: return c.use_hierarchical_search ? 1.0f : 0.0f;
+        case NccfParam::COARSE_STEP: return static_cast<float>(c.coarse_step);
+        case NccfParam::FINE_RADIUS: return static_cast<float>(c.fine_radius);
+        case NccfParam::HARMONIC_3X: return c.enable_3x_harmonic_check ? 1.0f : 0.0f;
+        case NccfParam::HARMONIC_3X_BETA: return c.harmonic_3x_beta;
+        case NccfParam::SUB_DUCKING: return c.use_sub_ducking ? 1.0f : 0.0f;
+        case NccfParam::DUCK_CUTOFF_HZ: return c.sub_duck_cutoff_hz;
+        case NccfParam::DUCK_THRESH_RATIO: return c.sub_duck_thresh_ratio;
+        case NccfParam::ENV_ATTACK_MS: return c.env_attack_ms;
+        case NccfParam::ENV_DECAY_MS: return c.env_decay_ms;
+        case NccfParam::DRY_HPF: return c.apply_dry_hpf ? 1.0f : 0.0f;
+        case NccfParam::DRY_HPF_HZ: return c.dry_hpf_hz;
+    }
+    return 0.0f;
+}
+float EspNowBroadcastEngine::getZcParam(ZcParam p) const {
+    const audio_dsp::SubharmonicZcFlipperConfig c =
+        m_sub_dsp ? m_sub_dsp->zc_flipper().config() : audio_dsp::SubharmonicZcFlipperConfig{};
+    switch (p) {
+        case ZcParam::POST_LP_ORDER: return static_cast<float>(c.post_lpf_order);
+        case ZcParam::ADAPTIVE_THRESH: return c.use_adaptive_thresh ? 1.0f : 0.0f;
+        case ZcParam::THRESH: return c.static_thresh;
+        case ZcParam::ADAPTIVE_RATIO: return c.hysteresis_ratio;
+        case ZcParam::ADAPTIVE_RELEASE_MS: return c.release_ms;
+        case ZcParam::PERIOD_GUARD: return c.use_period_guard ? 1.0f : 0.0f;
+        case ZcParam::GATE_FLOOR_DB: return c.min_floor_db;
+        case ZcParam::GATE_MIN_HZ: return c.guard_f_min_hz;
+        case ZcParam::GATE_MAX_HZ: return c.guard_f_max_hz;
+    }
+    return 0.0f;
+}
 void EspNowBroadcastEngine::setDspSatWet(float wet) {
     if (!m_hilbert_dsp) return;
     const float w = std::clamp(wet, 0.0f, 1.0f);
@@ -1242,6 +1345,10 @@ void EspNowBroadcastEngine::setDspSubWetGain(float) {}
 float EspNowBroadcastEngine::getDspSubWetGain() const { return 1.0f; }
 void EspNowBroadcastEngine::setDspZcPostLpfHz(float) {}
 float EspNowBroadcastEngine::getDspZcPostLpfHz() const { return 100.0f; }
+void EspNowBroadcastEngine::setZcParam(ZcParam, float) {}
+float EspNowBroadcastEngine::getZcParam(ZcParam) const { return 0.0f; }
+void EspNowBroadcastEngine::setNccfParam(NccfParam, float) {}
+float EspNowBroadcastEngine::getNccfParam(NccfParam) const { return 0.0f; }
 void EspNowBroadcastEngine::setDspSatWet(float) {}
 float EspNowBroadcastEngine::getDspSatWet() const { return 1.0f; }
 void EspNowBroadcastEngine::setDspSatSideGain(float) {}

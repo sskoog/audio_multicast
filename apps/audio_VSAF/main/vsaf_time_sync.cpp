@@ -226,6 +226,16 @@ void EspNowBroadcastEngine::getPtpStatus(uint8_t ch, PtpChannelStatus& out) {
     out.trim_us = m_trim_us[ch].load(std::memory_order_relaxed);
 }
 
+/** @brief SOURCE: forget a channel's clock estimate (a different node plays it now). */
+void EspNowBroadcastEngine::ptpResetChannel(uint8_t ch) {
+    if (ch >= MAX_SINK_NODES) {
+        return;
+    }
+    portENTER_CRITICAL(&m_ptp_mux);
+    m_ptp[ch] = PtpChannel{};
+    portEXIT_CRITICAL(&m_ptp_mux);
+}
+
 int16_t EspNowBroadcastEngine::getPlayoutErrUs(uint8_t ch) {
     if (ch >= MAX_SINK_NODES) {
         return VSAF_PLAYOUT_ERR_UNKNOWN;
@@ -259,9 +269,13 @@ void EspNowBroadcastEngine::sinkOnControl(const uint8_t* data, int len) {
         calc_crc16(reinterpret_cast<const uint8_t*>(&c), sizeof(c) - 4) != c.crc16) {
         return;
     }
+    // Announce once per second (every 10th control frame), spread over the 10 slots by node id
+    if (c.seq % 10 == m_node_id % 10) {
+        sendSinkAnnounce();
+    }
     const uint8_t ch = m_target_channel;
     if (ch >= MAX_SINK_NODES) {
-        return;
+        return;  // assigned to no channel
     }
     const int64_t now = esp_timer_get_time();
     portENTER_CRITICAL(&m_sync_mux);

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "polyphase_resampler.hpp"
 #include "cal_signal.hpp"
 #include "thdn_meter.hpp"
 #include "config.h"
@@ -48,7 +49,7 @@ enum class WifiPhyProfile : uint8_t {
 };
 
 struct SinkPeerConfig {
-    uint8_t    channel_id;             // 0: Left, 1: Right, 2: Center, 3: L-Surround, 4: R-Surround, 5: Sub
+    uint8_t    channel_id;             // 0..4 = A..E (satellites), 5 = SUB
     char       name[24];
     bool       is_enabled;
     PeerStatus status;                 // ONLINE, OFFLINE, DISABLED
@@ -301,8 +302,50 @@ public:
     int8_t getWifiTxPower() const;  // TX power readback (0.25 dBm units, = requested), cached at the last change
 
     // Multi-Channel Target Selection (SINK node: 0: Left, 1: Right, 5: Subwoofer)
+    /** @brief SINK: channel to play, 0..5 (A..E, SUB) or VSAF_CH_OFF (standby: silent, no telemetry replies). */
     void setTargetChannel(uint8_t channel_id);
     uint8_t getTargetChannel() const { return m_target_channel; }
+    /** @brief SINK: own node id (announced to the SOURCE; key of the SOURCE's node -> channel map). */
+    void setNodeId(uint8_t id) { m_node_id = id < VSAF_MAX_NODES ? id : 0; }
+    uint8_t getNodeId() const { return m_node_id; }
+
+    // SOURCE: node -> channel map (VSAF 3.2, vsaf_protocol.hpp). Nodes announce themselves once per second; the map
+    // is broadcast once per second. Values: 0..5, VSAF_CH_OFF; VSAF_CH_KEEP = no assignment (node keeps its own).
+    struct NodeInfo {
+        int64_t last_seen_us;   // 0 = never announced
+        uint8_t channel;        // channel the node reports
+        uint8_t flags;          // VSAF_ANNOUNCE_FLAG_*
+        int8_t  rssi;           // RSSI of its last announce (dBm)
+    };
+    /** @brief Node announced within the last 3 s. */
+    bool isNodeOnline(uint8_t node) const;
+    NodeInfo getNodeInfo(uint8_t node) const;
+    /** @brief Channel the node plays: the assignment if one is pending or in effect, else what it reports;
+     *         VSAF_CH_KEEP if the node is unknown (never announced, no assignment). */
+    uint8_t getNodeChannel(uint8_t node) const;
+    /**
+     * @brief Assign a node to a channel (0..5) or to none (VSAF_CH_OFF). A node already on that channel takes
+     *        the assigned node's previous channel (swap), so every channel keeps at most one node. The time sync
+     *        of the channels involved restarts (their clock estimates belonged to the previous node).
+     * @return false if node or channel is out of range.
+     */
+    bool setNodeChannel(uint8_t node, uint8_t channel);
+    /** @brief Node that reports channel ch (online), or 0xFF. */
+    uint8_t getChannelNode(uint8_t ch) const;
+    /**
+     * @brief One node per channel among the online nodes (heartbeat, 1 Hz). On a collision one node keeps the
+     *        channel: the one with a map entry (if only one has), else the one already streaming, else the lower
+     *        node id. The other moves to the lowest satellite channel A..E no online node plays, else to off; the
+     *        move is written to the map. Channels held only by offline nodes count as free.
+     */
+    void resolveNodeConflicts();
+    /** @brief Store / load the map in NVS (explicit action: a flash write can delay one audio frame). */
+    esp_err_t saveNodeMap();
+    esp_err_t loadNodeMap();
+    /** @brief Default map (node registry in main.cpp): used when NVS holds no map, and by resetNodeMap(). */
+    void setNodeDefaults(const uint8_t (&channel_per_node)[VSAF_MAX_NODES]);
+    /** @brief Delete the saved map from NVS and go back to the defaults. */
+    esp_err_t resetNodeMap();
 
     // Packet Callbacks
     void onPacketSent(const uint8_t* mac_addr, esp_now_send_status_t status);
@@ -393,6 +436,21 @@ public:
     float getDspSubWetGain() const;
     void setDspZcPostLpfHz(float hz);
     float getDspZcPostLpfHz() const;
+    /** @brief Zero-crossing flipper settings (parameters sub.zc.*); bool fields as 0 / 1, read = value in effect. */
+    enum class ZcParam : uint8_t {
+        POST_LP_ORDER, ADAPTIVE_THRESH, THRESH, ADAPTIVE_RATIO, ADAPTIVE_RELEASE_MS,
+        PERIOD_GUARD, GATE_FLOOR_DB, GATE_MIN_HZ, GATE_MAX_HZ
+    };
+    void setZcParam(ZcParam p, float value);
+    float getZcParam(ZcParam p) const;
+    /** @brief NCCF pitch-tracked synth settings (parameters sub.nccf.*); bool fields as 0 / 1, read = in effect. */
+    enum class NccfParam : uint8_t {
+        F_MIN_HZ, F_MAX_HZ, VOICING_ON, VOICING_OFF, HANGOVER, LAG_WEIGHT,
+        HIERARCHICAL, COARSE_STEP, FINE_RADIUS, HARMONIC_3X, HARMONIC_3X_BETA, SUB_DUCKING,
+        DUCK_CUTOFF_HZ, DUCK_THRESH_RATIO, ENV_ATTACK_MS, ENV_DECAY_MS, DRY_HPF, DRY_HPF_HZ
+    };
+    void setNccfParam(NccfParam p, float value);
+    float getNccfParam(NccfParam p) const;
     void setDspSatWet(float wet);
     float getDspSatWet() const;
     void setDspSatSideGain(float side_gain);
@@ -642,8 +700,9 @@ public:
     // SINK: ESP-NOW send callback (telemetry reply TX-done) for the two-step correction
     void onSinkTxDone();
 
-    void setStereo(bool stereo) { m_is_stereo = stereo; }
-    bool isStereo() const { return m_is_stereo; }
+    /** @brief SOURCE input stereo (true) or mono (L used for both; parameter audio.stereo). */
+    void setStereo(bool stereo) { m_is_stereo.store(stereo, std::memory_order_relaxed); }
+    bool isStereo() const { return m_is_stereo.load(std::memory_order_relaxed); }
 
     size_t   getFifoCount() const;
     size_t   getFifoCapacity() const;
@@ -732,7 +791,11 @@ private:
     // (SOURCE only, never inside the frame loop). As members / statics they took ~27 KB on every SINK too.
     struct SrcBuffers {
         int16_t             pcm_sat[2][NUM_SATELLITE_CHANNELS][480];  // per frame parity: encoder input
-        int16_t             pcm_sub[2][80];
+        int16_t             pcm_sub[2][VSAF_SUB_FRAME_SAMPLES];        // SUB encoder input (stream rate)
+#if CONFIG_ESPNOW_SUB_SAMPLE_RATE_HZ != 8000
+        int16_t             sub_dsp_i16[80];                          // 8 kHz sub DSP output before interpolation
+        Audio::PolyphaseResampler<80> sub_rs;                         // 8 kHz -> CONFIG_ESPNOW_SUB_SAMPLE_RATE_HZ
+#endif
         vsaf_audio_packet_t pkt_sat[2][NUM_SATELLITE_CHANNELS];       // per frame parity: packets being built / sent
         vsaf_sub_packet_t   pkt_sub[2];
         int16_t             pcm_stereo_in[480 * 2];                   // USB (or synth) input frame
@@ -767,6 +830,11 @@ private:
 
     void handleAudioPacket(const uint8_t* data, size_t data_len, int8_t rssi, int64_t t_rx1_us);
     void sendSinkTelemetry(uint8_t ack_seq, int64_t t_rx1_us, int8_t rssi);
+    void sendSinkAnnounce();
+    void sinkOnNodeMap(const uint8_t* data, int len);
+    void srcOnAnnounce(const uint8_t* mac, const uint8_t* data, int len, int8_t rssi);
+    void srcBuildNodeMap(vsaf_node_map_t& out);
+    void ptpResetChannel(uint8_t ch);
     bool sinkFifoPush(uint8_t seq, uint8_t len, uint8_t flags, bool redundant, const uint8_t* src, uint32_t t_frame);
 
     // ---------------- Time synchronization state (vsaf_time_sync.cpp) ----------------
@@ -798,6 +866,12 @@ private:
     std::atomic<int16_t>       m_trim_us[MAX_SINK_NODES] = {};
     std::atomic<uint32_t>      m_latency_us{CONFIG_VSAF_PLAYOUT_LATENCY_US};
     vsaf_control_t             m_ctrl_pkt = {};
+    vsaf_node_map_t            m_map_pkt = {};
+    uint8_t                    m_map_seq = 0;
+    std::atomic<uint8_t>       m_node_map[VSAF_MAX_NODES];   // SOURCE: assignment per node (VSAF_CH_KEEP = none)
+    uint8_t                    m_node_default[VSAF_MAX_NODES];  // SOURCE: default map (setNodeDefaults)
+    NodeInfo                   m_nodes[VSAF_MAX_NODES] = {}; // SOURCE: what the nodes announce (m_node_mux)
+    mutable portMUX_TYPE       m_node_mux = portMUX_INITIALIZER_UNLOCKED;
     uint8_t                    m_ctrl_seq = 0;
     void ptpOnTelemetry(const vsaf_sink_telemetry_t* t, uint32_t t4);
     bool ptpBest(PtpChannel& c, uint32_t now32, int32_t& theta_now, uint16_t& rtt, uint8_t& n);  // m_ptp_mux held
@@ -879,6 +953,7 @@ private: // SOURCE: max |tick - grid| (us) since last read
     uint8_t                    m_node_id;
     uint8_t                    m_wifi_channel;
     uint8_t                    m_target_channel;
+    std::atomic<bool>          m_sink_ch_changed{false};   // set by the map handler, consumed by the SINK loop
     std::atomic<bool>          m_channel_locked{false};
     std::atomic<NetworkState>  m_state;
     std::atomic<bool>          m_running{false};
@@ -887,8 +962,9 @@ private: // SOURCE: max |tick - grid| (us) since last read
     Audio::CalSignal           m_cal[2];
     std::atomic<uint8_t>       m_cal_active{0};
     std::atomic<uint8_t>       m_tone_kind{TONE_SYNTH};
-    std::atomic<float>         m_master_gain_db{0.0f};   // target (set)
-    std::atomic<float>         m_master_now_db{0.0f};    // in effect (slew-rate limited, DSP stage)
+    static constexpr float     kMasterBootDb = -6.0f;     // master volume at boot (parameter default)
+    std::atomic<float>         m_master_gain_db{kMasterBootDb};  // target (set)
+    std::atomic<float>         m_master_now_db{kMasterBootDb};   // in effect (slew-rate limited, DSP stage)
     std::atomic<bool>          m_master_mute{false};
     std::atomic<uint32_t>      m_reply_req[MAX_SINK_NODES] = {};     // REQ_ACKs sent to an ONLINE channel
     std::atomic<uint32_t>      m_reply_missed[MAX_SINK_NODES] = {};  // of those, never answered
@@ -901,7 +977,7 @@ private: // SOURCE: max |tick - grid| (us) since last read
     float                      m_ch_lin_prev[MAX_SINK_NODES] = {1, 1, 1, 1, 1, 1};  // DSP stage only (ramp start)
     std::atomic<uint16_t>      m_ctrl_rtt_us[MAX_SINK_NODES] = {};
     std::atomic<int32_t>       m_ctrl_drift_ppb[MAX_SINK_NODES] = {};
-    bool                       m_is_stereo;
+    std::atomic<bool>          m_is_stereo;
 
     wifi_phy_mode_t            m_tx_phy_mode;
     wifi_phy_rate_t            m_tx_phy_rate;

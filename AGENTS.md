@@ -14,15 +14,23 @@ Legacy / exploratory experiments in Bluetooth Low Energy Audio (Auracast) are al
 | **Node 1**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa LX7 + FPU) | 8 MB / 8 MB PSRAM | TBD | **COM1** | Audio SINK (PCM5102A DAC + TPA3118 Amp, GPIO 3 Mute) |
 | **Node 2**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa LX7 + FPU) | 8 MB / 8 MB PSRAM | TBD | **COM2** | Audio SINK (PCM5102A DAC + TPA3118 Amp, GPIO 3 Mute) |
 | **Node 3**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa LX7 + FPU) | 8 MB / 8 MB PSRAM | TBD | **COM3** | Audio SINK (PCM5102A DAC + TPA3118 Amp, GPIO 3 Mute) |
-| **Node 4**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa LX7 + FPU) | 8 MB / 8 MB PSRAM | `E8:3D:C1:FB:E8:3C` | **COM4** | **Audio SINK (Ch 0: Left)** (PCM5102A DAC + TPA3118 Amp) |
-| **Node 5**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa LX7 + FPU) | 8 MB / 8 MB PSRAM | `E8:3D:C1:FC:8B:50` | **COM5** | **Audio SINK (Ch 1: Right)** (PCM5102A DAC + TPA3118 Amp) |
+| **Node 6**  | Seeed Studio XIAO ESP32-S3 Plus, complete speaker (PCM5102A, power amp, drivers, battery) | ESP32-S3 (Xtensa LX7 + FPU) | 8 MB / 8 MB PSRAM | `E8:3D:C1:FB:D5:3C` | **COM6** | Audio SINK (default channel C); has precedence over the prototype nodes |
+| **Node 7**  | Seeed Studio XIAO ESP32-S3 Plus, complete speaker (PCM5102A, power amp, drivers, battery) | ESP32-S3 (Xtensa LX7 + FPU) | 8 MB / 8 MB PSRAM | `E8:3D:C1:FB:DC:C4` | **COM7** | Audio SINK (default channel D); has precedence over the prototype nodes |
+| **Node 4**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa LX7 + FPU) | 8 MB / 8 MB PSRAM | `E8:3D:C1:FB:E8:3C` | **COM4** | Audio SINK prototype (default channel A) (PCM5102A DAC + TPA3118 Amp) |
+| **Node 5**  | Seeed Studio XIAO ESP32-S3 Plus + Wio-SX1262 B2B | ESP32-S3 (Xtensa LX7 + FPU) | 8 MB / 8 MB PSRAM | `E8:3D:C1:FC:8B:50` | **COM5** | Audio SINK prototype (default channel B) (PCM5102A DAC + TPA3118 Amp) |
+| **Node 8**  | Seeed Studio XIAO ESP32-S3 Plus, PCM5102A | ESP32-S3 (Xtensa LX7 + FPU) | 8 MB / 8 MB PSRAM | `E8:3D:C1:FC:8F:44` | **COM8** | Audio SINK (default channel E) |
 | **Node 16** | Seeed Studio XIAO ESP32-S3 | ESP32-S3 (Xtensa LX7 + FPU) | 4 MB / 512 KB | `E0:72:A1:D8:4C:D0` | **COM16** (Boot) / **COM116** (App) | **Audio SOURCE** (Stereo/Mono LC3 Encoder + Broadcaster) |
 | **Node 20** | Waveshare ESP32-C6-LCD-1.47 | ESP32-C6 (RISC-V) | 8 MB / 512 KB | `AC:EB:E6:23:DC:24` | **COM20** | Audio SINK / Subwoofer (Ch 5) (ST7789 LCD Console + WS2812B RGB) |
 | **Node 21** | ESP32-C6-WROOM-1 DevKit | ESP32-C6 (RISC-V) | 8 MB / 512 KB | `98:A3:16:9D:57:EC` | **COM21** (Flash) & **COM121** (Bumble/App) | Audio SINK (Ch 2: Center) / USB Host Bridge |
-| **Node 23** | Waveshare ESP32-C6-Zero | ESP32-C6 (RISC-V) | 8 MB / 512 KB | `B0:A6:04:99:38:44` | **COM23** | **Audio SINK Center (Ch 2)** (MAX98357A I2S DAC + WS2812B) |
-| **Node 24** | Waveshare ESP32-C6-Zero | ESP32-C6 (RISC-V) | 8 MB / 512 KB | `B0:A6:04:99:18:E4` | **COM24** | **Audio SINK Surround Left (Ch 3)**, satellite driver (was the Ch 5 subwoofer until 2026-10-25) (MAX98357A I2S DAC + WS2812B) |
-| **Node 25** | Heemol ESP32-C6 Mini | ESP32-C6 (RISC-V) | 8 MB / 512 KB | `E8:3D:C1:FB:DC:C4` | **COM25** (or COM10) | Audio SINK (Ch 3: Surround Left) / Test Node |
+| **Node 23** | Waveshare ESP32-C6-Zero | ESP32-C6 (RISC-V) | 8 MB / 512 KB | `B0:A6:04:99:38:44` | **COM23** | Audio SINK prototype (default off; removed from the setup 2026-11-01, MAX98357A noise) (MAX98357A I2S DAC + WS2812B) |
+| **Node 24** | Waveshare ESP32-C6-Zero | ESP32-C6 (RISC-V) | 8 MB / 512 KB | `B0:A6:04:99:18:E4` | **COM24** | Audio SINK prototype (default off; removed from the setup 2026-11-01, MAX98357A noise) (MAX98357A I2S DAC + WS2812B) |
+| **Node 25** | Heemol ESP32-C6 Mini | ESP32-C6 (RISC-V) | 8 MB / 512 KB | unknown (the MAC listed until 2026-11-01 is Node 7's) | **COM25** (or COM10) | Audio SINK / Test Node |
 | **Node 26** | Heemol ESP32-C6 Mini | ESP32-C6 (RISC-V) | 8 MB / 512 KB | `98:A3:16:AC:13:38` | **COM26** (or COM22) | Audio SINK (Ch 4: Surround Right) / Test Node |
+
+Node ID = COM port number. Audio channels are the spatial upmix outputs **A..E** (wire ids 0..4, satellites) and
+**SUB** (id 5); they carry no left / right / center meaning. Each SINK boots on its default channel (`main.cpp`
+registry, also the SOURCE's default map); the SOURCE's node -> channel map (WebHID card "Speakers", saved with `node.save`, `node.reset` = back to the defaults) decides at runtime,
+one node per channel. MAC table and details: `apps/audio_VSAF/README_audio_VSAF.md` section 2.
 
 ### Pinout Reference
 - **Node 1, 2, 3, 4, 5 (SINK PCM5102A + TPA3118 Amp on XIAO S3 Plus)**:
@@ -61,6 +69,8 @@ Calibration target ~57.5 dBA at -30 dBFS RMS. Afterwards all nodes were raised b
 
 Recalibrate when drivers, amplifiers or gain straps change.
 
+**Since 2026-11-01 every S3 / PCM5102A node (Nodes 1..8) uses -6 dB post-gain**, an uncalibrated default, replacing Node 4's -24.8 dB and Node 5's -13.0 dB above (Node 4 is about 19 dB louder than calibrated, Node 5 about 7 dB). Nodes 6, 7 and 8 are not calibrated yet; the C6 nodes keep their values.
+
 --- | :--- | :--- | :--- |
 | Node 4 | Ch 0 (Left) | -20.0 dB | Baseline reference |
 | Node 5 | Ch 1 (Right) | -9.0 dB | +11 dB vs baseline (quieter hardware) |
@@ -77,7 +87,7 @@ To be defined.
 
 ### 802.11 (ESP-NOW) Packet Structure (VSAF 3.1, `apps/audio_VSAF`)
 Source of truth: `apps/audio_VSAF/main/vsaf_protocol.hpp`. Audio packets are strictly 248 bytes, 32-bit word aligned, little-endian, with multi-tier Unequal Error Protection (UEP) redundancy and round-robin SINK replies. Full spec: `apps/audio_VSAF/README_audio_VSAF.md`.
-- **Packet types (`type_id`)**: `0x1337` Satellite audio (Ch 0-4), `0x1338` Subwoofer audio (Ch 5), `0x1350` Control (from SOURCE, 88 bytes, every 100 ms: per-channel clock offset / drift / RTT / trim + playout latency), `0x1360` SINK telemetry reply (20 bytes, doubles as the PTP delay request: t2, dwell, previous reply's TX delay, playout error).
+- **Packet types (`type_id`)**: `0x1337` Satellite audio (channels A..E = id 0-4), `0x1338` Subwoofer audio (SUB = id 5), `0x1370` SINK announce (8 bytes, 1 Hz: node id + channel), `0x1371` node map (40 bytes, 1 Hz: channel per node id), `0x1350` Control (from SOURCE, 88 bytes, every 100 ms: per-channel clock offset / drift / RTT / trim + playout latency), `0x1360` SINK telemetry reply (20 bytes, doubles as the PTP delay request: t2, dwell, previous reply's TX delay, playout error).
 - **8-Byte Word-Aligned Header** (both audio types):
   - `type_id` (2B)
   - `packet_flags` (1B): Bit 0: Frame duration (0=7.5 ms deprecated, 1=10 ms), Bits 1-3: Sample rate code (0=8k, 1=16k, 2=24k, 3=32k, 4=48k), Bits 4-6: Receiver channel ID (0-5, 7=broadcast), Bit 7: REQ_ACK (this SINK must reply with telemetry)
@@ -87,8 +97,8 @@ Source of truth: `apps/audio_VSAF/main/vsaf_protocol.hpp`. Audio packets are str
 - **Subwoofer payload (`0x1338`, 240 Bytes, 4-tier)**: t0 / t-1 / t-2 / t-3, 60 B each @ 8 kHz (offsets 8 / 68 / 128 / 188).
 
 ### Supported Audio Configurations
-- **Satellites (Ch 0-4)**: 48 kHz (`CONFIG_ESPNOW_SAMPLE_RATE_HZ`; the only rate the pipeline supports, the runtime `sr` switch was removed), 10 ms frames; HQ 120 octets = 96 kbps, redundancy 60 octets = 48 kbps. LR4 high-pass at 100 Hz.
-- **Subwoofer (Ch 5)**: 8 kHz (`CONFIG_ESPNOW_SUB_SAMPLE_RATE_HZ`), 60 octets = 48 kbps, LR4 low-pass at 100 Hz with polyphase decimation.
+- **Satellites (channels A..E, id 0-4)**: 48 kHz (`CONFIG_ESPNOW_SAMPLE_RATE_HZ`; the only rate the pipeline supports, the runtime `sr` switch was removed), 10 ms frames; HQ 120 octets = 96 kbps, redundancy 60 octets = 48 kbps. LR4 high-pass at 100 Hz.
+- **Subwoofer (SUB, id 5)**: 8 kHz stream by default (`CONFIG_ESPNOW_SUB_SAMPLE_RATE_HZ`, build option: 8 / 16 / 24 / 32 / 48 kHz; sub DSP at 8 kHz, polyphase interpolation to the stream rate on the SOURCE and to 48 kHz on the SINK, README 2.1), 60 octets = 48 kbps, LR4 low-pass at 100 Hz with polyphase decimation.
 - **Archived apps** (`archive/audio_ESP_NOW_broadcast` / `_unicast`) use the older dual-frame (t0 + t-1, 120 B each) layout with runtime-selectable 8-48 kHz, 7.5/10 ms and mono/stereo modes.
 
 ### Critical Timing Requirement

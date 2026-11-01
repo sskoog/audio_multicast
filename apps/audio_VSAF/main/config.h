@@ -155,9 +155,19 @@ extern "C" {
 #define CONFIG_ESPNOW_SUB_LP_HZ 200.0f // 4th-order Linkwitz-Riley LP cutoff frequency in Hz
 #endif
 
+// SUB stream rate, chosen at build time (pipeline init): 8000 (default), 16000, 24000, 32000 or 48000 Hz.
+// The SOURCE's sub DSP (low-pass + 6:1 decimation, subharmonic effects) runs at 8 kHz; above 8 kHz its output is
+// interpolated to this rate (polyphase FIR) before the LC3 encoder. The SINK decodes at the rate the packet header
+// carries and interpolates to 48 kHz. Higher rates cost SOURCE CPU (sub encoder) and RAM (encoder state).
 #ifndef CONFIG_ESPNOW_SUB_SAMPLE_RATE_HZ
-#define CONFIG_ESPNOW_SUB_SAMPLE_RATE_HZ 8000 // Subwoofer downsampled rate (lowest LC3-supported rate)
+#define CONFIG_ESPNOW_SUB_SAMPLE_RATE_HZ 8000
 #endif
+#if CONFIG_ESPNOW_SUB_SAMPLE_RATE_HZ != 8000 && CONFIG_ESPNOW_SUB_SAMPLE_RATE_HZ != 16000 && \
+    CONFIG_ESPNOW_SUB_SAMPLE_RATE_HZ != 24000 && CONFIG_ESPNOW_SUB_SAMPLE_RATE_HZ != 32000 && \
+    CONFIG_ESPNOW_SUB_SAMPLE_RATE_HZ != 48000
+#error "CONFIG_ESPNOW_SUB_SAMPLE_RATE_HZ must be 8000, 16000, 24000, 32000 or 48000"
+#endif
+#define VSAF_SUB_FRAME_SAMPLES (CONFIG_ESPNOW_SUB_SAMPLE_RATE_HZ / 100)  // samples per 10 ms SUB frame
 
 #ifndef CONFIG_ESPNOW_SUB_FRAME_LEN_OCTETS
 #define CONFIG_ESPNOW_SUB_FRAME_LEN_OCTETS 80 // 80 octets per 10ms frame (64 kbps @ 8 kHz)

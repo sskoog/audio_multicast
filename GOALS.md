@@ -72,7 +72,7 @@ Later: TV/analog input hardware, network-stream node, full 5.1 bring-up, PA scal
 ## Non-goals
 - Bluetooth LE Audio / Auracast transport (BLE apps archived).
 - ACK-based multi-unicast transport and the older dual-frame broadcast (archived).
-- Runtime provisioning / auto-discovery: node identity, channel and gain stay in MAC-address tables in firmware.
+- Runtime provisioning: node identity and gain stay in MAC-address tables in firmware. (Since 2026-11-01 the channel of each node is assigned at runtime: SINKs announce themselves, the SOURCE broadcasts the node -> channel map, set on the WebHID page.)
 - Range beyond 30 m, more than 8 speakers, 5 GHz operation.
 
 The retired apps live in [`archive/`](archive/README.md) and are no longer maintained (no ESP-IDF bumps, no fixes).

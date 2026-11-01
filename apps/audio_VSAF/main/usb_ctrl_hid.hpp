@@ -13,11 +13,12 @@
  *   GET / SET:  [3..4] id, [5..8] f32 value (applied)
  *   DESC:       [3..4] index, [5] count, [6..7] id, [8] type (0 int, 1 float, 2 enum), [9] access (0 ro, 1 rw, 2 action),
  *               [10..13] f32 min, [14..17] f32 max, [18..21] f32 default, [22] enum count,
- *               [23..46] name (24 bytes, NUL padded), [47..54] unit (8 bytes UTF-8, NUL padded), [55] decimals
+ *               [23..53] name (31 bytes, NUL padded: <= 30 characters), [54..61] unit (8 bytes UTF-8, NUL padded),
+ *               [62] decimals (layout before 2026-11-01: name 24 bytes, unit at 47, decimals at 55)
  *   ENUM:       [3..4] id, [5] index, [6..29] label (24 bytes, NUL padded)
  * Report 3, input (SOURCE -> host), value push:
  *   [0] version (2)   [1..4] u32 status snapshot seq   [5] count n (<= 11)   [6..] n x (u8 table index, f32 value)
- *   Read-write parameters every 100 ms (10 Hz); all parameters when the 1 s heartbeat publishes a new
+ *   Read-write parameters every 500 ms (2 Hz); all parameters when the 1 s heartbeat publishes a new
  *   snapshot, and on a STATUS request.
  */
 #include <cstdint>

@@ -314,6 +314,20 @@ bool parse_mac_address(const char* str, uint8_t* out_mac) {
  *
  * @param raw_line Null-terminated ASCII command string (const char*, input)
  */
+/**
+ * @brief Parse a channel name: A..E, SUB (any case) or the wire id 0..5; "off" -> VSAF_CH_OFF if allow_off.
+ * @return channel id, VSAF_CH_OFF, or -1 if not a channel.
+ */
+static int parse_channel(const char* s, bool allow_off) {
+    if (!s || !*s) return -1;
+    if (strcasecmp(s, "sub") == 0) return 5;
+    if (allow_off && strcasecmp(s, "off") == 0) return AudioNet::VSAF_CH_OFF;
+    const int c = toupper(static_cast<unsigned char>(s[0]));
+    if (s[1] == 0 && c >= 'A' && c <= 'E') return c - 'A';
+    if (s[1] == 0 && s[0] >= '0' && s[0] <= '5') return s[0] - '0';
+    return -1;
+}
+
 void handle_ascii_command(const char* raw_line) {
     if (!raw_line) return;
     while (*raw_line == ' ' || *raw_line == '\t' || *raw_line == '\r' || *raw_line == '\n') raw_line++;
@@ -355,7 +369,7 @@ void handle_ascii_command(const char* raw_line) {
         print_console("--- VOLUME & SYSTEM CONTROL ---\n"
                       "  vol <0..100> / voldb <-96..0> - Set volume (%% or dB)\n"
                       "  volu8 <0..255>             - Set raw uint8 volume\n"
-                      "  volch <ch> <dB>            - SOURCE: channel gain (-96..0 dB, ramped)\n"
+                      "  volch <A..E|SUB> <dB>      - SOURCE: channel gain (-96..0 dB, ramped)\n"
                       "  postgain <-48..12>         - Set SINK software post-gain (dB)\n"
                       "  mute / unmute              - Mute / Unmute audio (slew-limited)\n"
                       "  gain <0|3|6|9|12|15>       - Set I2S DAC hardware gain (dB)\n"
@@ -1014,11 +1028,13 @@ void handle_ascii_command(const char* raw_line) {
             print_console("[OK] Software post-gain set to %+5.1f dB\n", db);
         }
     } else if (strncasecmp(line, "ch ", 3) == 0) {
-        int ch = atoi(line + 3);
-        if (ch >= 0 && ch <= 5 && s_unicast_engine) {
+        // SINK: channel to play until the SOURCE's node map says otherwise: ch <A..E | SUB | off | 0..5>
+        const int ch = parse_channel(line + 3, true);
+        if (ch >= 0 && s_unicast_engine) {
             s_unicast_engine->setTargetChannel(static_cast<uint8_t>(ch));
-            print_console("[OK] SINK target channel set to %d (%s)\n",
-                          ch, (ch == 0) ? "Left" : (ch == 1) ? "Right" : (ch == 5) ? "Subwoofer" : "Surround");
+            print_console("[OK] SINK node %u plays channel %s\n", s_unicast_engine->getNodeId(), AudioNet::vsaf_channel_name(static_cast<uint8_t>(ch)));
+        } else {
+            print_console("[ERR] usage: ch <A..E | SUB | off>\n");
         }
     } else if (strncasecmp(line, "octets ", 7) == 0) {
         int oct = atoi(line + 7);
@@ -1150,14 +1166,15 @@ void handle_ascii_command(const char* raw_line) {
         }
     } else if (strncasecmp(line, "trim ", 5) == 0) {
         // SOURCE: per-channel playout trim "trim <ch> <us>" (sent to the SINKs in the control frame)
-        int ch = -1, us = 0;
-        if (sscanf(line + 5, "%d %d", &ch, &us) == 2 && ch >= 0 && ch < static_cast<int>(AudioNet::MAX_SINK_NODES) &&
-            s_unicast_engine) {
+        char cs[8] = "";
+        int us = 0;
+        const int ch = (sscanf(line + 5, "%7s %d", cs, &us) == 2) ? parse_channel(cs, false) : -1;
+        if (ch >= 0 && s_unicast_engine) {
             us = std::clamp(us, -30000, 30000);
             s_unicast_engine->setChannelTrimUs(static_cast<uint8_t>(ch), static_cast<int16_t>(us));
-            print_console("[OK] Channel %d playout trim %+d us\n", ch, us);
+            print_console("[OK] Channel %s playout trim %+d us\n", AudioNet::vsaf_channel_name(static_cast<uint8_t>(ch)), us);
         } else {
-            print_console("[ERR] usage: trim <ch 0..5> <us>\n");
+            print_console("[ERR] usage: trim <A..E | SUB> <us>\n");
         }
     } else if (strncasecmp(line, "latency ", 8) == 0) {
         // SOURCE: playout latency (frame time -> presentation time) in ms
@@ -1328,15 +1345,16 @@ void handle_ascii_command(const char* raw_line) {
             }
         }
     } else if (strncasecmp(line, "volch ", 6) == 0) {
-        // SOURCE: per-channel gain (parameter audio.chN_db): volch <ch 0..5> <dB -96..0>, ramped 100 dB/s
-        int ch = 0;
+        // SOURCE: per-channel gain (parameter audio.chX_db): volch <A..E | SUB> <dB -96..0>, ramped 100 dB/s
+        char cs[8] = "";
         float db = 0.0f;
-        if (sscanf(line + 6, "%d %f", &ch, &db) == 2 && s_unicast_engine && ch >= 0 && ch < 6) {
+        const int ch = (sscanf(line + 6, "%7s %f", cs, &db) == 2) ? parse_channel(cs, false) : -1;
+        if (ch >= 0 && s_unicast_engine) {
             db = std::clamp(db, -96.0f, 0.0f);
             s_unicast_engine->setChannelGainDb(ch, db);
-            print_console("[OK] SOURCE channel %d gain: %.1f dB\n", ch, db);
+            print_console("[OK] SOURCE channel %s gain: %.1f dB\n", AudioNet::vsaf_channel_name(static_cast<uint8_t>(ch)), db);
         } else {
-            print_console("[ERR] usage: volch <ch 0..5> <dB -96..0>\n");
+            print_console("[ERR] usage: volch <A..E | SUB> <dB -96..0>\n");
         }
     } else if (strcasecmp(line, "mute") == 0) {
         if (s_unicast_engine) {

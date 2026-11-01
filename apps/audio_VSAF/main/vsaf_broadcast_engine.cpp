@@ -2,6 +2,7 @@
 #include "status_led.hpp"
 #include "console.hpp"
 #include "usb_audio.hpp"
+#include "polyphase_resampler.hpp"
 #include "esp_log.h"
 #include "esp_rom_sys.h"
 #include "esp_mac.h"
@@ -11,6 +12,7 @@
 #include "esp_heap_caps.h"
 #include "esp_attr.h"
 #include "esp_system.h"
+#include "nvs.h"
 #include <cmath>
 #include <algorithm>
 #include <cstdint>
@@ -140,6 +142,10 @@ EspNowBroadcastEngine::EspNowBroadcastEngine(Codec::Lc3CodecEngine& primary_code
       m_stats_ack_percentage(100.0f)
 {
     s_engine_instance = this;
+    for (size_t n = 0; n < VSAF_MAX_NODES; ++n) {
+        m_node_map[n].store(VSAF_CH_KEEP, std::memory_order_relaxed);  // no assignment until set or loaded
+        m_node_default[n] = VSAF_CH_KEEP;
+    }
     m_peer_lock = portMUX_INITIALIZER_UNLOCKED;
     m_sink_fifo_lock = portMUX_INITIALIZER_UNLOCKED;
 
@@ -483,6 +489,13 @@ esp_err_t EspNowBroadcastEngine::start() {
         // 0. Pipeline buffers and DSP engines: allocated once here, before any pipeline task exists
         if (!m_src) {
             m_src = static_cast<SrcBuffers*>(heap_caps_calloc(1, sizeof(SrcBuffers), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+#if CONFIG_ESPNOW_SUB_SAMPLE_RATE_HZ != 8000
+            if (m_src) {
+                m_src->sub_rs.configure(8000, CONFIG_ESPNOW_SUB_SAMPLE_RATE_HZ);  // designed once, here
+                ESP_LOGI(TAG, "SOURCE: SUB stream %d Hz (8 kHz sub DSP, polyphase interpolation, delay %.0f us)",
+                         CONFIG_ESPNOW_SUB_SAMPLE_RATE_HZ, static_cast<double>(m_src->sub_rs.delayUs()));
+            }
+#endif
         }
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
         if (!m_hilbert_dsp) {
@@ -755,8 +768,212 @@ void EspNowBroadcastEngine::getNodeStatusString(char* out_buf, size_t max_len) c
 }
 
 void EspNowBroadcastEngine::setTargetChannel(uint8_t channel_id) {
-    m_target_channel = channel_id % MAX_SINK_NODES;
-    ESP_LOGI(TAG, "SINK Target Channel set to %d", m_target_channel);
+    const uint8_t ch = channel_id < MAX_SINK_NODES ? channel_id : VSAF_CH_OFF;
+    if (ch != m_target_channel) {
+        m_target_channel = ch;
+        // The SINK loop flushes the old channel's frames and re-buffers (no concealment of the switch)
+        m_sink_ch_changed.store(true, std::memory_order_release);
+    }
+    ESP_LOGI(TAG, "SINK node %u plays channel %s", m_node_id, vsaf_channel_name(m_target_channel));
+}
+
+// ---------------------------------------------------------------------------
+// Node -> channel map (VSAF 3.2)
+// ---------------------------------------------------------------------------
+
+/** @brief SINK: announce node id and channel (called from the control-frame handler, once per second). */
+void EspNowBroadcastEngine::sendSinkAnnounce() {
+    vsaf_sink_announce_t a = {};
+    a.type_id = VSAF_TYPE_SINK_ANNOUNCE;
+    a.node_id = m_node_id;
+    a.channel = m_target_channel;
+    a.flags = (m_state.load(std::memory_order_acquire) == NetworkState::STREAM) ? VSAF_ANNOUNCE_FLAG_STREAMING : 0;
+    a.crc16 = calc_crc16(reinterpret_cast<const uint8_t*>(&a), sizeof(a) - 2);
+    esp_now_send(s_broadcast_mac, reinterpret_cast<const uint8_t*>(&a), sizeof(a));
+}
+
+/** @brief SINK: apply our entry of the SOURCE's node map (VSAF_CH_KEEP: keep the current channel). */
+void EspNowBroadcastEngine::sinkOnNodeMap(const uint8_t* data, int len) {
+    if (len < static_cast<int>(sizeof(vsaf_node_map_t))) return;
+    vsaf_node_map_t m;
+    memcpy(&m, data, sizeof(m));
+    if (m.version != VSAF_NODE_MAP_VERSION ||
+        calc_crc16(reinterpret_cast<const uint8_t*>(&m), sizeof(m) - 4) != m.crc16) {
+        return;
+    }
+    const uint8_t want = m.channel[m_node_id];
+    if (want != VSAF_CH_KEEP && want != m_target_channel) {
+        setTargetChannel(want);
+    }
+}
+
+/** @brief SOURCE: record a SINK announce (Wi-Fi task). */
+void EspNowBroadcastEngine::srcOnAnnounce(const uint8_t* mac, const uint8_t* data, int len, int8_t rssi) {
+    (void)mac;
+    if (len < static_cast<int>(sizeof(vsaf_sink_announce_t))) return;
+    vsaf_sink_announce_t a;
+    memcpy(&a, data, sizeof(a));
+    if (a.node_id >= VSAF_MAX_NODES || calc_crc16(reinterpret_cast<const uint8_t*>(&a), sizeof(a) - 2) != a.crc16) {
+        return;
+    }
+    portENTER_CRITICAL(&m_node_mux);
+    m_nodes[a.node_id].last_seen_us = esp_timer_get_time();
+    m_nodes[a.node_id].channel = a.channel;
+    m_nodes[a.node_id].flags = a.flags;
+    m_nodes[a.node_id].rssi = rssi;
+    portEXIT_CRITICAL(&m_node_mux);
+}
+
+/** @brief SOURCE: node map packet (RF task, once per second). */
+void EspNowBroadcastEngine::srcBuildNodeMap(vsaf_node_map_t& out) {
+    out = {};
+    out.type_id = VSAF_TYPE_NODE_MAP;
+    out.version = VSAF_NODE_MAP_VERSION;
+    out.seq = m_map_seq++;
+    for (size_t n = 0; n < VSAF_MAX_NODES; ++n) {
+        out.channel[n] = m_node_map[n].load(std::memory_order_relaxed);
+    }
+    out.crc16 = calc_crc16(reinterpret_cast<const uint8_t*>(&out), sizeof(out) - 4);
+}
+
+bool EspNowBroadcastEngine::isNodeOnline(uint8_t node) const {
+    if (node >= VSAF_MAX_NODES) return false;
+    portENTER_CRITICAL(&m_node_mux);
+    const int64_t t = m_nodes[node].last_seen_us;
+    portEXIT_CRITICAL(&m_node_mux);
+    return t != 0 && esp_timer_get_time() - t < 3000000;
+}
+
+EspNowBroadcastEngine::NodeInfo EspNowBroadcastEngine::getNodeInfo(uint8_t node) const {
+    NodeInfo i = {};
+    if (node >= VSAF_MAX_NODES) return i;
+    portENTER_CRITICAL(&m_node_mux);
+    i = m_nodes[node];
+    portEXIT_CRITICAL(&m_node_mux);
+    return i;
+}
+
+uint8_t EspNowBroadcastEngine::getNodeChannel(uint8_t node) const {
+    if (node >= VSAF_MAX_NODES) return VSAF_CH_KEEP;
+    const uint8_t a = m_node_map[node].load(std::memory_order_relaxed);
+    if (a != VSAF_CH_KEEP) return a;
+    return isNodeOnline(node) ? getNodeInfo(node).channel : VSAF_CH_KEEP;
+}
+
+uint8_t EspNowBroadcastEngine::getChannelNode(uint8_t ch) const {
+    for (uint8_t n = 0; n < VSAF_MAX_NODES; ++n) {
+        if (isNodeOnline(n) && getNodeInfo(n).channel == ch) return n;
+    }
+    return 0xFF;
+}
+
+bool EspNowBroadcastEngine::setNodeChannel(uint8_t node, uint8_t channel) {
+    if (node >= VSAF_MAX_NODES || (channel >= MAX_SINK_NODES && channel != VSAF_CH_OFF)) return false;
+    uint8_t prev = getNodeChannel(node);
+    if (prev == VSAF_CH_KEEP) prev = VSAF_CH_OFF;
+    if (prev == channel) {
+        m_node_map[node].store(channel, std::memory_order_relaxed);
+        return true;
+    }
+    if (channel != VSAF_CH_OFF) {
+        for (uint8_t n = 0; n < VSAF_MAX_NODES; ++n) {  // swap with the node on that channel
+            if (n != node && getNodeChannel(n) == channel) {
+                m_node_map[n].store(prev, std::memory_order_relaxed);
+            }
+        }
+    }
+    m_node_map[node].store(channel, std::memory_order_relaxed);
+    if (channel < MAX_SINK_NODES) ptpResetChannel(channel);
+    if (prev < MAX_SINK_NODES) ptpResetChannel(prev);
+    ESP_LOGI(TAG, "Node %u -> channel %s (was %s)", node, vsaf_channel_name(channel), vsaf_channel_name(prev));
+    return true;
+}
+
+void EspNowBroadcastEngine::resolveNodeConflicts() {
+    uint8_t eff[VSAF_MAX_NODES];
+    bool online[VSAF_MAX_NODES], streaming[VSAF_MAX_NODES];
+    for (uint8_t n = 0; n < VSAF_MAX_NODES; ++n) {
+        online[n] = isNodeOnline(n);
+        streaming[n] = online[n] && (getNodeInfo(n).flags & VSAF_ANNOUNCE_FLAG_STREAMING);
+        eff[n] = online[n] ? getNodeChannel(n) : VSAF_CH_KEEP;
+    }
+    for (uint8_t n = 0; n < VSAF_MAX_NODES; ++n) {
+        if (!online[n] || eff[n] >= MAX_SINK_NODES) continue;
+        for (uint8_t m = n + 1; m < VSAF_MAX_NODES; ++m) {
+            if (!online[m] || eff[m] != eff[n]) continue;
+            const bool n_mapped = m_node_map[n].load(std::memory_order_relaxed) != VSAF_CH_KEEP;
+            const bool m_mapped = m_node_map[m].load(std::memory_order_relaxed) != VSAF_CH_KEEP;
+            uint8_t loser = m;  // default: the lower node id (n) keeps the channel
+            if (n_mapped != m_mapped) loser = n_mapped ? m : n;
+            else if (streaming[n] != streaming[m]) loser = streaming[n] ? m : n;
+            uint8_t free_ch = VSAF_CH_OFF;
+            for (uint8_t c = 0; c < NUM_SATELLITE_CHANNELS && free_ch == VSAF_CH_OFF; ++c) {
+                bool used = false;
+                for (uint8_t k = 0; k < VSAF_MAX_NODES; ++k) used = used || (online[k] && eff[k] == c);
+                if (!used) free_ch = c;
+            }
+            ESP_LOGW(TAG, "Nodes %u and %u both on channel %s: node %u -> %s", n, m, vsaf_channel_name(eff[n]),
+                     loser, vsaf_channel_name(free_ch));
+            m_node_map[loser].store(free_ch, std::memory_order_relaxed);
+            if (free_ch < MAX_SINK_NODES) ptpResetChannel(free_ch);
+            ptpResetChannel(eff[n]);
+            eff[loser] = free_ch;
+            if (loser == n) break;  // n moved: its other comparisons no longer apply
+        }
+    }
+}
+
+void EspNowBroadcastEngine::setNodeDefaults(const uint8_t (&channel_per_node)[VSAF_MAX_NODES]) {
+    for (size_t n = 0; n < VSAF_MAX_NODES; ++n) {
+        const uint8_t c = channel_per_node[n];
+        m_node_default[n] = (c < MAX_SINK_NODES || c == VSAF_CH_OFF) ? c : VSAF_CH_KEEP;
+    }
+}
+
+esp_err_t EspNowBroadcastEngine::resetNodeMap() {
+    nvs_handle_t h;
+    esp_err_t err = nvs_open("vsaf", NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_erase_key(h, "nodemap");
+        if (err == ESP_ERR_NVS_NOT_FOUND) err = ESP_OK;  // nothing saved
+        if (err == ESP_OK) err = nvs_commit(h);
+        nvs_close(h);
+    }
+    for (size_t n = 0; n < VSAF_MAX_NODES; ++n) m_node_map[n].store(m_node_default[n], std::memory_order_relaxed);
+    for (uint8_t c = 0; c < MAX_SINK_NODES; ++c) ptpResetChannel(c);
+    ESP_LOGI(TAG, "Node map reset to defaults (saved map erased: %s)", esp_err_to_name(err));
+    return err;
+}
+
+esp_err_t EspNowBroadcastEngine::saveNodeMap() {
+    uint8_t blob[VSAF_MAX_NODES];
+    for (size_t n = 0; n < VSAF_MAX_NODES; ++n) blob[n] = m_node_map[n].load(std::memory_order_relaxed);
+    nvs_handle_t h;
+    esp_err_t err = nvs_open("vsaf", NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+    err = nvs_set_blob(h, "nodemap", blob, sizeof(blob));
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    ESP_LOGI(TAG, "Node map saved: %s", esp_err_to_name(err));
+    return err;
+}
+
+esp_err_t EspNowBroadcastEngine::loadNodeMap() {
+    for (size_t n = 0; n < VSAF_MAX_NODES; ++n) m_node_map[n].store(m_node_default[n], std::memory_order_relaxed);
+    uint8_t blob[VSAF_MAX_NODES];
+    size_t len = sizeof(blob);
+    nvs_handle_t h;
+    esp_err_t err = nvs_open("vsaf", NVS_READONLY, &h);
+    if (err != ESP_OK) return err;
+    err = nvs_get_blob(h, "nodemap", blob, &len);
+    nvs_close(h);
+    if (err != ESP_OK || len != sizeof(blob)) return err != ESP_OK ? err : ESP_ERR_INVALID_SIZE;
+    for (size_t n = 0; n < VSAF_MAX_NODES; ++n) {
+        const uint8_t c = blob[n];
+        m_node_map[n].store((c < MAX_SINK_NODES || c == VSAF_CH_OFF) ? c : VSAF_CH_KEEP, std::memory_order_relaxed);
+    }
+    ESP_LOGI(TAG, "Node map loaded from NVS");
+    return ESP_OK;
 }
 
 // ---------------------------------------------------------------------------
@@ -1075,6 +1292,10 @@ void EspNowBroadcastEngine::onPacketReceived(const uint8_t* mac_addr, const uint
             sinkOnControl(data, data_len);
             return;
         }
+        if (type_id == VSAF_TYPE_NODE_MAP) {
+            sinkOnNodeMap(data, data_len);
+            return;
+        }
 
         if ((type_id == VSAF_TYPE_AUDIO_SATELLITE && data_len >= static_cast<int>(sizeof(vsaf_audio_packet_t))) ||
             (type_id == VSAF_TYPE_AUDIO_SUBWOOFER && data_len >= static_cast<int>(sizeof(vsaf_sub_packet_t)))) {
@@ -1114,6 +1335,10 @@ void EspNowBroadcastEngine::onPacketReceived(const uint8_t* mac_addr, const uint
     // SOURCE NODE LOGIC: Receive Round-Robin SINK Telemetry Feedback
     // =======================================================================
     if (m_node_role == NODE_ROLE_SOURCE) {
+        if (type_id == VSAF_TYPE_SINK_ANNOUNCE) {
+            srcOnAnnounce(mac_addr, data, data_len, rssi);
+            return;
+        }
         if (type_id == VSAF_TYPE_SINK_TELEMETRY && data_len >= static_cast<int>(sizeof(vsaf_sink_telemetry_t))) {
             const auto* ack = reinterpret_cast<const vsaf_sink_telemetry_t*>(data);
 
@@ -1407,8 +1632,10 @@ void EspNowBroadcastEngine::runSinkLoop() {
         pcm_t zero_stereo[480 * 2];          // silence for preload / padding
         pcm_t dac_stage[480 * 2];            // whole-descriptor DMA staging (see dac_push)
         uint8_t dma_pack[480 * 2 * 3];       // 3-byte packing for 24-bit I2S slots
+        Audio::PolyphaseResampler<480> sub_rs;  // SUB stream rate -> 48 kHz (configured on the first SUB frame)
     };
-    auto* bufs = static_cast<SinkBuffers*>(heap_caps_calloc(1, sizeof(SinkBuffers), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    void* bufs_mem = heap_caps_calloc(1, sizeof(SinkBuffers), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    auto* bufs = bufs_mem ? new (bufs_mem) SinkBuffers() : nullptr;
     if (!bufs) {
         ESP_LOGE(TAG, "SINK: cannot allocate %u B of playback buffers (free internal %u B)", (unsigned)sizeof(SinkBuffers),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
@@ -1418,6 +1645,31 @@ void EspNowBroadcastEngine::runSinkLoop() {
     ESP_LOGI(TAG, "SINK: playback buffers %u B allocated", (unsigned)sizeof(SinkBuffers));
     auto& pcm_mono = bufs->pcm_mono;
     auto& pcm_stereo = bufs->pcm_stereo;
+
+    // SUB stream (8..32 kHz, CONFIG_ESPNOW_SUB_SAMPLE_RATE_HZ on the SOURCE) -> 48 kHz: polyphase FIR
+    // interpolation (until 2026-11-01 a 6x sample repeat, which left images around 8 / 16 / 24 kHz). The filter is
+    // designed for the stream rate on the first SUB frame (and again if the rate changes). Its delay, plus that of
+    // the SOURCE's 8 kHz -> stream-rate interpolation (same design), is taken off the presentation time so the
+    // SUB keeps its alignment with the satellites.
+    auto& sub_rs = bufs->sub_rs;
+    int32_t sub_advance_us = 0;
+#if VSAF_SINK_PCM32
+    constexpr int32_t PCM_LO = -8388608, PCM_HI = 8388607;  // 24-bit samples in int32
+#else
+    constexpr int32_t PCM_LO = -32768, PCM_HI = 32767;
+#endif
+    auto sub_upsample = [&](size_t n_in) -> size_t {
+        using RS = Audio::PolyphaseResampler<480>;
+        const uint32_t in_hz = static_cast<uint32_t>(n_in) * 100U;  // samples per 10 ms frame -> rate
+        if (sub_rs.inRate() != in_hz || sub_rs.outRate() != 48000U) {
+            sub_rs.configure(in_hz, 48000U);
+            const float d = RS::delayUsFor(in_hz, 48000U) + (in_hz != 8000U ? RS::delayUsFor(8000U, in_hz) : 0.0f);
+            sub_advance_us = static_cast<int32_t>(std::lround(d));
+            ESP_LOGI(TAG, "SINK: SUB %lu Hz -> 48 kHz polyphase interpolation, playout advanced %ld us",
+                     (unsigned long)in_hz, (long)sub_advance_us);
+        }
+        return sub_rs.process(pcm_mono, n_in, pcm_mono, PCM_LO, PCM_HI);
+    };
     // Clock-drift compensation (SINK crystal vs SOURCE): keep the FIFO depth at its level after start-up by
     // playing 481 (insert) or 479 (drop) samples from one frame. Depth filter in Q16 frames (16 fractional bits,
     // so the EMA can settle on any level; with Q8 and a >> 8 step it could not rise within the last frame).
@@ -1506,6 +1758,27 @@ void EspNowBroadcastEngine::runSinkLoop() {
 
     while (m_running.load(std::memory_order_acquire)) {
         NetworkState current_state = m_state.load(std::memory_order_acquire);
+
+        // Channel changed (node map / console ch): drop the old channel's frames and re-buffer from the new one,
+        // so the switch is not concealed as packet loss. Channel "off": no frames arrive, the loop waits silently.
+        if (m_sink_ch_changed.exchange(false, std::memory_order_acq_rel) &&
+            (current_state == NetworkState::STREAM || current_state == NetworkState::PREFILL)) {
+            if (m_i2s_dac) {
+                m_i2s_dac->stop();
+            }
+            portENTER_CRITICAL(&m_sink_fifo_lock);
+            m_sink_fifo_count = 0;
+            m_sink_fifo_head = 0;
+            m_sink_fifo_tail = 0;
+            portEXIT_CRITICAL(&m_sink_fifo_lock);
+            m_has_expected_seq = false;
+            consecutive_underruns = 0;
+            sub_rs.reset();
+            m_channel_locked.store(true, std::memory_order_release);  // same Wi-Fi channel: no search
+            last_hop_time_us = esp_timer_get_time();
+            transitionTo(NetworkState::SCANNING);
+            continue;
+        }
 
         // -------------------------------------------------------------------
         // 0. IDLE: Audio completely paused, I2S DAC stopped, FIFO empty
@@ -1626,14 +1899,8 @@ void EspNowBroadcastEngine::runSinkLoop() {
                 uint32_t sr1 = (item1.flags != 0) ? get_flags_sample_rate(item1.flags) : m_telemetry.sample_rate;
                 uint32_t dur1 = (item1.flags != 0) ? get_flags_frame_dur_us(item1.flags) : m_frame_duration_us;
                 m_lc3_codec.decodeFrame(item1.data, item1.len, pcm_mono, 480, &actual_samples, sr1, dur1);
-                if (actual_samples == 80 && samples_per_frame == 480) {
-                    for (int i = 79; i >= 0; --i) {
-                        auto s = pcm_mono[i];
-                        for (int k = 0; k < 6; ++k) {
-                            pcm_mono[i * 6 + k] = s;
-                        }
-                    }
-                    actual_samples = 480;
+                if (actual_samples > 0 && samples_per_frame == 480 && (actual_samples < samples_per_frame || m_target_channel == SUBWOOFER_CHANNEL_ID)) {
+                    actual_samples = sub_upsample(actual_samples);  // SUB stream -> 48 kHz
                 }
                 float total_gain_db = m_current_gain_db + m_post_gain_db;
                 float gain = (m_current_gain_db <= -90.0f) ? 0.0f : std::pow(10.0f, total_gain_db / 20.0f);
@@ -1678,14 +1945,8 @@ void EspNowBroadcastEngine::runSinkLoop() {
                 uint32_t sr2 = (item2.flags != 0) ? get_flags_sample_rate(item2.flags) : m_telemetry.sample_rate;
                 uint32_t dur2 = (item2.flags != 0) ? get_flags_frame_dur_us(item2.flags) : m_frame_duration_us;
                 m_lc3_codec.decodeFrame(item2.data, item2.len, pcm_mono, 480, &actual_samples, sr2, dur2);
-                if (actual_samples == 80 && samples_per_frame == 480) {
-                    for (int i = 79; i >= 0; --i) {
-                        auto s = pcm_mono[i];
-                        for (int k = 0; k < 6; ++k) {
-                            pcm_mono[i * 6 + k] = s;
-                        }
-                    }
-                    actual_samples = 480;
+                if (actual_samples > 0 && samples_per_frame == 480 && (actual_samples < samples_per_frame || m_target_channel == SUBWOOFER_CHANNEL_ID)) {
+                    actual_samples = sub_upsample(actual_samples);  // SUB stream -> 48 kHz
                 }
                 float total_gain_db = m_current_gain_db + m_post_gain_db;
                 float gain = (m_current_gain_db <= -90.0f) ? 0.0f : std::pow(10.0f, total_gain_db / 20.0f);
@@ -1872,26 +2133,14 @@ void EspNowBroadcastEngine::runSinkLoop() {
             uint32_t sr = (item.flags != 0) ? get_flags_sample_rate(item.flags) : m_telemetry.sample_rate;
             uint32_t dur = (item.flags != 0) ? get_flags_frame_dur_us(item.flags) : m_frame_duration_us;
             m_lc3_codec.decodeFrame(item.data, item.len, pcm_mono, 480, &actual_samples, sr, dur);
-            if (actual_samples == 80 && samples_per_frame == 480) {
-                for (int i = 79; i >= 0; --i) {
-                    auto s = pcm_mono[i];
-                    for (int k = 0; k < 6; ++k) {
-                        pcm_mono[i * 6 + k] = s;
-                    }
-                }
-                actual_samples = 480;
+            if (actual_samples > 0 && samples_per_frame == 480 && (actual_samples < samples_per_frame || m_target_channel == SUBWOOFER_CHANNEL_ID)) {
+                actual_samples = sub_upsample(actual_samples);  // SUB stream -> 48 kHz
             }
         } else {
             // Packet Loss Concealment (PLC) during active STREAM
             m_lc3_codec.decodeFrame(nullptr, 0, pcm_mono, 480, &actual_samples);
-            if (actual_samples == 80 && samples_per_frame == 480) {
-                for (int i = 79; i >= 0; --i) {
-                    auto s = pcm_mono[i];
-                    for (int k = 0; k < 6; ++k) {
-                        pcm_mono[i * 6 + k] = s;
-                    }
-                }
-                actual_samples = 480;
+            if (actual_samples > 0 && samples_per_frame == 480 && (actual_samples < samples_per_frame || m_target_channel == SUBWOOFER_CHANNEL_ID)) {
+                actual_samples = sub_upsample(actual_samples);  // SUB stream -> 48 kHz
             }
             m_plc_count++;
             if (!is_gap_plc) {
@@ -2013,7 +2262,8 @@ void EspNowBroadcastEngine::runSinkLoop() {
             m_sync_offset_used.store(theta_used, std::memory_order_relaxed);
 
             // Error of this frame's first sample: predicted DAC time vs. presentation time (SINK clock)
-            const uint32_t pt_local = frame_t + s_lat + static_cast<uint32_t>(static_cast<int32_t>(s_trim)) +
+            const int32_t advance = (m_target_channel == SUBWOOFER_CHANNEL_ID) ? sub_advance_us : 0;  // SUB filters
+            const uint32_t pt_local = frame_t + s_lat + static_cast<uint32_t>(static_cast<int32_t>(s_trim) - advance) +
                                       static_cast<uint32_t>(theta_used);
             const uint32_t play_local = static_cast<uint32_t>(now_us) +
                                         static_cast<uint32_t>((dma_queued * 1000000) / sr_hz) + CONFIG_VSAF_DAC_DELAY_US;

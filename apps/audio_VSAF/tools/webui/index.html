@@ -58,6 +58,8 @@
   input[type=number] { width: 90px; }
   .st { font-size: 12px; color: var(--muted); min-width: 64px; }
   .st.clamped { color: var(--warn); } .st.err { color: var(--err); }
+  tr.subhdr td { font-size: 12px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em;
+                 color: var(--muted); background: var(--bg); padding: 6px 14px; }
   /* Status cards: auto-fit grid, ~4 per row on a desktop window, 1 on a phone */
   .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; padding: 12px; }
   .card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--bg); min-width: 0; }
@@ -130,13 +132,16 @@ const OP = { GET: 1, SET: 2, DESC: 3, ENUM: 4, STATUS: 5 };
 const STATUS_NAMES = ["ok", "clamped", "read_only", "unknown", "invalid", "bad_op"];
 const TYPE_NAMES = ["int", "float", "enum"];
 const ACCESS_NAMES = ["ro", "rw", "act"];
-const CHANNELS = ["L", "R", "C", "LS", "RS", "Sub"];
+// Audio channels = spatial upmix outputs (wire ids 0..5); no left / right / center meaning
+const CHANNELS = ["A", "B", "C", "D", "E", "SUB"];
 // Sections (cards), in page order. A parameter goes to the first group whose name pattern (match) fits, else
 // whose ID range (ids: [from, to)) contains its ID, else to the group listing its domain (name up to the
-// first dot). Parameters are shown in firmware table order. "<domain>.chN_<field>" parameters go into the
+// first dot). Parameters are shown in firmware table order. "<domain>.ch<A..E|SUB>_<field>" parameters go into the
 // Channels matrix, or into the group's own matrix when the group has ownMatrix.
 const GROUPS = [
   { key: "audio", title: "Audio source", prefixes: ["audio"] },
+  // node.nN.<field> -> one row per node (shown while the node is online); node.save = store the map
+  { key: "node", title: "Speakers (node -> channel)", prefixes: ["node"], ownMatrix: true },
   { key: "cal", title: "Test tone", prefixes: ["cal"] },
   { key: "xo", title: "Crossover", prefixes: ["xo"] },
   { key: "dsp", title: "Spatial upmix", prefixes: ["dsp"], ownMatrix: true },
@@ -147,13 +152,15 @@ const GROUPS = [
   { key: "net", title: "Network", prefixes: ["net"] },
   { key: "usb", title: "USB audio", prefixes: ["usb"] },
   // dsp.time_ms (0x0200) is pipeline timing, not a DSP setting: claimed by ID before the "dsp" domain
-  { key: "pipe", title: "SOURCE pipeline", ids: [0x0200, 0x0300], prefixes: ["enc", "src"] },
+  // (0x0220.. are sub.nccf.* diagnostics, so the range stops at 0x0210)
+  { key: "pipe", title: "SOURCE pipeline", ids: [0x0200, 0x0210], prefixes: ["enc", "src"] },
   { key: "sys", title: "System", prefixes: ["sys"] },
   { key: "dbg", title: "Test & debug", prefixes: ["debug", "test"] },
 ];
-// Channel matrix columns: "<prefix>.<field>" of "<prefix>.chN_<field>"
+// Channel matrix columns: "<prefix>.<field>" of "<prefix>.ch<A..E|SUB>_<field>"
 const MATRIX_COLS = [
-  ["audio.db", "Gain"], ["sync.trim_us", "Trim"], ["net.dl_rssi_dbm", "RSSI down"], ["net.rssi_dbm", "RSSI up"],
+  ["node.channel", "Channel"], ["node.online", "Online"],
+  ["net.node", "Node"], ["audio.db", "Gain"], ["sync.trim_us", "Trim"], ["net.dl_rssi_dbm", "RSSI down"], ["net.rssi_dbm", "RSSI up"],
   ["net.reply_loss_pct", "Reply loss"], ["net.replies_missed", "Missed"],
   ["sync.rtt_us", "RTT"], ["sync.drift_ppm", "Drift"], ["sync.err_us", "Playout err"],
   ["dsp.azimuth_deg", "Azimuth"], ["dsp.dfs_hz", "Frequency shift"],
@@ -162,10 +169,15 @@ const MATRIX_COLS = [
 // UI_MOVE_BEFORE: show parameter A just above parameter B (several A before the same B keep table order).
 // UI_RANGE: narrower slider range than the firmware's min / max (values set elsewhere still show as they are).
 const UI_MOVE_BEFORE = {};
+// Two-way enums shown as a switch instead of buttons (label 0 = switch off, label 1 = on)
+const UI_SWITCH = ["audio.stereo"];
+// Sub-headings inside a card for names with three or more parts ("<domain>.<sub>.<field>"), shown when at
+// least two parameters share <sub>
+const SUBTITLES = { "sub.zc": "Zero-crossing flipper", "sub.nccf": "NCCF pitch-tracked synth" };
 const UI_RANGE = [
-  [/^dsp\.ch\d_dfs_hz$/, -5, 5],  // frequency shift: +-5 Hz is the useful range
+  [/^dsp\.ch[A-E]_dfs_hz$/, -5, 5],  // frequency shift: +-5 Hz is the useful range
   [/^dsp\.lfo_hz$/, 0, 5],         // azimuth LFO rate (firmware allows -5..5)
-  [/^dsp\.ch\d_azimuth_deg$/, -180, 180],  // azimuth (firmware allows -360..360)
+  [/^dsp\.ch[A-E]_azimuth_deg$/, -180, 180],  // azimuth (firmware allows -360..360)
 ];
 function applyUiLayout(list) {
   for (const d of list) {
@@ -190,6 +202,7 @@ function groupOf(d) {
 const CONFIRM = {
   "sys.reboot": "Reboot the SOURCE? Audio stops for a few seconds.",
   "sys.bootloader": "Reboot the SOURCE into the ROM download bootloader (COM16)? It stays there until flashed or reset.",
+  "node.reset": "Delete the saved node -> channel map and go back to the default channels?",
   "test.txfault": "Inject a TX fault? 'reboot' makes the SOURCE reboot; 'wifi' restarts Wi-Fi (audio gap).",
 };
 
@@ -255,8 +268,8 @@ async function loadTable() {
       index: i, id: dv.getUint16(6, true), type: TYPE_NAMES[dv.getUint8(8)],
       access: ACCESS_NAMES[dv.getUint8(9)] ?? "ro", rw: dv.getUint8(9) === 1,
       min: dv.getFloat32(10, true), max: dv.getFloat32(14, true), def: dv.getFloat32(18, true),
-      enumCount: dv.getUint8(22), name: readString(dv, 23, 24), unit: readString(dv, 47, 8),
-      decimals: dv.getUint8(55), labels: [], value: NaN,
+      enumCount: dv.getUint8(22), name: readString(dv, 23, 31), unit: readString(dv, 54, 8),
+      decimals: dv.getUint8(62), labels: [], value: NaN,
     };
     for (let k = 0; k < d.enumCount; k++) {
       const r = await requestRetry(OP.ENUM, d.id, 0, k);
@@ -280,6 +293,7 @@ function fmt(d, v) {
     return on.length ? on.join(" ") : "none";
   }
   if (d.name === "audio.rms_dbfs" && v <= -100) return "off";
+  if (/^net\.ch([A-E]|SUB)_node$/.test(d.name)) return `Node ${Math.round(v)}`;
   if (/rssi_dbm$/.test(d.name) && v <= -127) return "-";
   if (/rtt_us$/.test(d.name) && v === 0) return "-";
   if (d.unit === "dB" && v <= -96) return "mute";
@@ -291,7 +305,7 @@ const hex = (id) => "0x" + id.toString(16).padStart(4, "0");
 
 /**
  * Build the page from the parameter table: one section per group (GROUPS), each with a controls table
- * (read-write and action parameters) and status cards (read-only); "<prefix>.chN_<field>" parameters go
+ * (read-write and action parameters) and status cards (read-only); "<prefix>.ch<A..E|SUB>_<field>" parameters go
  * into the channel matrix instead. Unknown prefixes get a section of their own, so new firmware
  * parameters always show up.
  */
@@ -310,18 +324,23 @@ function buildUi() {
   };
   GROUPS.forEach((g) => section(g.key, g.title));
   const matrices = new Map();  // section key -> Map(channel -> Map(column key -> descriptor))
+  const subOf = (d) => { const p = d.name.split("."); return p.length >= 3 ? `${p[0]}.${p[1]}` : null; };
+  const subCount = new Map();
+  for (const d of params) { const k = subOf(d); if (k) subCount.set(k, (subCount.get(k) || 0) + 1); }
 
   // Display order only: `params` keeps the table order, which the value pushes index into
   for (const d of applyUiLayout(params)) {
     const g = groupOf(d);
-    const m = /^(\w+)\.ch(\d)_(.+)$/.exec(d.name);
-    if (m) {
+    // Matrix rows: "node.n<id>.<field>" (one row per node) or "<domain>.ch<N>_<field>" (one row per channel)
+    const mn = /^node\.n(\d+)\.(.+)$/.exec(d.name);
+    const m = mn ? null : /^(\w+)\.ch([A-E]|SUB)_(.+)$/.exec(d.name);
+    if (mn || m) {
       const key = g && g.ownMatrix ? g.key : "chan";
-      if (!matrices.has(key)) matrices.set(key, new Map());
+      if (!matrices.has(key)) { const mm = new Map(); mm.kind = mn ? "node" : "ch"; matrices.set(key, mm); }
       const matrix = matrices.get(key);
-      const ch = Number(m[2]);
-      if (!matrix.has(ch)) matrix.set(ch, new Map());
-      matrix.get(ch).set(`${m[1]}.${m[3]}`, d);
+      const row = mn ? Number(mn[1]) : CHANNELS.indexOf(m[2]);  // channel letter -> wire id 0..5
+      if (!matrix.has(row)) matrix.set(row, new Map());
+      matrix.get(row).set(mn ? `node.${mn[2]}` : `${m[1]}.${m[3]}`, d);
       continue;
     }
     const prefix = d.name.split(".")[0];
@@ -332,6 +351,16 @@ function buildUi() {
                        `<div class="cval" id="v${d.id}">-</div>`;
       s.cards.appendChild(card);
     } else {
+      const sub = subOf(d);
+      const shown = sub && subCount.get(sub) >= 2 ? sub : null;
+      if (shown !== (s.lastSub ?? null)) {
+        s.lastSub = shown;
+        if (shown) {
+          const h = document.createElement("tr"); h.className = "subhdr";
+          h.innerHTML = `<td colspan="3">${SUBTITLES[shown] ?? shown}</td>`;
+          s.table.appendChild(h);
+        }
+      }
       const tr = document.createElement("tr");
       tr.innerHTML = `<td class="name">${d.name}<small>${hex(d.id)}</small></td>` +
                      `<td class="value" id="v${d.id}">${d.access === "act" ? "action" : "-"}</td>`;
@@ -357,10 +386,17 @@ function buildMatrix(s, matrix) {
   const wrap = document.createElement("div"); wrap.className = "mwrap";
   const t = document.createElement("table"); t.className = "matrix";
   t.style.minWidth = `${80 + cols.length * 110}px`;  // scrolls inside .mwrap on a phone
-  t.innerHTML = "<tr><th>Ch</th>" + cols.map(([, label]) => `<th>${label}</th>`).join("") + "</tr>";
-  for (const ch of [...matrix.keys()].sort()) {
+  const byNode = matrix.kind === "node";
+  t.innerHTML = `<tr><th>${byNode ? "Node" : "Ch"}</th>` + cols.map(([, label]) => `<th>${label}</th>`).join("") + "</tr>";
+  for (const ch of [...matrix.keys()].sort((a, b) => a - b)) {
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td class="chn" data-ch="${ch}" title="channel ${ch}">${CHANNELS[ch] ?? ch}</td>`;
+    if (byNode) {
+      tr.dataset.node = ch;
+      tr.hidden = true;  // shown when node.n<id>.online reports yes
+      tr.innerHTML = `<td class="chn" title="node ${ch}">Node ${ch}</td>`;
+    } else {
+      tr.innerHTML = `<td class="chn" data-ch="${ch}" title="channel ${CHANNELS[ch] ?? ch} (id ${ch})">${CHANNELS[ch] ?? ch}</td>`;
+    }
     for (const [k] of cols) {
       const td = document.createElement("td");
       const d = matrix.get(ch).get(k);
@@ -394,7 +430,8 @@ function makeAction(d) {
     row.appendChild(sel);
   }
   const b = document.createElement("button");
-  b.textContent = { "sys.clear_counters": "Clear", "sys.reboot": "Reboot", "sys.bootloader": "Bootloader" }[d.name] ?? "Run";
+  b.textContent = { "sys.clear_counters": "Clear", "sys.reboot": "Reboot", "sys.bootloader": "Bootloader",
+                    "node.save": "Save", "node.reset": "Reset" }[d.name] ?? "Run";
   if (CONFIRM[d.name]) b.className = "danger";
   const stEl = document.createElement("span"); stEl.className = "st"; stEl.id = `s${d.id}`;
   b.addEventListener("click", () => {
@@ -409,9 +446,9 @@ function makeAction(d) {
 
 /**
  * Control for one read-write parameter. Each control sets d.update(value, fromSet), which showValue()
- * calls to move it to the value the SOURCE reports (pushes at 10 Hz) unless you are using it.
- *   enum off/on           -> switch
- *   enum with 2..5 labels -> segmented buttons (e.g. bypass / on)
+ * calls to move it to the value the SOURCE reports (settings pushed at 2 Hz) unless you are using it.
+ *   enum off/on           -> switch (also two-way enums listed in UI_SWITCH, e.g. mono / stereo)
+ *   enum with 2..7 labels -> segmented buttons (e.g. bypass / on, node channel off / A..E / SUB)
  *   other enums           -> drop-down
  *   float                 -> feedback slider (knob = set, filled track = in effect)
  *   int                   -> number box (type a value, Enter or leave the box to send)
@@ -421,21 +458,26 @@ function makeControl(d) {
   const stEl = document.createElement("span"); stEl.className = "st"; stEl.id = `s${d.id}`;
   d.editing = false;
   const offOn = d.type === "enum" && d.labels.length === 2 && d.labels[0] === "off" && d.labels[1] === "on";
-  if (offOn) {
+  const twoWay = d.type === "enum" && d.labels.length === 2 && UI_SWITCH.includes(d.name);
+  if (offOn || twoWay) {
     const lab = document.createElement("label"); lab.className = "switch";
     const cb = document.createElement("input"); cb.type = "checkbox"; cb.id = `c${d.id}`;
     const knob = document.createElement("span"); knob.className = "slider";
     lab.appendChild(cb); lab.appendChild(knob);
     cb.addEventListener("change", () => setParam(d, cb.checked ? 1 : 0));
-    d.update = (v) => { cb.checked = Math.round(v) === 1; };
-    // Label = what the switch does (last part of the name, e.g. "mute"); the status only shows problems
+    // Label: off / on switches show what they do (last part of the name, e.g. "mute"); two-way switches show
+    // the current choice (e.g. "stereo" / "mono"). The status only shows problems.
     const name = document.createElement("span"); name.className = "swlabel";
-    name.textContent = d.name.split(".").pop();
+    name.textContent = offOn ? d.name.split(".").pop() : d.labels[1];
+    d.update = (v) => {
+      cb.checked = Math.round(v) === 1;
+      if (!offOn) name.textContent = d.labels[cb.checked ? 1 : 0];
+    };
     d.quietOk = true;
     row.appendChild(lab); row.appendChild(name); row.appendChild(stEl);
     return row;
   }
-  if (d.type === "enum" && d.labels.length >= 2 && d.labels.length <= 5) {
+  if (d.type === "enum" && d.labels.length >= 2 && d.labels.length <= 7) {
     const seg = document.createElement("div"); seg.className = "seg"; seg.id = `c${d.id}`;
     const btns = d.labels.map((l, i) => {
       const b = document.createElement("button"); b.type = "button"; b.textContent = l;
@@ -529,6 +571,8 @@ function showValue(d, v, fromSet = false) {
       });
     });
   }
+  const on = /^node\.n(\d+)\.online$/.exec(d.name);  // node rows: only nodes that are online
+  if (on) document.querySelectorAll(`tr[data-node="${on[1]}"]`).forEach((tr) => { tr.hidden = Math.round(v) !== 1; });
   const el = $(`v${d.id}`); if (el) el.textContent = fmt(d, v);
   if (d.update && !Number.isNaN(v)) d.update(v, fromSet);
 }

@@ -27,18 +27,22 @@ import serial.tools.list_ports
 
 # Known node registry
 KNOWN_NODES = {
-    1:  {"chip": "esp32s3", "role": "SINK",   "name": "Node 1 (XIAO S3 SINK Ch 0)",       "default_port": "COM1"},
-    2:  {"chip": "esp32s3", "role": "SINK",   "name": "Node 2 (XIAO S3 SINK Ch 1)",       "default_port": "COM2"},
-    3:  {"chip": "esp32s3", "role": "SINK",   "name": "Node 3 (XIAO S3 SINK Ch 2)",       "default_port": "COM3"},
-    4:  {"chip": "esp32s3", "role": "SINK",   "name": "Node 4 (XIAO S3 SINK Left Ch 0)",  "default_port": "COM4"},
-    5:  {"chip": "esp32s3", "role": "SINK",   "name": "Node 5 (XIAO S3 SINK Right Ch 1)", "default_port": "COM5"},
-    16: {"chip": "esp32s3", "role": "SOURCE", "name": "Node 16 (XIAO ESP32-S3 SOURCE)", "default_port": "COM16", "app_port": "COM116"},
-    20: {"chip": "esp32c6", "role": "SINK",   "name": "Node 20 (C6 LCD Console)",        "default_port": "COM20"},
-    21: {"chip": "esp32c6", "role": "SINK",   "name": "Node 21 (C6 DevKit / Host)",       "default_port": "COM21", "app_port": "COM121"},
-    23: {"chip": "esp32c6", "role": "SINK",   "name": "Node 23 (C6 SINK Center Ch 2)",   "default_port": "COM23"},
-    24: {"chip": "esp32c6", "role": "SINK",   "name": "Node 24 (C6 SINK LSur Ch 3)",     "default_port": "COM24"},
-    25: {"chip": "esp32c6", "role": "SINK",   "name": "Node 25 (C6 Surround Left Ch 3)", "default_port": "COM25"},
-    26: {"chip": "esp32c6", "role": "SINK",   "name": "Node 26 (C6 Surround Right Ch 4)","default_port": "COM26"},
+    # Node ID = COM port number; channels (A..E, SUB) are assigned at runtime by the SOURCE's node map
+    1:  {"chip": "esp32s3", "role": "SINK",   "name": "Node 1 (XIAO S3 SINK)",             "default_port": "COM1"},
+    2:  {"chip": "esp32s3", "role": "SINK",   "name": "Node 2 (XIAO S3 SINK)",             "default_port": "COM2"},
+    3:  {"chip": "esp32s3", "role": "SINK",   "name": "Node 3 (XIAO S3 SINK)",             "default_port": "COM3"},
+    4:  {"chip": "esp32s3", "role": "SINK",   "name": "Node 4 (XIAO S3 SINK prototype)",   "default_port": "COM4"},
+    5:  {"chip": "esp32s3", "role": "SINK",   "name": "Node 5 (XIAO S3 SINK prototype)",   "default_port": "COM5"},
+    6:  {"chip": "esp32s3", "role": "SINK",   "name": "Node 6 (XIAO S3 complete speaker)", "default_port": "COM6"},
+    7:  {"chip": "esp32s3", "role": "SINK",   "name": "Node 7 (XIAO S3 complete speaker)", "default_port": "COM7"},
+    8:  {"chip": "esp32s3", "role": "SINK",   "name": "Node 8 (XIAO S3 PCM5102A)",         "default_port": "COM8"},
+    16: {"chip": "esp32s3", "role": "SOURCE", "name": "Node 16 (XIAO ESP32-S3 SOURCE)",    "default_port": "COM16", "app_port": "COM116"},
+    20: {"chip": "esp32c6", "role": "SINK",   "name": "Node 20 (C6 LCD Console)",          "default_port": "COM20"},
+    21: {"chip": "esp32c6", "role": "SINK",   "name": "Node 21 (C6 DevKit / Host)",        "default_port": "COM21", "app_port": "COM121"},
+    23: {"chip": "esp32c6", "role": "SINK",   "name": "Node 23 (C6 MAX98357A prototype)",  "default_port": "COM23"},
+    24: {"chip": "esp32c6", "role": "SINK",   "name": "Node 24 (C6 MAX98357A prototype)",  "default_port": "COM24"},
+    25: {"chip": "esp32c6", "role": "SINK",   "name": "Node 25 (C6 Mini)",                 "default_port": "COM25"},
+    26: {"chip": "esp32c6", "role": "SINK",   "name": "Node 26 (C6 Mini)",                 "default_port": "COM26"},
 }
 
 

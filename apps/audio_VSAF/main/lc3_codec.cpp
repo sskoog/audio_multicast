@@ -57,7 +57,7 @@ esp_err_t Lc3CodecEngine::initEncoder(uint32_t sample_rate_hz, uint8_t channels,
 
     size_t total_bytes = 0;
     for (uint8_t i = 0; i < m_channels; ++i) {
-        uint32_t ch_sr = (i == SUB_ENCODER_INDEX) ? 8000 : m_sample_rate;
+        uint32_t ch_sr = (i == SUB_ENCODER_INDEX) ? CONFIG_ESPNOW_SUB_SAMPLE_RATE_HZ : m_sample_rate;
         const bool is_mq_rate = (i >= ENC_MQ_BASE && i < ENC_MQ_BASE + 5);
         if (is_mq_rate) {
             // MQ slot: small second-rate state paired with HQ encoder (i - ENC_MQ_BASE), see lc3_encode_dual()
@@ -96,8 +96,9 @@ esp_err_t Lc3CodecEngine::initEncoder(uint32_t sample_rate_hz, uint8_t channels,
 
     m_encoder_ready = true;
     ESP_LOGI(TAG, "liblc3_dual (IRAM code, FPU, no LTPF) encoder bank: %u slots, %u B internal SRAM "
-                  "(0..4 HQ %lu Hz, 5..9 MQ rate states %lu Hz sharing the HQ analysis, 10 sub 8000 Hz)",
-             m_channels, (unsigned)total_bytes, (unsigned long)m_sample_rate, (unsigned long)m_sample_rate);
+                  "(0..4 HQ %lu Hz, 5..9 MQ rate states %lu Hz sharing the HQ analysis, 10 sub %d Hz)",
+             m_channels, (unsigned)total_bytes, (unsigned long)m_sample_rate, (unsigned long)m_sample_rate,
+             CONFIG_ESPNOW_SUB_SAMPLE_RATE_HZ);
     return ESP_OK;
 #else
     if (m_enc_handle) {

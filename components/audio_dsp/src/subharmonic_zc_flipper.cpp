@@ -108,6 +108,7 @@ void SubharmonicZcFlipper::sync_config_if_needed(float dt_sec) noexcept {
         target_cfg_.hysteresis_ratio = std::clamp(cfg.hysteresis_ratio, kMinHysteresis, kMaxHysteresis);
         target_cfg_.release_ms = std::clamp(cfg.release_ms, kMinReleaseMs, kMaxReleaseMs);
         target_cfg_.min_floor_db = std::clamp(cfg.min_floor_db, kMinFloorDb, kMaxFloorDb);
+        target_cfg_.static_thresh = std::max(0.0f, cfg.static_thresh);
         target_cfg_.guard_f_max_hz = std::clamp(cfg.guard_f_max_hz, kMinGuardFMaxHz, kMaxGuardFMaxHz);
         target_cfg_.guard_f_min_hz = std::clamp(cfg.guard_f_min_hz, kMinGuardFMinHz, target_cfg_.guard_f_max_hz);
         target_cfg_.dry_gain = std::clamp(cfg.dry_gain, kMinGain, kMaxGain);
@@ -118,6 +119,7 @@ void SubharmonicZcFlipper::sync_config_if_needed(float dt_sec) noexcept {
         (active_cfg_.post_lpf_cutoff_hz != target_cfg_.post_lpf_cutoff_hz) ||
         (active_cfg_.post_lpf_order != target_cfg_.post_lpf_order) ||
         (active_cfg_.use_adaptive_thresh != target_cfg_.use_adaptive_thresh) ||
+        (active_cfg_.static_thresh != target_cfg_.static_thresh) ||
         (active_cfg_.hysteresis_ratio != target_cfg_.hysteresis_ratio) ||
         (active_cfg_.release_ms != target_cfg_.release_ms) ||
         (active_cfg_.min_floor_db != target_cfg_.min_floor_db) ||
