@@ -48,7 +48,7 @@ endif()
 # REQUIRES is evaluated before Kconfig (CONFIG_*) values exist, so gate it on the build target.
 idf_build_get_property(target IDF_TARGET)
 if(target STREQUAL "esp32s3")
-    list(APPEND requires esp_tinyusb)  # vendored: ../components/esp_tinyusb
+    list(APPEND requires esp_tinyusb audio_dsp)  # vendored: ../components/esp_tinyusb, ../components/audio_dsp
 endif()
 
 set(ldfragments)

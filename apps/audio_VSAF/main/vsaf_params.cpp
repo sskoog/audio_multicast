@@ -45,6 +45,8 @@ const int8_t kTxPowerQdbm[] = {8, 20, 28, 34, 44, 52, 56, 60, 66, 72, 80};
 const char* const kTxPowerNames[] = {"2", "5", "7", "8.5", "11", "13", "14", "15", "16.5", "18", "20"};
 const char* const kTxFaultNames[] = {"once", "wifi", "reboot"};
 const char* const kCalNames[] = {"off", "pink", "sine"};
+const char* const kHilbertModeNames[] = {"bypass", "on"};
+const char* const kSubModeNames[] = {"bypass", "zc", "nccf"};
 
 // IDs: high byte = group (0x01 system / network, 0x02 SOURCE pipeline, 0x03 radio status, 0x04 audio status,
 // 0x10 audio / source / radio controls, 0x11 time sync, 0x12 calibration, 0x1F tests). Never reuse an ID for a
@@ -134,6 +136,16 @@ const Desc kTable[] = {
      "Synthetic DSP load per frame (console dspload)", 0},
     {0x0211, "debug.enc_cores", "", Type::INT, Access::RW, 1, 2, 2, nullptr, 0,
      "LC3 encode on core 0 only (1) or both cores (2) (console enccores)", 0},
+    {0x0220, "dsp.sub_voiced", "", Type::ENUM, Access::RO, 0, 1, 0, kNoYes, static_cast<uint8_t>(sizeof(kNoYes) / sizeof(kNoYes[0])),
+     "Subharmonic NCCF voiced pitch lock active", 0},
+    {0x0221, "dsp.sub_f0_hz", "Hz", Type::FLOAT, Access::RO, 0, 200, 0, nullptr, 0,
+     "Subharmonic NCCF tracked fundamental f0", 1},
+    {0x0222, "dsp.sub_fsub_hz", "Hz", Type::FLOAT, Access::RO, 0, 100, 0, nullptr, 0,
+     "Subharmonic synthesized octave-down frequency (f0 / 2)", 1},
+    {0x0223, "dsp.sub_nccf_peak", "", Type::FLOAT, Access::RO, -1, 1, 0, nullptr, 0,
+     "Subharmonic NCCF normalized cross-correlation peak", 2},
+    {0x0224, "dsp.sub_duck_gain", "", Type::FLOAT, Access::RO, 0, 1, 1, nullptr, 0,
+     "Subharmonic direct-bass ducking gain", 2},
     {0x0300, "rf.tx_end_ms", "ms", Type::FLOAT, Access::RO, 0, 10, 0, nullptr, 0,
      "Last packet of the frame on air, after the frame tick (deadline 9.5 ms)", 2},
     {0x0301, "rf.tx_pkts_s", "1/s", Type::INT, Access::RO, 0, 1000, 0, nullptr, 0,
@@ -248,6 +260,46 @@ const Desc kTable[] = {
      "Sine frequency on the satellites", 0},
     {0x1203, "cal.sub_hz", "Hz", Type::INT, Access::RW, 20, 100, 63, nullptr, 0,
      "Sine frequency on the sub", 0},
+    {0x1300, "dsp.xover_hz", "Hz", Type::FLOAT, Access::RW, 70, 200, 100, nullptr, 0,
+     "LR4 crossover cutoff for satellite HPF and subwoofer LPF", 1},
+    {0x1301, "dsp.hilbert_mode", "", Type::ENUM, Access::RW, 0, 1, 1, kHilbertModeNames, static_cast<uint8_t>(sizeof(kHilbertModeNames) / sizeof(kHilbertModeNames[0])),
+     "5-satellite Hilbert quadrature spatial upmixer: bypass or on", 0},
+    {0x1302, "dsp.sub_mode", "", Type::ENUM, Access::RW, 0, 2, 0, kSubModeNames, static_cast<uint8_t>(sizeof(kSubModeNames) / sizeof(kSubModeNames[0])),
+     "Subwoofer subharmonic resonator: bypass (LR4 LPF), zc (flipper), nccf (pitch-locked)", 0},
+    {0x1303, "dsp.sub_dry_gain", "", Type::FLOAT, Access::RW, 0, 2, 0, nullptr, 0,
+     "Subharmonic resonator dry LPF bass linear gain", 2},
+    {0x1304, "dsp.sub_wet_gain", "", Type::FLOAT, Access::RW, 0, 2, 1, nullptr, 0,
+     "Subharmonic resonator wet octave-down linear gain", 2},
+    {0x1305, "dsp.zc_lpf_hz", "Hz", Type::FLOAT, Access::RW, 50, 200, 100, nullptr, 0,
+     "Zero-crossing flipper post-LPF smoothing cutoff", 1},
+    {0x1310, "dsp.sat_wet", "", Type::FLOAT, Access::RW, 0, 1, 1, nullptr, 0,
+     "Satellite spatial wet/dry blend (0 = dry HPF, 1 = full Hilbert upmix)", 2},
+    {0x1311, "dsp.sat_side_gain", "", Type::FLOAT, Access::RW, 0, 2, 1, nullptr, 0,
+     "Satellite Side (L-R) width gain before quadrature steering", 2},
+    {0x1312, "dsp.sat_lfo_hz", "Hz", Type::FLOAT, Access::RW, -5, 5, 0, nullptr, 0,
+     "Satellite spatial azimuth LFO modulation rate (0 = off)", 2},
+    {0x1313, "dsp.sat_lfo_span_deg", "deg", Type::FLOAT, Access::RW, -360, 360, 180, nullptr, 0,
+     "Satellite spatial azimuth LFO modulation span", 1},
+    {0x1320, "dsp.ch0_azimuth_deg", "deg", Type::FLOAT, Access::RW, -360, 360, -90, nullptr, 0,
+     "Channel 0 (L) Hilbert spatial steering angle", 1},
+    {0x1321, "dsp.ch1_azimuth_deg", "deg", Type::FLOAT, Access::RW, -360, 360, 90, nullptr, 0,
+     "Channel 1 (R) Hilbert spatial steering angle", 1},
+    {0x1322, "dsp.ch2_azimuth_deg", "deg", Type::FLOAT, Access::RW, -360, 360, 0, nullptr, 0,
+     "Channel 2 (C) Hilbert spatial steering angle", 1},
+    {0x1323, "dsp.ch3_azimuth_deg", "deg", Type::FLOAT, Access::RW, -360, 360, -135, nullptr, 0,
+     "Channel 3 (LS) Hilbert spatial steering angle", 1},
+    {0x1324, "dsp.ch4_azimuth_deg", "deg", Type::FLOAT, Access::RW, -360, 360, 135, nullptr, 0,
+     "Channel 4 (RS) Hilbert spatial steering angle", 1},
+    {0x1330, "dsp.ch0_dfs_hz", "Hz", Type::FLOAT, Access::RW, -20, 20, 0, nullptr, 0,
+     "Channel 0 (L) Barberpole single-sideband frequency shift", 2},
+    {0x1331, "dsp.ch1_dfs_hz", "Hz", Type::FLOAT, Access::RW, -20, 20, 0, nullptr, 0,
+     "Channel 1 (R) Barberpole single-sideband frequency shift", 2},
+    {0x1332, "dsp.ch2_dfs_hz", "Hz", Type::FLOAT, Access::RW, -20, 20, 0, nullptr, 0,
+     "Channel 2 (C) Barberpole single-sideband frequency shift", 2},
+    {0x1333, "dsp.ch3_dfs_hz", "Hz", Type::FLOAT, Access::RW, -20, 20, 0, nullptr, 0,
+     "Channel 3 (LS) Barberpole single-sideband frequency shift", 2},
+    {0x1334, "dsp.ch4_dfs_hz", "Hz", Type::FLOAT, Access::RW, -20, 20, 0, nullptr, 0,
+     "Channel 4 (RS) Barberpole single-sideband frequency shift", 2},
 };
 constexpr size_t kCount = sizeof(kTable) / sizeof(kTable[0]);
 
@@ -355,6 +407,27 @@ bool get(uint16_t id, float& value) {
         value = e ? e->getChannelGainNowDb(id - 0x1010) : 0;
         return true;
     }
+    if (id >= 0x1320 && id < 0x1325) {
+        value = e ? e->getDspChannelAzimuthDeg(id - 0x1320) : 0;
+        return true;
+    }
+    if (id >= 0x1330 && id < 0x1335) {
+        value = e ? e->getDspChannelDfsHz(id - 0x1330) : 0;
+        return true;
+    }
+    if (id >= 0x0220 && id <= 0x0224) {
+        bool voiced = false;
+        float f0 = 0, fsub = 0, peak = 0, duck = 1;
+        if (e) e->getDspSubDiagnostics(voiced, f0, fsub, peak, duck);
+        switch (id) {
+            case 0x0220: value = voiced ? 1 : 0; return true;
+            case 0x0221: value = f0; return true;
+            case 0x0222: value = fsub; return true;
+            case 0x0223: value = peak; return true;
+            case 0x0224: value = duck; return true;
+            default: return false;
+        }
+    }
     if (id >= 0x1110 && id < 0x1146) {
         // Not getPtpStatus(): it has side effects (drift update, holdover count); these are cached per frame
         if (!e) { value = NAN; return true; }
@@ -443,6 +516,16 @@ bool get(uint16_t id, float& value) {
         case 0x1201: value = e ? e->getCalSignal().rmsDbfs() : -20; return true;
         case 0x1202: value = e ? e->getCalSignal().satHz() : 1000; return true;
         case 0x1203: value = e ? e->getCalSignal().subHz() : 63; return true;
+        case 0x1300: value = e ? e->getDspCrossoverHz() : 100; return true;
+        case 0x1301: value = (e && !e->getDspHilbertBypass()) ? 1 : 0; return true;
+        case 0x1302: value = e ? e->getDspSubMode() : 0; return true;
+        case 0x1303: value = e ? e->getDspSubDryGain() : 0; return true;
+        case 0x1304: value = e ? e->getDspSubWetGain() : 1; return true;
+        case 0x1305: value = e ? e->getDspZcPostLpfHz() : 100; return true;
+        case 0x1310: value = e ? e->getDspSatWet() : 1; return true;
+        case 0x1311: value = e ? e->getDspSatSideGain() : 1; return true;
+        case 0x1312: value = e ? e->getDspSatLfoHz() : 0; return true;
+        case 0x1313: value = e ? e->getDspSatLfoSpanDeg() : 180; return true;
         default: return false;
     }
 }
@@ -461,6 +544,10 @@ SetStatus set(uint16_t id, float value, float& applied) {
         e->setChannelGainDb(id - 0x1010, v);
     } else if (id >= 0x1110 && id < 0x1116) {
         e->setChannelTrimUs(static_cast<uint8_t>(id - 0x1110), static_cast<int16_t>(iv));
+    } else if (id >= 0x1320 && id < 0x1325) {
+        e->setDspChannelAzimuthDeg(id - 0x1320, v);
+    } else if (id >= 0x1330 && id < 0x1335) {
+        e->setDspChannelDfsHz(id - 0x1330, v);
     } else {
         switch (id) {
             case 0x01F0:
@@ -518,6 +605,16 @@ SetStatus set(uint16_t id, float value, float& applied) {
                 }
                 break;
             }
+            case 0x1300: e->setDspCrossoverHz(v); break;
+            case 0x1301: e->setDspHilbertBypass(iv == 0); break;
+            case 0x1302: e->setDspSubMode(static_cast<uint8_t>(iv)); break;
+            case 0x1303: e->setDspSubDryGain(v); break;
+            case 0x1304: e->setDspSubWetGain(v); break;
+            case 0x1305: e->setDspZcPostLpfHz(v); break;
+            case 0x1310: e->setDspSatWet(v); break;
+            case 0x1311: e->setDspSatSideGain(v); break;
+            case 0x1312: e->setDspSatLfoHz(v); break;
+            case 0x1313: e->setDspSatLfoSpanDeg(v); break;
             default:
                 return SetStatus::READ_ONLY;
         }

@@ -14,6 +14,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cstdint>
+#include <new>
 
 static const char* TAG = "VSAF_BCAST";
 
@@ -141,11 +142,6 @@ EspNowBroadcastEngine::EspNowBroadcastEngine(Codec::Lc3CodecEngine& primary_code
     s_engine_instance = this;
     m_peer_lock = portMUX_INITIALIZER_UNLOCKED;
     m_sink_fifo_lock = portMUX_INITIALIZER_UNLOCKED;
-
-    m_hpf_stereo.initHighPass(100.0f, static_cast<float>(m_telemetry.sample_rate));
-    m_sub_decimator.init(100.0f, static_cast<float>(m_telemetry.sample_rate));
-
-
 
     // Initialize 6 SINK peer configurations
     const char* default_names[MAX_SINK_NODES] = {
@@ -484,10 +480,53 @@ esp_err_t EspNowBroadcastEngine::start() {
         // 1. SOURCE pipeline tasks (see vsaf_source_pipeline.cpp):
         //    core 0: USB + DSP + encoding (prio 5, below TinyUSB 6 / esp_timer 22 / Wi-Fi 23)
         //    core 1: encoding (prio 5) and the event-driven RF owner (prio 7, preempts the encoder)
-        // 0. Pipeline buffers: allocated once here, before any pipeline task exists (no allocation in the frame loop)
+        // 0. Pipeline buffers and DSP engines: allocated once here, before any pipeline task exists
         if (!m_src) {
             m_src = static_cast<SrcBuffers*>(heap_caps_calloc(1, sizeof(SrcBuffers), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         }
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+        if (!m_hilbert_dsp) {
+            void* mem = heap_caps_malloc(sizeof(audio_dsp::HilbertQuadratureMs), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+            if (mem) {
+                m_hilbert_dsp = new (mem) audio_dsp::HilbertQuadratureMs();
+                audio_dsp::HilbertQuadratureConfig h_cfg{};
+                h_cfg.fs = static_cast<int>(m_telemetry.sample_rate);
+                h_cfg.hpf_order = 2;
+                h_cfg.hpf_cutoff_hz = 100.0f;
+                h_cfg.hilbert_f_min_hz = 100.0f;
+                // Default 5-satellite azimuths: Ch 0 Left (-90), Ch 1 Right (+90), Ch 2 Center (0),
+                // Ch 3 Surround Left (-135), Ch 4 Surround Right (+135).
+                audio_dsp::QuadratureChannelParams ch5[NUM_SATELLITE_CHANNELS]{};
+                ch5[0].dqs_deg = -90.0f;
+                ch5[1].dqs_deg = +90.0f;
+                ch5[2].dqs_deg =   0.0f;
+                ch5[3].dqs_deg = -135.0f;
+                ch5[4].dqs_deg = +135.0f;
+                for (size_t c = 0; c < NUM_SATELLITE_CHANNELS; ++c) {
+                    ch5[c].dqs_lfo_offset_deg = static_cast<float>(c) * (360.0f / static_cast<float>(NUM_SATELLITE_CHANNELS));
+                }
+                m_hilbert_dsp->init(h_cfg, ch5, NUM_SATELLITE_CHANNELS);
+            }
+        }
+        if (!m_sub_dsp) {
+            void* mem = heap_caps_malloc(sizeof(audio_dsp::SubharmonicPipeline), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+            if (mem) {
+                m_sub_dsp = new (mem) audio_dsp::SubharmonicPipeline();
+                m_sub_dsp->init(audio_dsp::SubharmonicMode::kBypass, 100.0f);
+            }
+        }
+        if (!m_src || !m_hilbert_dsp || !m_sub_dsp) {
+            ESP_LOGE(TAG, "SOURCE: cannot allocate pipeline/DSP buffers (src=%p hilbert=%p sub=%p, free internal %u B)",
+                     m_src, m_hilbert_dsp, m_sub_dsp, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+            m_running.store(false, std::memory_order_release);
+            return ESP_ERR_NO_MEM;
+        }
+        ESP_LOGI(TAG, "SOURCE: buffers %u B + HilbertDSP %u B + SubDSP %u B allocated (free internal %u B)",
+                 (unsigned)sizeof(SrcBuffers),
+                 (unsigned)sizeof(audio_dsp::HilbertQuadratureMs),
+                 (unsigned)sizeof(audio_dsp::SubharmonicPipeline),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+#else
         if (!m_src) {
             ESP_LOGE(TAG, "SOURCE: cannot allocate %u B of pipeline buffers (free internal %u B): pipeline NOT started",
                      (unsigned)sizeof(SrcBuffers), (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
@@ -495,6 +534,7 @@ esp_err_t EspNowBroadcastEngine::start() {
             return ESP_ERR_NO_MEM;
         }
         ESP_LOGI(TAG, "SOURCE: pipeline buffers %u B allocated", (unsigned)sizeof(SrcBuffers));
+#endif
         m_boot_heap_before_tasks = static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
         m_boot_task_ok[0] = xTaskCreatePinnedToCore(srcRfTaskTrampoline, "src_rf", 4096, this, 7, &m_src_rf_task, 1) == pdPASS;
         m_boot_task_ok[1] = xTaskCreatePinnedToCore(srcEncTaskTrampoline, "src_enc1", 5120, this, 5, &m_src_enc_task, 1) == pdPASS;

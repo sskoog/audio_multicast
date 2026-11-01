@@ -38,16 +38,19 @@
   td.ctrl { width: 50%; }
   .ctrlrow { display: flex; align-items: center; gap: 10px; }
   input[type=range] { flex: 1; min-width: 120px; accent-color: var(--accent); }
-  /* Feedback slider: knob = value you set, filled track = value the SOURCE reports as applied (--fill) */
+  /* Feedback slider: knob = value you set, filled track = value the SOURCE reports as applied
+     (--lo..--hi: from the left end, or from zero when the range spans zero, e.g. -360..360 deg) */
   input[type=range].fb { -webkit-appearance: none; appearance: none; height: 22px; background: transparent; }
   input[type=range].fb::-webkit-slider-runnable-track {
     height: 8px; border-radius: 4px;
-    background: linear-gradient(to right, var(--accent) 0 var(--fill, 0%), var(--line) var(--fill, 0%) 100%); }
+    background: linear-gradient(to right, var(--line) 0 var(--lo, 0%), var(--accent) var(--lo, 0%) var(--hi, 0%),
+                                var(--line) var(--hi, 0%) 100%); }
   input[type=range].fb::-webkit-slider-thumb {
     -webkit-appearance: none; appearance: none; width: 18px; height: 18px; margin-top: -5px; border-radius: 50%;
     background: var(--panel); border: 2px solid var(--accent); box-shadow: 0 1px 3px rgba(0, 0, 0, .35); }
   input[type=range].fb::-moz-range-track { height: 8px; border-radius: 4px;
-    background: linear-gradient(to right, var(--accent) 0 var(--fill, 0%), var(--line) var(--fill, 0%) 100%); }
+    background: linear-gradient(to right, var(--line) 0 var(--lo, 0%), var(--accent) var(--lo, 0%) var(--hi, 0%),
+                                var(--line) var(--hi, 0%) 100%); }
   input[type=range].fb::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%;
     background: var(--panel); border: 2px solid var(--accent); }
   input[type=number], select { font: inherit; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px;
@@ -65,7 +68,6 @@
                 white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* Per-channel matrix (L R C LS RS Sub); scrolls inside its box on a phone, never the page */
   .mwrap { overflow-x: auto; }
-  table.matrix { min-width: 760px; }
   table.matrix th { font-size: 12px; font-weight: 600; color: var(--muted); text-align: left; padding: 8px 10px;
                     border-bottom: 1px solid var(--line); white-space: nowrap; }
   table.matrix td { padding: 6px 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -129,10 +131,15 @@ const STATUS_NAMES = ["ok", "clamped", "read_only", "unknown", "invalid", "bad_o
 const TYPE_NAMES = ["int", "float", "enum"];
 const ACCESS_NAMES = ["ro", "rw", "act"];
 const CHANNELS = ["L", "R", "C", "LS", "RS", "Sub"];
-// Sections, in page order: name prefix (before the first dot) -> section
+// Sections, in page order. A parameter goes to the first group whose name pattern (match) fits, else whose ID
+// range (ids: [from, to)) contains its
+// ID, else to the group listing its name prefix (before the first dot). "<prefix>.chN_<field>" parameters go
+// into the Channels matrix, or into the group's own matrix when the group has ownMatrix.
 const GROUPS = [
   { key: "audio", title: "Audio", prefixes: ["audio", "source"] },
-  { key: "chan", title: "Channels", prefixes: [] },  // every "<prefix>.chN_<field>" parameter
+  { key: "dsp", title: "Spatial upmix & crossover", ids: [0x1300, 0x1400], ownMatrix: true },
+  { key: "sub", title: "Subwoofer DSP", match: /^dsp\.(sub_|zc_)/ },
+  { key: "chan", title: "Channels", prefixes: [] },
   { key: "cal", title: "Calibration signal", prefixes: ["cal"] },
   { key: "rf", title: "Radio", prefixes: ["rf"] },
   { key: "sync", title: "Time sync", prefixes: ["sync"] },
@@ -147,7 +154,39 @@ const MATRIX_COLS = [
   ["audio.db", "Gain"], ["sync.trim_us", "Trim"], ["net.dl_rssi_dbm", "RSSI down"], ["net.rssi_dbm", "RSSI up"],
   ["net.reply_loss_pct", "Reply loss"], ["net.replies_missed", "Missed"],
   ["sync.rtt_us", "RTT"], ["sync.drift_ppm", "Drift"], ["sync.err_us", "Playout err"],
+  ["dsp.azimuth_deg", "Azimuth"], ["dsp.dfs_hz", "Frequency shift"],
 ];
+// Page-only layout tweaks (the firmware table is unchanged):
+// UI_MOVE_BEFORE: show parameter A just above parameter B (several A before the same B keep table order).
+// UI_RANGE: narrower slider range than the firmware's min / max (values set elsewhere still show as they are).
+const UI_MOVE_BEFORE = {
+  "dsp.sat_lfo_hz": "dsp.xover_hz",
+  "dsp.sat_lfo_span_deg": "dsp.xover_hz",
+};
+const UI_RANGE = [
+  [/^dsp\.ch\d_dfs_hz$/, -5, 5],  // frequency shift: +-5 Hz is the useful range
+  [/^dsp\.sat_lfo_hz$/, 0, 5],     // azimuth LFO rate (firmware allows -5..5)
+];
+function applyUiLayout(list) {
+  for (const d of list) {
+    for (const [re, lo, hi] of UI_RANGE) {
+      if (re.test(d.name)) { d.min = Math.max(d.min, lo); d.max = Math.min(d.max, hi); }
+    }
+  }
+  const moved = list.filter((d) => UI_MOVE_BEFORE[d.name] && list.some((x) => x.name === UI_MOVE_BEFORE[d.name]));
+  const out = list.filter((d) => !moved.includes(d));
+  for (const d of moved) {
+    const at = out.findIndex((x) => x.name === UI_MOVE_BEFORE[d.name]);
+    out.splice(at, 0, d);  // before the target, after any earlier moved ones
+  }
+  return out;
+}
+function groupOf(d) {
+  // Name pattern (match) first, then ID range, then name prefix
+  return GROUPS.find((g) => g.match && g.match.test(d.name)) ??
+         GROUPS.find((g) => g.ids && d.id >= g.ids[0] && d.id < g.ids[1]) ??
+         GROUPS.find((g) => g.prefixes && g.prefixes.includes(d.name.split(".")[0]));
+}
 const CONFIRM = {
   "sys.reboot": "Reboot the SOURCE? Audio stops for a few seconds.",
   "sys.bootloader": "Reboot the SOURCE into the ROM download bootloader (COM16)? It stays there until flashed or reset.",
@@ -270,18 +309,22 @@ function buildUi() {
     return s;
   };
   GROUPS.forEach((g) => section(g.key, g.title));
-  const matrix = new Map();  // channel -> Map(column key -> descriptor)
+  const matrices = new Map();  // section key -> Map(channel -> Map(column key -> descriptor))
 
-  for (const d of params) {
+  // Display order only: `params` keeps the table order, which the value pushes index into
+  for (const d of applyUiLayout(params)) {
+    const g = groupOf(d);
     const m = /^(\w+)\.ch(\d)_(.+)$/.exec(d.name);
     if (m) {
+      const key = g && g.ownMatrix ? g.key : "chan";
+      if (!matrices.has(key)) matrices.set(key, new Map());
+      const matrix = matrices.get(key);
       const ch = Number(m[2]);
       if (!matrix.has(ch)) matrix.set(ch, new Map());
       matrix.get(ch).set(`${m[1]}.${m[3]}`, d);
       continue;
     }
     const prefix = d.name.split(".")[0];
-    const g = GROUPS.find((x) => x.prefixes.includes(prefix));
     const s = g ? sections.get(g.key) : section(prefix, prefix);
     if (d.access === "ro") {
       const card = document.createElement("div"); card.className = "card"; card.title = d.name;
@@ -297,7 +340,7 @@ function buildUi() {
       tr.appendChild(td); s.table.appendChild(tr);
     }
   }
-  if (matrix.size) buildMatrix(sections.get("chan"), matrix);
+  for (const [key, matrix] of matrices) buildMatrix(sections.get(key), matrix);
 
   for (const s of sections.values()) {
     if (s.matrix) s.sec.appendChild(s.matrix);
@@ -313,10 +356,11 @@ function buildMatrix(s, matrix) {
   for (const m of matrix.values()) for (const k of m.keys()) if (!cols.some(([c]) => c === k)) cols.push([k, k]);
   const wrap = document.createElement("div"); wrap.className = "mwrap";
   const t = document.createElement("table"); t.className = "matrix";
+  t.style.minWidth = `${80 + cols.length * 110}px`;  // scrolls inside .mwrap on a phone
   t.innerHTML = "<tr><th>Ch</th>" + cols.map(([, label]) => `<th>${label}</th>`).join("") + "</tr>";
   for (const ch of [...matrix.keys()].sort()) {
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td class="chn" id="chn${ch}" title="channel ${ch}">${CHANNELS[ch] ?? ch}</td>`;
+    tr.innerHTML = `<td class="chn" data-ch="${ch}" title="channel ${ch}">${CHANNELS[ch] ?? ch}</td>`;
     for (const [k] of cols) {
       const td = document.createElement("td");
       const d = matrix.get(ch).get(k);
@@ -367,7 +411,7 @@ function makeAction(d) {
  * Control for one read-write parameter. Each control sets d.update(value, fromSet), which showValue()
  * calls to move it to the value the SOURCE reports (pushes at 10 Hz) unless you are using it.
  *   enum off/on           -> switch
- *   enum with 3..5 labels -> segmented buttons
+ *   enum with 2..5 labels -> segmented buttons (e.g. bypass / on)
  *   other enums           -> drop-down
  *   float                 -> feedback slider (knob = set, filled track = in effect)
  *   int                   -> number box (type a value, Enter or leave the box to send)
@@ -391,7 +435,7 @@ function makeControl(d) {
     row.appendChild(lab); row.appendChild(name); row.appendChild(stEl);
     return row;
   }
-  if (d.type === "enum" && d.labels.length >= 3 && d.labels.length <= 5) {
+  if (d.type === "enum" && d.labels.length >= 2 && d.labels.length <= 5) {
     const seg = document.createElement("div"); seg.className = "seg"; seg.id = `c${d.id}`;
     const btns = d.labels.map((l, i) => {
       const b = document.createElement("button"); b.type = "button"; b.textContent = l;
@@ -413,7 +457,8 @@ function makeControl(d) {
     input.addEventListener("change", () => setParam(d, Number(input.value)));
   } else if (d.type === "float") {
     input = document.createElement("input"); input.type = "range"; input.className = "fb";
-    input.title = "Knob: value you set. Filled track: value the SOURCE reports as applied.";
+    input.title = `Knob: value you set. Filled track: value the SOURCE reports as applied. Double-click: default (${fmt(d, d.def)}).`;
+    input.addEventListener("dblclick", () => { input.value = String(d.def); setParam(d, d.def); });
     input.min = d.min; input.max = d.max; input.step = Math.pow(10, -Math.max(d.decimals, 0));
     // While dragging: at most 10 sets per second; the final position is always sent
     let lastSent = 0, timer = null;
@@ -446,8 +491,10 @@ function makeControl(d) {
   d.update = (v, fromSet) => {
     if (input.type === "range") {
       // Filled track = read-back; the knob (what you set) is only moved while you are not using the slider
-      const pct = d.max > d.min ? Math.min(100, Math.max(0, ((v - d.min) / (d.max - d.min)) * 100)) : 0;
-      input.style.setProperty("--fill", pct.toFixed(2) + "%");
+      const pct = (x) => d.max > d.min ? Math.min(100, Math.max(0, ((x - d.min) / (d.max - d.min)) * 100)) : 0;
+      const p = pct(v), z = d.min < 0 && d.max > 0 ? pct(0) : 0;
+      input.style.setProperty("--lo", Math.min(p, z).toFixed(2) + "%");
+      input.style.setProperty("--hi", Math.max(p, z).toFixed(2) + "%");
       if (!d.editing) input.value = String(v);
     } else if (!d.editing || (fromSet && input.type !== "number")) {
       input.value = d.type === "enum" ? String(Math.round(v)) : String(v);
@@ -477,8 +524,9 @@ function showValue(d, v, fromSet = false) {
   d.value = v;
   if (d.name === "net.peers_mask") {  // colour the channel names in the matrix: online / offline
     CHANNELS.forEach((_, c) => {
-      const el = $(`chn${c}`);
-      if (el) el.className = "chn " + (((Math.round(v) >> c) & 1) ? "online" : "offline");
+      document.querySelectorAll(`.chn[data-ch="${c}"]`).forEach((el) => {
+        el.className = "chn " + (((Math.round(v) >> c) & 1) ? "online" : "offline");
+      });
     });
   }
   const el = $(`v${d.id}`); if (el) el.textContent = fmt(d, v);

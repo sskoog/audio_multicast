@@ -9,10 +9,10 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 # (a shared lock records the target and forces a re-solve on every target switch).
 idf_build_set_property(DEPENDENCIES_LOCK "${CMAKE_CURRENT_LIST_DIR}/dependencies.lock.${IDF_TARGET}")
 
-# Vendored components/esp_tinyusb is S3-only (USB-OTG). Exclude it elsewhere so its Kconfig
-# does not leak into sdkconfig.c6.
+# Vendored components/esp_tinyusb (USB-OTG) and components/audio_dsp (SOURCE spatial + subharmonic DSP)
+# are S3-only. Exclude them elsewhere so their symbols/Kconfig do not leak into C6 SINK builds.
 if(NOT IDF_TARGET STREQUAL "esp32s3")
-    list(APPEND EXCLUDE_COMPONENTS esp_tinyusb)
+    list(APPEND EXCLUDE_COMPONENTS esp_tinyusb audio_dsp)
 endif()
 
 # liblc3_dual (components/liblc3_dual) is a fork of liblc3 with dual-rate encoding (lc3_encode_dual).

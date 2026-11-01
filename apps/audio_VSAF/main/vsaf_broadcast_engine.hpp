@@ -8,7 +8,10 @@
 #include "tone_generator.hpp"
 #include "i2s_audio.hpp"
 #include "audio_metering.hpp"
-#include "biquad_filter.hpp"
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#include "hilbert_quadrature_ms.hpp"
+#include "subharmonic_nccf_synth.hpp"
+#endif
 #include "esp_now.h"
 #include "esp_wifi.h"
 #include "esp_timer.h"
@@ -355,6 +358,33 @@ public:
         return (ch >= 0 && ch < static_cast<int>(MAX_SINK_NODES)) ? m_ch_now_db[ch].load(std::memory_order_relaxed) : 0.0f;
     }
 
+    // SOURCE Spatial Upmix (HilbertQuadratureMs) & Subwoofer Subharmonic Resonator (SubharmonicPipeline) Controls
+    void setDspCrossoverHz(float hz);
+    float getDspCrossoverHz() const;
+    void setDspHilbertBypass(bool bypass);
+    bool getDspHilbertBypass() const;
+    void setDspSubMode(uint8_t mode);
+    uint8_t getDspSubMode() const;
+    void setDspSubDryGain(float gain);
+    float getDspSubDryGain() const;
+    void setDspSubWetGain(float gain);
+    float getDspSubWetGain() const;
+    void setDspZcPostLpfHz(float hz);
+    float getDspZcPostLpfHz() const;
+    void setDspSatWet(float wet);
+    float getDspSatWet() const;
+    void setDspSatSideGain(float side_gain);
+    float getDspSatSideGain() const;
+    void setDspSatLfoHz(float lfo_hz);
+    float getDspSatLfoHz() const;
+    void setDspSatLfoSpanDeg(float span_deg);
+    float getDspSatLfoSpanDeg() const;
+    void setDspChannelAzimuthDeg(size_t ch, float deg);
+    float getDspChannelAzimuthDeg(size_t ch) const;
+    void setDspChannelDfsHz(size_t ch, float dfs_hz);
+    float getDspChannelDfsHz(size_t ch) const;
+    void getDspSubDiagnostics(bool& voiced, float& f0_hz, float& f_sub_hz, float& nccf_peak, float& duck_gain) const;
+
     // Audio Metering
     int16_t getAudioFrameRMS_int16() { return m_audio_meter.getAudioFrameRMS_int16(); }
     int16_t getAudioPeak_int16() { return m_audio_meter.getAudioFramePeak_int16(); }
@@ -633,11 +663,17 @@ private:
         int64_t  t_grid_us = 0; // ideal frame time on the exact 10 ms timer grid (stamped into the packets)
         size_t   samples = 480;
         uint8_t  ack_ch = 0;    // channel whose packet requests the telemetry reply (sent last)
+        bool     cal_active = false;
+        float    ch_g0[MAX_SINK_NODES] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+        float    ch_g1[MAX_SINK_NODES] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
         SrcJob   jobs[SRC_NUM_JOBS] = {};
         uint8_t  tx_order[SRC_NUM_PKTS] = {};
         std::atomic<uint32_t> next_job{SRC_NUM_JOBS}; // claim cursor; >= SRC_NUM_JOBS = nothing to claim
         std::atomic<uint32_t> jobs_done{0};
         std::atomic<uint32_t> in_flight{0};
+        std::atomic<uint32_t> dsp_us{0};              // summed DSP CPU time across Core 0 preamble + parallel jobs
+        std::atomic<uint32_t> dsp_done{0};            // count of completed DSP-bearing jobs (SUB + 5x HQ = 6)
+        std::atomic<uint8_t>  hilbert_ready{0};       // 1 = Core 0 Stage 1B (Hilbert preamble) finished for HQ jobs
         std::atomic<uint8_t>  pkt_ready[SRC_NUM_PKTS] = {};
         std::atomic<uint8_t>  hq_done[NUM_SATELLITE_CHANNELS] = {}; // HQ phase finished (MQ may run)
     };
@@ -680,10 +716,9 @@ private:
         vsaf_sub_packet_t   pkt_sub[2];
         int16_t             pcm_stereo_in[480 * 2];                   // USB (or synth) input frame
         int16_t             tone_mono[480];
-        float               stereo_in_f32[480 * 2];                   // DSP stage
-        float               stereo_hp_f32[480 * 2];
-        float               mono_in_f32[480];
-        float               sub_8k_f32[80];
+        alignas(16) float   left_in_f32[480];                         // Single-point normalized float32 Left [-1, 1)
+        alignas(16) float   right_in_f32[480];                        // Single-point normalized float32 Right [-1, 1)
+        alignas(16) float   sub_8k_f32[80];                           // 8 kHz mono subwoofer output buffer
     };
     SrcBuffers*                m_src = nullptr;
     uint8_t                    m_src_mq[3][NUM_SATELLITE_CHANNELS][LC3_FRAME_OCTETS_RED]; // MQ(frame) by frame_no % 3
@@ -913,9 +948,11 @@ private: // SOURCE: max |tick - grid| (us) since last read
 
     // Subwoofer 8 kHz decimation buffer (80 samples = 10 ms @ 8 kHz)
 
-    // Crossover DSP Filters (esp-dsp SIMD block accelerated)
-    DSP::LinkwitzRiley4Stereo          m_hpf_stereo;
-    DSP::SubwooferPolyphaseDecimator   m_sub_decimator;
+    // SOURCE Spatial Upmix & Subharmonic Resonator DSP instances (allocated in start() on SOURCE only)
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+    audio_dsp::HilbertQuadratureMs* m_hilbert_dsp = nullptr;
+    audio_dsp::SubharmonicPipeline* m_sub_dsp = nullptr;
+#endif
 
     mutable SpscDurationRingBuffer<float, 64> m_codec_duration_buf;
     mutable TimeOffsetRingBuffer              m_time_offset_buf;
