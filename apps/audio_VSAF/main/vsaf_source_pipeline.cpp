@@ -203,11 +203,14 @@ void EspNowBroadcastEngine::srcRunDsp(SrcFrame& f) {
     auto& s_right_in_f32 = m_src->right_in_f32;
 
     const size_t samples = f.samples;
-    const uint32_t par = f.frame_no & 1;
 
     if (m_tone_test_mode) {
+        // Test tones (source "noise"): synth, or the pink / sine generator, as the program input
         int16_t* tone_mono = m_src->tone_mono;
-        if (m_tone_gen) {
+        const uint8_t kind = m_tone_kind.load(std::memory_order_acquire);
+        if (kind != TONE_SYNTH) {
+            m_cal[m_cal_active.load(std::memory_order_acquire)].frame48(tone_mono, samples);
+        } else if (m_tone_gen) {
             m_tone_gen->generateFrame(tone_mono, samples);
         } else {
             memset(tone_mono, 0, sizeof(m_src->tone_mono));
@@ -236,7 +239,7 @@ void EspNowBroadcastEngine::srcRunDsp(SrcFrame& f) {
         usb_audio_get_gain(&tgt_l, &tgt_r);
     }
 #endif
-    // Master volume (parameter audio.master_db / console vol): USB audio and the test synth, not caltone.
+    // Master volume (parameter audio.master_db / console vol): every input (USB audio and all test tones).
     // Slew-rate limited like the SINK output gain: the gain in effect moves toward the target by <= 1 dB per
     // 10 ms frame (100 dB/s); towards mute it drops to silence below -60 dB, from mute it starts at -60 dB.
     // The per-sample ramp below smooths each 1 dB step over the frame.
@@ -277,12 +280,8 @@ void EspNowBroadcastEngine::srcRunDsp(SrcFrame& f) {
     s_vol_l = tgt_l;  // exact target after the ramp (no float drift)
     s_vol_r = tgt_r;
 
-    const bool cal = m_cal_on.load(std::memory_order_acquire);
-    f.cal_active = cal;
-
-    // Per-channel gains (audio.chN_db / console volch), same slew limit as the master volume; the calibration
-    // signal bypasses them (its level is set by caltone). Endpoints are stored in f.ch_g0 / f.ch_g1 and applied
-    // during each channel's parallel render inside srcDoJob().
+    // Per-channel gains (audio.chN_db / console volch), same slew limit as the master volume. Endpoints are
+    // stored in f.ch_g0 / f.ch_g1 and applied during each channel's parallel render inside srcDoJob().
     for (size_t c = 0; c < MAX_SINK_NODES; ++c) {
         const float db = slewGainDb(m_ch_now_db[c].load(std::memory_order_relaxed),
                                     m_ch_gain_db[c].load(std::memory_order_relaxed));
@@ -294,18 +293,13 @@ void EspNowBroadcastEngine::srcRunDsp(SrcFrame& f) {
         f.ch_g1[c] = g1;
     }
 
-    if (cal) {
-        Audio::CalSignal& cs = m_cal[m_cal_active.load(std::memory_order_acquire)];
-        cs.subFrame(m_src->pcm_sub[par], 80);
-    }
-
     // MQ (and any HQ) jobs of the previous frame nobody has claimed yet are dropped now
     SrcFrame& prev = m_src_frames[(f.frame_no - 1) & 1];
     uint32_t old_cursor = prev.next_job.exchange(SRC_NUM_JOBS, std::memory_order_acq_rel);
     if (old_cursor < SRC_NUM_JOBS) {
         m_acc_cancelled.fetch_add(SRC_NUM_JOBS - old_cursor, std::memory_order_relaxed);
     }
-    if (prev.frame_no != 0 && !prev.cal_active &&
+    if (prev.frame_no != 0 &&
         prev.dsp_done.exchange(SRC_NUM_PKTS, std::memory_order_acq_rel) < SRC_NUM_PKTS) {
         m_acc_dsp.add(prev.dsp_us.load(std::memory_order_relaxed));
     }
@@ -323,30 +317,19 @@ void EspNowBroadcastEngine::srcRunDsp(SrcFrame& f) {
     }
 
     // Stage 1B (Core 0): Satellite Hilbert quadrature preamble (LR4 100 Hz HPF + Mid/Side + 8th-order all-pass)
-    if (cal) {
-        // Calibration signal (caltone): same band-limited signal on every satellite, own band on the sub
-        int16_t* left = m_src->pcm_sat[par][0];
-        Audio::CalSignal& cs = m_cal[m_cal_active.load(std::memory_order_acquire)];
-        cs.satFrame(left, samples);
-        for (size_t c = 1; c < NUM_SATELLITE_CHANNELS; ++c) {
-            memcpy(m_src->pcm_sat[par][c], left, samples * sizeof(int16_t));
-        }
-        m_audio_meter.pushFramePcm(left, samples, 1);
+    if (samples > 0) {
+        const float pk_f = std::clamp((max_l - min_l) * 16384.0f, 0.0f, 32767.0f);
+        const float rms_f = std::clamp(std::sqrt(sum_sq_l / static_cast<float>(samples)) * 32768.0f, 0.0f, 32767.0f);
+        m_audio_meter.pushPeak(static_cast<int16_t>(pk_f));
+        m_audio_meter.pushRMS(static_cast<int16_t>(rms_f));
     } else {
-        if (samples > 0) {
-            const float pk_f = std::clamp((max_l - min_l) * 16384.0f, 0.0f, 32767.0f);
-            const float rms_f = std::clamp(std::sqrt(sum_sq_l / static_cast<float>(samples)) * 32768.0f, 0.0f, 32767.0f);
-            m_audio_meter.pushPeak(static_cast<int16_t>(pk_f));
-            m_audio_meter.pushRMS(static_cast<int16_t>(rms_f));
-        } else {
-            m_audio_meter.pushSilence();
-        }
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
-        if (m_hilbert_dsp) {
-            m_hilbert_dsp->prepare_block_f32(s_left_in_f32, s_right_in_f32, samples);
-        }
-#endif
+        m_audio_meter.pushSilence();
     }
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+    if (m_hilbert_dsp) {
+        m_hilbert_dsp->prepare_block_f32(s_left_in_f32, s_right_in_f32, samples);
+    }
+#endif
 
     uint32_t extra = m_src_dsp_extra_us.load(std::memory_order_relaxed);
     if (extra > 0) {
@@ -354,12 +337,7 @@ void EspNowBroadcastEngine::srcRunDsp(SrcFrame& f) {
     }
 
     const uint32_t prep_us = static_cast<uint32_t>(esp_timer_get_time() - t_start);
-    if (cal) {
-        f.dsp_done.store(SRC_NUM_PKTS, std::memory_order_relaxed);
-        m_acc_dsp.add(prep_us);
-    } else {
-        f.dsp_us.fetch_add(prep_us, std::memory_order_relaxed);
-    }
+    f.dsp_us.fetch_add(prep_us, std::memory_order_relaxed);
     f.hilbert_ready.store(1, std::memory_order_release);
     srcWakeRfIfWaiting(SRC_BIT_FRAME);
 }
@@ -480,7 +458,7 @@ void EspNowBroadcastEngine::srcDoJob(SrcFrame& f, const SrcJob& job) {
     switch (job.type) {
     case SrcJobType::SUB: {
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
-        if (!f.cal_active && m_sub_dsp) {
+        if (m_sub_dsp) {
             const int64_t t_dsp = esp_timer_get_time();
             const size_t n8k = m_sub_dsp->process_stereo_f32_to_8k(
                 m_src->left_in_f32, m_src->right_in_f32, m_src->sub_8k_f32, f.samples);
@@ -534,7 +512,7 @@ void EspNowBroadcastEngine::srcDoJob(SrcFrame& f, const SrcJob& job) {
             esp_rom_delay_us(2);
         }
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
-        if (!f.cal_active && m_hilbert_dsp) {
+        if (m_hilbert_dsp) {
             const int64_t t_dsp = esp_timer_get_time();
             m_hilbert_dsp->render_channel_to_pcm16(
                 job.ch, m_src->pcm_sat[par][job.ch], f.ch_g0[job.ch], f.ch_g1[job.ch], f.samples);
@@ -1068,13 +1046,29 @@ void EspNowBroadcastEngine::runEncoderBench(void (*print)(const char*, ...), int
 // ---------------------------------------------------------------------------
 // SOURCE Spatial Upmix & Subwoofer Subharmonic Resonator Controls (ESP32-S3)
 // ---------------------------------------------------------------------------
-void EspNowBroadcastEngine::setDspCrossoverHz(float hz) {
-    const float clamped = std::clamp(hz, 70.0f, 200.0f);
-    if (m_hilbert_dsp) m_hilbert_dsp->set_hpf_cutoff_hz(clamped);
-    if (m_sub_dsp) m_sub_dsp->set_pre_lpf_cutoff_hz(clamped);
+void EspNowBroadcastEngine::setXoHpHz(float hz) {
+    if (m_hilbert_dsp) m_hilbert_dsp->set_hpf_cutoff_hz(std::clamp(hz, 70.0f, 200.0f));
 }
-float EspNowBroadcastEngine::getDspCrossoverHz() const {
-    return m_hilbert_dsp ? m_hilbert_dsp->hpf_cutoff_hz() : 100.0f;
+float EspNowBroadcastEngine::getXoHpHz() const {
+    return m_hilbert_dsp ? m_hilbert_dsp->target_hpf_cutoff_hz() : 100.0f;
+}
+void EspNowBroadcastEngine::setXoHpOrder(int order) {
+    if (m_hilbert_dsp) m_hilbert_dsp->set_hpf_order(std::clamp(order, 0, 4));
+}
+int EspNowBroadcastEngine::getXoHpOrder() const {
+    return m_hilbert_dsp ? m_hilbert_dsp->hpf_order() : 2;
+}
+void EspNowBroadcastEngine::setXoLpHz(float hz) {
+    if (m_sub_dsp) m_sub_dsp->set_pre_lpf_cutoff_hz(std::clamp(hz, 70.0f, 200.0f));
+}
+float EspNowBroadcastEngine::getXoLpHz() const {
+    return m_sub_dsp ? m_sub_dsp->pre_lpf_cutoff_hz() : 100.0f;
+}
+void EspNowBroadcastEngine::setXoLpOrder(int order) {
+    if (m_sub_dsp) m_sub_dsp->set_pre_lpf_order(order);
+}
+int EspNowBroadcastEngine::getXoLpOrder() const {
+    return m_sub_dsp ? m_sub_dsp->pre_lpf_order() : 4;
 }
 void EspNowBroadcastEngine::setDspHilbertBypass(bool bypass) {
     if (m_hilbert_dsp) m_hilbert_dsp->set_bypass(bypass);
@@ -1230,8 +1224,14 @@ void EspNowBroadcastEngine::runEncoderBench(void (*print)(const char*, ...), int
     (void)irq_masked;
     print("[ENCBENCH] only available on the ESP32-S3 SOURCE\n");
 }
-void EspNowBroadcastEngine::setDspCrossoverHz(float) {}
-float EspNowBroadcastEngine::getDspCrossoverHz() const { return 100.0f; }
+void EspNowBroadcastEngine::setXoHpHz(float) {}
+float EspNowBroadcastEngine::getXoHpHz() const { return 100.0f; }
+void EspNowBroadcastEngine::setXoHpOrder(int) {}
+int EspNowBroadcastEngine::getXoHpOrder() const { return 2; }
+void EspNowBroadcastEngine::setXoLpHz(float) {}
+float EspNowBroadcastEngine::getXoLpHz() const { return 100.0f; }
+void EspNowBroadcastEngine::setXoLpOrder(int) {}
+int EspNowBroadcastEngine::getXoLpOrder() const { return 4; }
 void EspNowBroadcastEngine::setDspHilbertBypass(bool) {}
 bool EspNowBroadcastEngine::getDspHilbertBypass() const { return false; }
 void EspNowBroadcastEngine::setDspSubMode(uint8_t) {}

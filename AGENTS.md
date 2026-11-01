@@ -47,7 +47,7 @@ Legacy / exploratory experiments in Bluetooth Low Energy Audio (Auracast) are al
 ### Software Post-Gain Calibration (all SINK nodes)
 Per-node software attenuation matches the acoustic level of all speakers (different DACs, amplifiers, gain straps and drivers). Values are applied at runtime via the node table in `main.cpp`; the console `postgain <dB>` changes them until the next reboot.
 
-Calibrated 2026-10-25 with an SPL meter (TRS TA650A, dB-A, slow) on `caltone pink -30` (SOURCE, 500-2000 Hz pink noise), volume 100 %, meter at the same distance on each speaker's axis. All nodes are matched to the quietest one (Node 24 at 0 dB; the 16-bit MAX98357A path has no room for boost), i.e. ~57.5 dBA at -30 dBFS RMS.
+Calibrated 2026-10-25 with an SPL meter (TRS TA650A, dB-A, slow) on `caltone pink -30` (SOURCE, 500-2000 Hz pink noise; since 2026-11-01: `caltone pink` with the SOURCE master volume at -10 dB and `dsp.hilbert.animate = bypass`, the tone now passes the crossover and upmix), volume 100 %, meter at the same distance on each speaker's axis. All nodes are matched to the quietest one (Node 24 at 0 dB; the 16-bit MAX98357A path has no room for boost), i.e. ~57.5 dBA at -30 dBFS RMS.
 
 | Node ID | Channel | Hardware | Level at 0 dB SW, cal. (dBA) | Post-Gain at calibration | Post-Gain now (+9 dB) | Notes |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |

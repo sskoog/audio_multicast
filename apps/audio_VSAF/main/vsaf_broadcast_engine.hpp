@@ -330,14 +330,28 @@ public:
      * @brief SOURCE calibration signal (console `caltone`): replaces the program input on all channels.
      * Configures the idle instance and switches to it, so the DSP stage never sees a half-configured one.
      */
-    void setCalSignal(Audio::CalSignal::Mode mode, float rms_dbfs, float sat_hz, float sub_hz) {
+    // Test tones (source "noise" = setToneTestMode(true); parameter cal.mode picks the signal): the synth or
+    // the pink / sine generator (cal_signal.hpp), all as 48 kHz program input through the whole pipeline,
+    // level by the master volume. The pink / sine generator runs at a fixed reference level.
+    enum ToneKind : uint8_t { TONE_SYNTH = 0, TONE_PINK = 1, TONE_SINE = 2 };
+    static constexpr float kToneRefDbfs = -20.0f;  // RMS of each band of pink / sine at master 0 dB
+    void setToneKind(uint8_t kind) {
+        if (kind > TONE_SINE) kind = TONE_SYNTH;
+        if (kind != TONE_SYNTH) {
+            const Audio::CalSignal& cs = getCalSignal();
+            setCalSignal(kind == TONE_PINK ? Audio::CalSignal::Mode::PINK : Audio::CalSignal::Mode::SINE,
+                         cs.satHz(), cs.subHz());
+        }
+        m_tone_kind.store(kind, std::memory_order_release);
+    }
+    uint8_t getToneKind() const { return m_tone_kind.load(std::memory_order_acquire); }
+    /** @brief Configure the pink / sine generator (double-buffered: the DSP stage reads the other copy). */
+    void setCalSignal(Audio::CalSignal::Mode mode, float sat_hz, float sub_hz) {
         const uint8_t idle = static_cast<uint8_t>(m_cal_active.load(std::memory_order_acquire) ^ 1);
-        m_cal[idle].configure(mode, rms_dbfs, sat_hz, sub_hz);
+        m_cal[idle].configure(mode, kToneRefDbfs, sat_hz, sub_hz);
         m_cal_active.store(idle, std::memory_order_release);
-        m_cal_on.store(mode != Audio::CalSignal::Mode::OFF, std::memory_order_release);
     }
     const Audio::CalSignal& getCalSignal() const { return m_cal[m_cal_active.load(std::memory_order_acquire)]; }
-    bool isCalSignalOn() const { return m_cal_on.load(std::memory_order_acquire); }
     bool isToneTestMode() const { return m_tone_test_mode; }
     /** @brief SOURCE master volume (dB, -96 = mute .. 0), applied in the DSP stage to all channels (ramped). */
     void setMasterGainDb(float db) { m_master_gain_db.store(std::clamp(db, -96.0f, 0.0f), std::memory_order_relaxed); }
@@ -359,8 +373,16 @@ public:
     }
 
     // SOURCE Spatial Upmix (HilbertQuadratureMs) & Subwoofer Subharmonic Resonator (SubharmonicPipeline) Controls
-    void setDspCrossoverHz(float hz);
-    float getDspCrossoverHz() const;
+    // Crossover (parameters xo.*): satellite high-pass before the Hilbert upmix, sub low-pass in the 48 -> 8 kHz
+    // decimation (also its anti-alias filter). Cutoffs 70..200 Hz (slewed), orders switch at the next frame.
+    void setXoHpHz(float hz);
+    float getXoHpHz() const;
+    void setXoHpOrder(int order);   // 0 (no high-pass), 1..4
+    int getXoHpOrder() const;
+    void setXoLpHz(float hz);
+    float getXoLpHz() const;
+    void setXoLpOrder(int order);   // Butterworth 2, 3, 4 or 6
+    int getXoLpOrder() const;
     void setDspHilbertBypass(bool bypass);
     bool getDspHilbertBypass() const;
     void setDspSubMode(uint8_t mode);
@@ -663,7 +685,6 @@ private:
         int64_t  t_grid_us = 0; // ideal frame time on the exact 10 ms timer grid (stamped into the packets)
         size_t   samples = 480;
         uint8_t  ack_ch = 0;    // channel whose packet requests the telemetry reply (sent last)
-        bool     cal_active = false;
         float    ch_g0[MAX_SINK_NODES] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
         float    ch_g1[MAX_SINK_NODES] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
         SrcJob   jobs[SRC_NUM_JOBS] = {};
@@ -865,7 +886,7 @@ private: // SOURCE: max |tick - grid| (us) since last read
     bool                       m_tone_test_mode;
     Audio::CalSignal           m_cal[2];
     std::atomic<uint8_t>       m_cal_active{0};
-    std::atomic<bool>          m_cal_on{false};
+    std::atomic<uint8_t>       m_tone_kind{TONE_SYNTH};
     std::atomic<float>         m_master_gain_db{0.0f};   // target (set)
     std::atomic<float>         m_master_now_db{0.0f};    // in effect (slew-rate limited, DSP stage)
     std::atomic<bool>          m_master_mute{false};

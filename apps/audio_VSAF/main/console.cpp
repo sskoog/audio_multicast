@@ -801,7 +801,7 @@ void handle_ascii_command(const char* raw_line) {
                           static_cast<int>(dac->getMclkMultiple()));
         }
     } else if (strncasecmp(line, "thdn", 4) == 0) {
-        // SINK: THD+N of a sine (play `caltone sine <dBFS> <hz>` on the SOURCE first). thdn [hz] [seconds]
+        // SINK: THD+N of a sine (play `caltone sine <hz>` on the SOURCE first, level via its master volume). thdn [hz] [seconds]
         if (s_unicast_engine) {
             int hz = 1000, secs = 3;
             sscanf(line + 4, "%d %d", &hz, &secs);
@@ -858,42 +858,48 @@ void handle_ascii_command(const char* raw_line) {
                       (unsigned long)n, vol[0] / 256.0f, mute[0] ? " MUTE" : "", vol[1] / 256.0f, mute[1] ? " MUTE" : "",
                       vol[2] / 256.0f, mute[2] ? " MUTE" : "", CONFIG_VSAF_APPLY_USB_HOST_VOLUME ? "yes" : "no (host scales PCM)");
     } else if (strncasecmp(line, "caltone", 7) == 0) {
-        // SOURCE: calibration signal for SPL level matching.
-        // caltone off | caltone pink [rms_dBFS] | caltone sine [rms_dBFS] [sat_Hz] [sub_Hz]
+        // SOURCE: test tone as program input (parameters cal.mode / audio.source = noise); level = master volume.
+        // caltone off | caltone synth | caltone pink | caltone sine [sat_Hz] [sub_Hz]
         if (s_unicast_engine) {
+            auto* e = s_unicast_engine;
             char mode_s[8] = "";
-            float db = -20.0f, sat_hz = 1000.0f, sub_hz = 63.0f;
-            const int n = sscanf(line + 7, "%7s %f %f %f", mode_s, &db, &sat_hz, &sub_hz);
-            db = std::clamp(db, -60.0f, -6.0f);
+            float sat_hz = e->getCalSignal().satHz(), sub_hz = e->getCalSignal().subHz();
+            const int n = sscanf(line + 7, "%7s %f %f", mode_s, &sat_hz, &sub_hz);
             sat_hz = std::clamp(sat_hz, 100.0f, 10000.0f);
             sub_hz = std::clamp(sub_hz, 20.0f, 100.0f);
-            Audio::CalSignal::Mode m = Audio::CalSignal::Mode::OFF;
-            if (n >= 1 && strcasecmp(mode_s, "pink") == 0) {
-                m = Audio::CalSignal::Mode::PINK;
-            } else if (n >= 1 && strcasecmp(mode_s, "sine") == 0) {
-                m = Audio::CalSignal::Mode::SINE;
-            } else if (n >= 1 && strcasecmp(mode_s, "off") != 0) {
-                print_console("[ERR] usage: caltone off | pink [rms_dBFS] | sine [rms_dBFS] [sat_Hz] [sub_Hz]\n");
+            int kind = -1;
+            if (n >= 1 && strcasecmp(mode_s, "synth") == 0) kind = AudioNet::EspNowBroadcastEngine::TONE_SYNTH;
+            else if (n >= 1 && strcasecmp(mode_s, "pink") == 0) kind = AudioNet::EspNowBroadcastEngine::TONE_PINK;
+            else if (n >= 1 && strcasecmp(mode_s, "sine") == 0) kind = AudioNet::EspNowBroadcastEngine::TONE_SINE;
+            else if (n >= 1 && strcasecmp(mode_s, "off") != 0) {
+                print_console("[ERR] usage: caltone off | synth | pink | sine [sat_Hz] [sub_Hz]  (level: vol / audio.master_db)\n");
                 return;
             }
-            s_unicast_engine->setCalSignal(m, db, sat_hz, sub_hz);
-            if (m == Audio::CalSignal::Mode::OFF) {
-                s_unicast_engine->setToneTestMode(false);
-                print_console("[OK] Calibration signal OFF (program input again)\n");
+            if (kind < 0) {
+                e->setToneTestMode(false);
+                print_console("[OK] Test tone OFF (USB audio input again)\n");
             } else {
-                // Keep the SOURCE casting even without USB audio
-                s_unicast_engine->setToneTestMode(true);
-                s_unicast_engine->transitionTo(AudioNet::NetworkState::CAST);
-                if (m == Audio::CalSignal::Mode::PINK) {
-                    print_console("[OK] Calibration: pink noise %+.1f dBFS RMS, satellites 500-2000 Hz, sub 40-100 Hz\n", db);
+                if (kind == AudioNet::EspNowBroadcastEngine::TONE_SINE) {
+                    e->setCalSignal(Audio::CalSignal::Mode::SINE, sat_hz, sub_hz);
+                }
+                e->setToneKind(static_cast<uint8_t>(kind));
+                e->setToneTestMode(true);  // audio.source = noise; keeps casting without USB audio
+                e->transitionTo(AudioNet::NetworkState::CAST);
+                if (kind == AudioNet::EspNowBroadcastEngine::TONE_PINK) {
+                    print_console("[OK] Test tone: pink noise 500-2000 Hz + 40-100 Hz, each %.0f dBFS RMS at master 0 dB (master now %.1f dB)\n",
+                                  AudioNet::EspNowBroadcastEngine::kToneRefDbfs, e->getMasterGainDb());
+                } else if (kind == AudioNet::EspNowBroadcastEngine::TONE_SINE) {
+                    print_console("[OK] Test tone: sine %.0f Hz + %.0f Hz, each %.0f dBFS RMS at master 0 dB (master now %.1f dB)\n",
+                                  sat_hz, sub_hz, AudioNet::EspNowBroadcastEngine::kToneRefDbfs, e->getMasterGainDb());
                 } else {
-                    print_console("[OK] Calibration: sine %+.1f dBFS RMS, satellites %.0f Hz, sub %.0f Hz\n", db, sat_hz, sub_hz);
+                    print_console("[OK] Test tone: synth (master now %.1f dB)\n", e->getMasterGainDb());
                 }
             }
         }
     } else if (strncasecmp(line, "tone", 4) == 0 || strncasecmp(line, "synth", 5) == 0) {
         if (s_unicast_engine) {
             if (strcasestr(line, "on")) {
+                s_unicast_engine->setToneKind(AudioNet::EspNowBroadcastEngine::TONE_SYNTH);
                 s_unicast_engine->setToneTestMode(true);
                 s_unicast_engine->transitionTo(AudioNet::NetworkState::CAST);
                 print_console("[OK] Internal test tone ENABLED (CAST mode forced)\n");

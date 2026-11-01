@@ -156,6 +156,21 @@ public:
         return init_cfg_.hpf_cutoff_hz;
     }
 
+    /**
+     * @brief Change the input High-Pass Filter order at runtime (thread-safe; applied at the next block,
+     *        filter state is cleared because the section structure changes).
+     *
+     * @param order Filter order in {0, 1, 2, 3, 4}; 0 = no high-pass [dimensionless].
+     */
+    void set_hpf_order(int order) noexcept {
+        pending_hpf_order_.store(std::clamp(order, 0, 4), std::memory_order_release);
+    }
+
+    /** @brief Requested input HPF order (0..4; the filter switches at the next block). */
+    int hpf_order() const noexcept {
+        return pending_hpf_order_.load(std::memory_order_acquire);
+    }
+
     float target_hpf_cutoff_hz() const noexcept {
         return pending_hpf_cutoff_hz_.load(std::memory_order_acquire);
     }
@@ -363,6 +378,7 @@ private:
     HilbertQuadratureConfig init_cfg_{};
     float angle_smooth_coeff_ = 1.0f;
     std::atomic<float> pending_hpf_cutoff_hz_{100.0f};
+    std::atomic<int> pending_hpf_order_{2};
     std::atomic<bool> bypass_{false};
     bool bypass_active_ = false;
 

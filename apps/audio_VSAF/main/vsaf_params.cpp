@@ -29,8 +29,8 @@ EspNowBroadcastEngine* s_engine = nullptr;
 portMUX_TYPE s_status_mux = portMUX_INITIALIZER_UNLOCKED;
 StatusSnapshot s_status = {};
 
-const char* const kModeNames[] = {"pause", "cast", "synth"};
-enum Mode : uint8_t { MODE_PAUSE = 0, MODE_CAST = 1, MODE_SYNTH = 2 };
+const char* const kModeNames[] = {"pause", "cast", "noise"};  // noise = test tones (cal.mode picks which)
+enum Mode : uint8_t { MODE_PAUSE = 0, MODE_CAST = 1, MODE_NOISE = 2 };
 const char* const kOffOn[] = {"off", "on"};
 const char* const kNoYes[] = {"no", "yes"};
 const char* const kPhyNames[] = {"ht0", "ht1", "ht2", "ht3", "ofdm6", "ofdm9", "ofdm12", "ofdm18",
@@ -44,7 +44,10 @@ const wifi_phy_rate_t kPhyRates[] = {WIFI_PHY_RATE_MCS0_LGI, WIFI_PHY_RATE_MCS1_
 const int8_t kTxPowerQdbm[] = {8, 20, 28, 34, 44, 52, 56, 60, 66, 72, 80};
 const char* const kTxPowerNames[] = {"2", "5", "7", "8.5", "11", "13", "14", "15", "16.5", "18", "20"};
 const char* const kTxFaultNames[] = {"once", "wifi", "reboot"};
-const char* const kCalNames[] = {"off", "pink", "sine"};
+const char* const kCalNames[] = {"synth", "pink", "sine"};  // = EspNowBroadcastEngine::ToneKind
+const char* const kHpOrderNames[] = {"0", "1", "2", "3", "4"};  // 0 = no high-pass
+const char* const kLpOrderNames[] = {"2", "3", "4", "6"};
+const int kLpOrders[] = {2, 3, 4, 6};
 const char* const kHilbertModeNames[] = {"bypass", "on"};
 const char* const kSubModeNames[] = {"bypass", "zc", "nccf"};
 
@@ -184,6 +187,8 @@ const Desc kTable[] = {
      "USB host (Windows) volume as applied: lower of master and channels", 1},
     {0x0412, "usb.host_mute", "", Type::ENUM, Access::RO, 0, 1, 0, kOffOn, static_cast<uint8_t>(sizeof(kOffOn) / sizeof(kOffOn[0])),
      "USB host mute", 0},
+    {0x1001, "audio.source", "", Type::ENUM, Access::RW, 0, 2, 1, kModeNames, static_cast<uint8_t>(sizeof(kModeNames) / sizeof(kModeNames[0])),
+     "SOURCE input / state: pause (IDLE), cast (USB audio), noise (test tone of cal.mode)", 0},
     {0x1000, "audio.master_db", "dB", Type::FLOAT, Access::RW, -96, 0, 0, nullptr, 0,
      "Master volume (all channels), -96 = mute; set = target, read = in effect (100 dB/s ramp)", 1},
     {0x1005, "audio.mute", "", Type::ENUM, Access::RW, 0, 1, 0, kOffOn, static_cast<uint8_t>(sizeof(kOffOn) / sizeof(kOffOn[0])),
@@ -200,8 +205,6 @@ const Desc kTable[] = {
      "Channel 4 (RS) gain on the SOURCE, ramped 100 dB/s (console volch); not applied to caltone", 1},
     {0x1015, "audio.ch5_db", "dB", Type::FLOAT, Access::RW, -96, 0, 0, nullptr, 0,
      "Channel 5 (Sub) gain on the SOURCE, ramped 100 dB/s (console volch); not applied to caltone", 1},
-    {0x1001, "source.mode", "", Type::ENUM, Access::RW, 0, 2, 1, kModeNames, static_cast<uint8_t>(sizeof(kModeNames) / sizeof(kModeNames[0])),
-     "SOURCE input / state: pause (IDLE), cast (USB audio), synth (test synth)", 0},
     {0x1100, "sync.latency_ms", "ms", Type::INT, Access::RW, 20, 200, 50, nullptr, 0,
      "Playout latency (console latency)", 0},
     {0x1110, "sync.ch0_trim_us", "us", Type::INT, Access::RW, -30000, 30000, 0, nullptr, 0,
@@ -253,33 +256,29 @@ const Desc kTable[] = {
     {0x1145, "sync.ch5_err_us", "us", Type::INT, Access::RO, -32767, 32767, 0, nullptr, 0,
      "Channel 5 (Sub) playout error reported by the SINK (+ = late), - = unknown", 0},
     {0x1200, "cal.mode", "", Type::ENUM, Access::RW, 0, 2, 0, kCalNames, static_cast<uint8_t>(sizeof(kCalNames) / sizeof(kCalNames[0])),
-     "Calibration signal (console caltone): off, pink (500-2000 Hz / sub 40-100 Hz), sine", 0},
-    {0x1201, "cal.level_dbfs", "dBFS", Type::FLOAT, Access::RW, -60, -6, -20, nullptr, 0,
-     "Calibration signal RMS level", 1},
+     "Test tone played while audio.source = noise: synth, pink (500-2000 Hz + 40-100 Hz), sine (cal.sat_hz + cal.sub_hz); level = audio.master_db", 0},
     {0x1202, "cal.sat_hz", "Hz", Type::INT, Access::RW, 100, 10000, 1000, nullptr, 0,
-     "Sine frequency on the satellites", 0},
+     "Sine test tone: satellite-band frequency", 0},
     {0x1203, "cal.sub_hz", "Hz", Type::INT, Access::RW, 20, 100, 63, nullptr, 0,
-     "Sine frequency on the sub", 0},
-    {0x1300, "dsp.xover_hz", "Hz", Type::FLOAT, Access::RW, 70, 200, 100, nullptr, 0,
-     "LR4 crossover cutoff for satellite HPF and subwoofer LPF", 1},
-    {0x1301, "dsp.hilbert_mode", "", Type::ENUM, Access::RW, 0, 1, 1, kHilbertModeNames, static_cast<uint8_t>(sizeof(kHilbertModeNames) / sizeof(kHilbertModeNames[0])),
+     "Sine test tone: sub-band frequency", 0},
+    {0x1300, "xo.hp_hilbert_hz", "Hz", Type::FLOAT, Access::RW, 70, 200, 100, nullptr, 0,
+     "Satellite high-pass cutoff before the Hilbert transform", 1},
+    {0x1306, "xo.hp_hilbert_order", "", Type::ENUM, Access::RW, 0, 4, 2, kHpOrderNames, static_cast<uint8_t>(sizeof(kHpOrderNames) / sizeof(kHpOrderNames[0])),
+     "Satellite high-pass order before the Hilbert transform (0 = no filter)", 0},
+    {0x1307, "xo.lp_sub_hz", "Hz", Type::FLOAT, Access::RW, 70, 200, 100, nullptr, 0,
+     "Subwoofer low-pass cutoff in the 48 -> 8 kHz downsampling stage", 1},
+    {0x1308, "xo.lp_sub_order", "", Type::ENUM, Access::RW, 0, 3, 2, kLpOrderNames, static_cast<uint8_t>(sizeof(kLpOrderNames) / sizeof(kLpOrderNames[0])),
+     "Subwoofer low-pass Butterworth order (2, 3, 4, 6)", 0},
+    {0x1301, "dsp.hilbert.animate", "", Type::ENUM, Access::RW, 0, 1, 1, kHilbertModeNames, static_cast<uint8_t>(sizeof(kHilbertModeNames) / sizeof(kHilbertModeNames[0])),
      "5-satellite Hilbert quadrature spatial upmixer: bypass or on", 0},
-    {0x1302, "dsp.sub_mode", "", Type::ENUM, Access::RW, 0, 2, 0, kSubModeNames, static_cast<uint8_t>(sizeof(kSubModeNames) / sizeof(kSubModeNames[0])),
-     "Subwoofer subharmonic resonator: bypass (LR4 LPF), zc (flipper), nccf (pitch-locked)", 0},
-    {0x1303, "dsp.sub_dry_gain", "", Type::FLOAT, Access::RW, 0, 2, 0, nullptr, 0,
-     "Subharmonic resonator dry LPF bass linear gain", 2},
-    {0x1304, "dsp.sub_wet_gain", "", Type::FLOAT, Access::RW, 0, 2, 1, nullptr, 0,
-     "Subharmonic resonator wet octave-down linear gain", 2},
-    {0x1305, "dsp.zc_lpf_hz", "Hz", Type::FLOAT, Access::RW, 50, 200, 100, nullptr, 0,
-     "Zero-crossing flipper post-LPF smoothing cutoff", 1},
-    {0x1310, "dsp.sat_wet", "", Type::FLOAT, Access::RW, 0, 1, 1, nullptr, 0,
-     "Satellite spatial wet/dry blend (0 = dry HPF, 1 = full Hilbert upmix)", 2},
-    {0x1311, "dsp.sat_side_gain", "", Type::FLOAT, Access::RW, 0, 2, 1, nullptr, 0,
-     "Satellite Side (L-R) width gain before quadrature steering", 2},
-    {0x1312, "dsp.sat_lfo_hz", "Hz", Type::FLOAT, Access::RW, -5, 5, 0, nullptr, 0,
+    {0x1312, "dsp.lfo_hz", "Hz", Type::FLOAT, Access::RW, -5, 5, 0, nullptr, 0,
      "Satellite spatial azimuth LFO modulation rate (0 = off)", 2},
-    {0x1313, "dsp.sat_lfo_span_deg", "deg", Type::FLOAT, Access::RW, -360, 360, 180, nullptr, 0,
+    {0x1313, "dsp.lfo_span_deg", "deg", Type::FLOAT, Access::RW, -360, 360, 180, nullptr, 0,
      "Satellite spatial azimuth LFO modulation span", 1},
+    {0x1310, "dsp.mix_wet", "", Type::FLOAT, Access::RW, 0, 1, 1, nullptr, 0,
+     "Satellite spatial wet/dry blend (0 = dry HPF, 1 = full Hilbert upmix)", 2},
+    {0x1311, "dsp.side_widening", "", Type::FLOAT, Access::RW, 0, 2, 1, nullptr, 0,
+     "Satellite Side (L-R) width gain before quadrature steering", 2},
     {0x1320, "dsp.ch0_azimuth_deg", "deg", Type::FLOAT, Access::RW, -360, 360, -90, nullptr, 0,
      "Channel 0 (L) Hilbert spatial steering angle", 1},
     {0x1321, "dsp.ch1_azimuth_deg", "deg", Type::FLOAT, Access::RW, -360, 360, 90, nullptr, 0,
@@ -300,13 +299,21 @@ const Desc kTable[] = {
      "Channel 3 (LS) Barberpole single-sideband frequency shift", 2},
     {0x1334, "dsp.ch4_dfs_hz", "Hz", Type::FLOAT, Access::RW, -20, 20, 0, nullptr, 0,
      "Channel 4 (RS) Barberpole single-sideband frequency shift", 2},
+    {0x1302, "sub.mode", "", Type::ENUM, Access::RW, 0, 2, 0, kSubModeNames, static_cast<uint8_t>(sizeof(kSubModeNames) / sizeof(kSubModeNames[0])),
+     "Subwoofer subharmonic resonator: bypass (LR4 LPF), zc (flipper), nccf (pitch-locked)", 0},
+    {0x1303, "sub.dry_gain", "", Type::FLOAT, Access::RW, 0, 2, 0, nullptr, 0,
+     "Subharmonic resonator dry LPF bass linear gain", 2},
+    {0x1304, "sub.wet_gain", "", Type::FLOAT, Access::RW, 0, 2, 1, nullptr, 0,
+     "Subharmonic resonator wet octave-down linear gain", 2},
+    {0x1305, "sub.zc_lpf_hz", "Hz", Type::FLOAT, Access::RW, 50, 200, 100, nullptr, 0,
+     "Zero-crossing flipper post-LPF smoothing cutoff", 1},
 };
 constexpr size_t kCount = sizeof(kTable) / sizeof(kTable[0]);
 
 float currentMode() {
     if (!s_engine) return MODE_PAUSE;
     if (s_engine->getState() != NetworkState::CAST) return MODE_PAUSE;
-    return s_engine->isToneTestMode() && !s_engine->isCalSignalOn() ? MODE_SYNTH : MODE_CAST;
+    return s_engine->isToneTestMode() ? MODE_NOISE : MODE_CAST;
 }
 
 /** @brief Deferred reboot so the HID / console reply goes out first (action parameters). */
@@ -512,11 +519,20 @@ bool get(uint16_t id, float& value) {
         case 0x1005: value = (e && e->getMasterMute()) ? 1 : 0; return true;
         case 0x1001: value = currentMode(); return true;
         case 0x1100: value = e ? e->getPlayoutLatencyUs() / 1000.0f : 0; return true;
-        case 0x1200: value = (e && e->isCalSignalOn()) ? static_cast<float>(e->getCalSignal().mode()) : 0; return true;
-        case 0x1201: value = e ? e->getCalSignal().rmsDbfs() : -20; return true;
+        case 0x1200: value = e ? e->getToneKind() : 0; return true;
         case 0x1202: value = e ? e->getCalSignal().satHz() : 1000; return true;
         case 0x1203: value = e ? e->getCalSignal().subHz() : 63; return true;
-        case 0x1300: value = e ? e->getDspCrossoverHz() : 100; return true;
+        case 0x1300: value = e ? e->getXoHpHz() : 100; return true;
+        case 0x1306: value = e ? e->getXoHpOrder() : 2; return true;
+        case 0x1307: value = e ? e->getXoLpHz() : 100; return true;
+        case 0x1308: {
+            value = NAN;
+            const int o = e ? e->getXoLpOrder() : 4;
+            for (size_t i = 0; i < sizeof(kLpOrders) / sizeof(kLpOrders[0]); ++i) {
+                if (kLpOrders[i] == o) value = i;
+            }
+            return true;
+        }
         case 0x1301: value = (e && !e->getDspHilbertBypass()) ? 1 : 0; return true;
         case 0x1302: value = e ? e->getDspSubMode() : 0; return true;
         case 0x1303: value = e ? e->getDspSubDryGain() : 0; return true;
@@ -580,32 +596,25 @@ SetStatus set(uint16_t id, float value, float& applied) {
                     e->setToneTestMode(false);
                     e->transitionTo(NetworkState::IDLE);
                 } else {
-                    e->setToneTestMode(m == MODE_SYNTH);
+                    e->setToneTestMode(m == MODE_NOISE);
                     e->transitionTo(NetworkState::CAST);
                 }
                 break;
             }
             case 0x1100: e->setPlayoutLatencyUs(static_cast<uint32_t>(iv) * 1000U); break;
-            case 0x1200: case 0x1201: case 0x1202: case 0x1203: {
-                // The calibration signal is configured as a whole (as console caltone); this replaces one field
+            case 0x1200: e->setToneKind(static_cast<uint8_t>(iv)); break;  // audio.source = noise plays it
+            case 0x1202: case 0x1203: {
+                // Sine frequencies: the pink / sine generator is configured as a whole
                 const Audio::CalSignal& cs = e->getCalSignal();
-                const bool was_on = e->isCalSignalOn();
-                int mode = was_on ? static_cast<int>(cs.mode()) : 0;
-                float lvl = cs.rmsDbfs(), sat = cs.satHz(), sub = cs.subHz();
-                if (id == 0x1200) mode = iv;
-                if (id == 0x1201) lvl = v;
-                if (id == 0x1202) sat = v;
-                if (id == 0x1203) sub = v;
-                e->setCalSignal(static_cast<Audio::CalSignal::Mode>(mode), lvl, sat, sub);
-                if (mode != 0 && !was_on) {
-                    e->setToneTestMode(true);  // keep casting without USB audio
-                    e->transitionTo(NetworkState::CAST);
-                } else if (mode == 0 && was_on) {
-                    e->setToneTestMode(false);
-                }
+                const float sat = (id == 0x1202) ? v : cs.satHz();
+                const float sub = (id == 0x1203) ? v : cs.subHz();
+                e->setCalSignal(cs.mode(), sat, sub);
                 break;
             }
-            case 0x1300: e->setDspCrossoverHz(v); break;
+            case 0x1300: e->setXoHpHz(v); break;
+            case 0x1306: e->setXoHpOrder(iv); break;
+            case 0x1307: e->setXoLpHz(v); break;
+            case 0x1308: e->setXoLpOrder(kLpOrders[iv]); break;
             case 0x1301: e->setDspHilbertBypass(iv == 0); break;
             case 0x1302: e->setDspSubMode(static_cast<uint8_t>(iv)); break;
             case 0x1303: e->setDspSubDryGain(v); break;

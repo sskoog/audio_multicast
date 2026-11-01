@@ -131,21 +131,23 @@ const STATUS_NAMES = ["ok", "clamped", "read_only", "unknown", "invalid", "bad_o
 const TYPE_NAMES = ["int", "float", "enum"];
 const ACCESS_NAMES = ["ro", "rw", "act"];
 const CHANNELS = ["L", "R", "C", "LS", "RS", "Sub"];
-// Sections, in page order. A parameter goes to the first group whose name pattern (match) fits, else whose ID
-// range (ids: [from, to)) contains its
-// ID, else to the group listing its name prefix (before the first dot). "<prefix>.chN_<field>" parameters go
-// into the Channels matrix, or into the group's own matrix when the group has ownMatrix.
+// Sections (cards), in page order. A parameter goes to the first group whose name pattern (match) fits, else
+// whose ID range (ids: [from, to)) contains its ID, else to the group listing its domain (name up to the
+// first dot). Parameters are shown in firmware table order. "<domain>.chN_<field>" parameters go into the
+// Channels matrix, or into the group's own matrix when the group has ownMatrix.
 const GROUPS = [
-  { key: "audio", title: "Audio", prefixes: ["audio", "source"] },
-  { key: "dsp", title: "Spatial upmix & crossover", ids: [0x1300, 0x1400], ownMatrix: true },
-  { key: "sub", title: "Subwoofer DSP", match: /^dsp\.(sub_|zc_)/ },
+  { key: "audio", title: "Audio source", prefixes: ["audio"] },
+  { key: "cal", title: "Test tone", prefixes: ["cal"] },
+  { key: "xo", title: "Crossover", prefixes: ["xo"] },
+  { key: "dsp", title: "Spatial upmix", prefixes: ["dsp"], ownMatrix: true },
+  { key: "sub", title: "Subwoofer effects", prefixes: ["sub"] },
   { key: "chan", title: "Channels", prefixes: [] },
-  { key: "cal", title: "Calibration signal", prefixes: ["cal"] },
   { key: "rf", title: "Radio", prefixes: ["rf"] },
   { key: "sync", title: "Time sync", prefixes: ["sync"] },
   { key: "net", title: "Network", prefixes: ["net"] },
   { key: "usb", title: "USB audio", prefixes: ["usb"] },
-  { key: "pipe", title: "SOURCE pipeline", prefixes: ["dsp", "enc", "src"] },
+  // dsp.time_ms (0x0200) is pipeline timing, not a DSP setting: claimed by ID before the "dsp" domain
+  { key: "pipe", title: "SOURCE pipeline", ids: [0x0200, 0x0300], prefixes: ["enc", "src"] },
   { key: "sys", title: "System", prefixes: ["sys"] },
   { key: "dbg", title: "Test & debug", prefixes: ["debug", "test"] },
 ];
@@ -156,16 +158,14 @@ const MATRIX_COLS = [
   ["sync.rtt_us", "RTT"], ["sync.drift_ppm", "Drift"], ["sync.err_us", "Playout err"],
   ["dsp.azimuth_deg", "Azimuth"], ["dsp.dfs_hz", "Frequency shift"],
 ];
-// Page-only layout tweaks (the firmware table is unchanged):
+// Page-only layout tweaks (the firmware table order is the normal way to order a card):
 // UI_MOVE_BEFORE: show parameter A just above parameter B (several A before the same B keep table order).
 // UI_RANGE: narrower slider range than the firmware's min / max (values set elsewhere still show as they are).
-const UI_MOVE_BEFORE = {
-  "dsp.sat_lfo_hz": "dsp.xover_hz",
-  "dsp.sat_lfo_span_deg": "dsp.xover_hz",
-};
+const UI_MOVE_BEFORE = {};
 const UI_RANGE = [
   [/^dsp\.ch\d_dfs_hz$/, -5, 5],  // frequency shift: +-5 Hz is the useful range
-  [/^dsp\.sat_lfo_hz$/, 0, 5],     // azimuth LFO rate (firmware allows -5..5)
+  [/^dsp\.lfo_hz$/, 0, 5],         // azimuth LFO rate (firmware allows -5..5)
+  [/^dsp\.ch\d_azimuth_deg$/, -180, 180],  // azimuth (firmware allows -360..360)
 ];
 function applyUiLayout(list) {
   for (const d of list) {
@@ -182,7 +182,7 @@ function applyUiLayout(list) {
   return out;
 }
 function groupOf(d) {
-  // Name pattern (match) first, then ID range, then name prefix
+  // Name pattern (match) first, then ID range, then domain
   return GROUPS.find((g) => g.match && g.match.test(d.name)) ??
          GROUPS.find((g) => g.ids && d.id >= g.ids[0] && d.id < g.ids[1]) ??
          GROUPS.find((g) => g.prefixes && g.prefixes.includes(d.name.split(".")[0]));

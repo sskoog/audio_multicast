@@ -245,7 +245,7 @@ The 10 ms frame is the master metronome (GOALS.md): every task must finish insid
 | Task | Core | Prio | Role |
 | :--- | :--- | :--- | :--- |
 | `esp_timer` callback `frameTimerCb` | 0 | 22 | Frame tick: notifies `src_dsp0` and `src_rf` (`SRC_BIT_TICK`) |
-| `src_dsp0` | 0 | 5 | USB read (or tone synth / `caltone`) -> USB host volume / mute and master volume (ramped) -> LR4 crossover -> sub decimation -> publish frame -> encode jobs |
+| `src_dsp0` | 0 | 5 | USB read (or test tone: synth / pink / sine) -> USB host volume / mute and master volume (ramped) -> LR4 crossover -> sub decimation -> publish frame -> encode jobs |
 | `src_enc1` | 1 | 5 | Encode jobs of the published frame |
 | `src_rf` | 1 | 7 | Radio owner: radio health, deferred channel / PHY changes, one packet in flight |
 | Wi-Fi driver | 0 | 23 | ESP-IDF; calls the ESP-NOW send callback (TX-done) |
@@ -432,8 +432,8 @@ How each node reads its console:
 | `peer list` / `peers` | SOURCE | Registered SINK peers, online status, RTT and telemetry. |
 | `start` / `play` / `cast` | SOURCE | Begin broadcast (`CAST`). |
 | `stop` / `pause` | SOURCE | Stop transmission (`IDLE`). |
-| `synth [on/off]` / `tone` | SOURCE | Internal test synthesizer instead of USB audio. |
-| `caltone pink [dBFS]` / `caltone sine [dBFS] [sat Hz] [sub Hz]` / `caltone off` | SOURCE | Calibration signal for SPL level matching, replacing the program input and bypassing the crossover: pink noise 500-2000 Hz on the satellites and 40-100 Hz on the sub, or sines (default 1 kHz / 63 Hz), all at the same RMS level (default -20, max -6 dBFS). Not affected by the master volume. Method and results in AGENTS.md. |
+| `synth [on/off]` / `tone` | SOURCE | Test synth instead of USB audio (= `caltone synth`). |
+| `caltone synth` / `caltone pink` / `caltone sine [sat Hz] [sub Hz]` / `caltone off` | SOURCE | Test tone as program input (parameters `audio.source = noise` + `cal.mode`): the synth, pink noise 500-2000 Hz + 40-100 Hz, or two sines (default 1 kHz + 63 Hz). Pink and sine run at a fixed -20 dBFS RMS per band; the level is set with the master volume (`vol`, `audio.master_db`). Like USB audio they go through the crossover, the spatial upmix and the channel gains (before 2026-11-01 `caltone` bypassed all of that and had its own level). For speaker level matching set `dsp.hilbert.animate = bypass` (every satellite then gets the same mono signal); the old `caltone pink -30` is `caltone pink` with the master at -10 dB. `off` returns to USB audio. |
 | `usbvol` | SOURCE | USB host volume / mute requests (UAC1 feature unit): count, master / L / R dB, whether they are applied. Windows sends its volume slider as these requests and does not scale the PCM; the SOURCE applies the lower of master and channel volume (`CONFIG_VSAF_APPLY_USB_HOST_VOLUME`). |
 | `scan` / `survey` | SOURCE | Passive channel survey 1..13 (refused while casting). |
 | `wifich <1..13>` / `channel` | SOURCE / SINK | Set Wi-Fi channel (SOURCE: applied at the next frame boundary). |
@@ -491,7 +491,7 @@ One transport-independent table names, describes, reads and writes runtime param
 | :--- | :--- |
 | `param list` | All parameters with value, unit, type, access, min / max / default (`count` and `status_seq` first) |
 | `param get <name\|id>` | One parameter (`audio.master_db`, `0x1000` or `4096`) |
-| `param set <name\|id> <value>` | Write; enum values by label or index (`param set source.mode synth`) |
+| `param set <name\|id> <value>` | Write; enum values by label or index (`param set audio.source noise`) |
 
 `N` = channel 0..5 (L, R, C, LS, RS, Sub). `param list` prints the full table with ranges.
 
@@ -516,11 +516,16 @@ One transport-independent table names, describes, reads and writes runtime param
 | 0x1000 | `audio.master_db` | rw | dB | Master volume -96..0 (`vol`, `voldb`); read = gain in effect (ramped) |
 | 0x1005 | `audio.mute` | rw | off / on | `mute` / `unmute` |
 | 0x1010+N | `audio.chN_db` | rw | dB | Channel gain on the SOURCE (`volch`), ramped |
-| 0x1001 | `source.mode` | rw | enum | `pause` (IDLE) / `cast` (USB audio) / `synth` (test synth) |
+| 0x1001 | `audio.source` | rw | enum | `pause` (IDLE) / `cast` (USB audio) / `noise` (test tone of `cal.mode`) |
 | 0x1100 | `sync.latency_ms` | rw | ms | `latency` |
 | 0x1110+N | `sync.chN_trim_us` | rw | us | `trim` |
 | 0x1120+N / 0x1130+N / 0x1140+N | `sync.chN_rtt_us`, `sync.chN_drift_ppm`, `sync.chN_err_us` | ro | us, ppm, us | Best RTT, SINK clock drift, playout error reported by the SINK (`ptp`) |
-| 0x1200..0x1203 | `cal.mode`, `cal.level_dbfs`, `cal.sat_hz`, `cal.sub_hz` | rw | enum, dBFS, Hz | `caltone` (off / pink / sine, level, sine frequencies) |
+| 0x1200, 0x1202, 0x1203 | `cal.mode`, `cal.sat_hz`, `cal.sub_hz` | rw | enum, Hz | Test tone: synth (default) / pink / sine, sine frequencies (`caltone`). Level = `audio.master_db` (`cal.level_dbfs`, 0x1201, retired) |
+| 0x1300, 0x1306 | `xo.hp_hilbert_hz`, `xo.hp_hilbert_order` | rw | Hz, enum | Crossover: satellite high-pass before the Hilbert transform, 70..200 Hz, order 0 (none) .. 4 (default 2) |
+| 0x1307, 0x1308 | `xo.lp_sub_hz`, `xo.lp_sub_order` | rw | Hz, enum | Crossover: sub low-pass in the 48 -> 8 kHz downsampling (also its anti-alias filter), 70..200 Hz, Butterworth order 2 / 3 / 4 (default) / 6 |
+| 0x1301, 0x1312, 0x1313, 0x1310, 0x1311 | `dsp.hilbert.animate`, `dsp.lfo_hz`, `dsp.lfo_span_deg`, `dsp.mix_wet`, `dsp.side_widening` | rw | enum, Hz, deg | Spatial upmix: bypass / on, azimuth LFO rate and span, wet / dry mix, side (L-R) widening |
+| 0x1320+N, 0x1330+N | `dsp.chN_azimuth_deg`, `dsp.chN_dfs_hz` | rw | deg, Hz | Per satellite: steering angle, single-sideband frequency shift |
+| 0x1302..0x1305 | `sub.mode`, `sub.dry_gain`, `sub.wet_gain`, `sub.zc_lpf_hz` | rw | enum, , , Hz | Subwoofer effects: bypass / zc / nccf subharmonic resonator, dry / wet gain, zero-crossing post low-pass |
 
 #### USB HID and the WebHID page
 
@@ -530,7 +535,7 @@ The SOURCE (S3) exposes the same table as a vendor USB HID interface (`usb_ctrl_
 
 | Command | Description |
 | :--- | :--- |
-| `thdn [Hz] [s]` | THD+N of a sine (play `caltone sine` on the SOURCE) at the decoder output and at the I2S input (after gain), integer Q24 meter. Tables allocated only while it runs |
+| `thdn [Hz] [s]` | THD+N of a sine (play `caltone sine` on the SOURCE, `dsp.hilbert.animate = bypass`) at the decoder output and at the I2S input (after gain), integer Q24 meter. Tables allocated only while it runs |
 | `deccmp` | C6: capture 40 consecutive live HQ frames and dump them with the Espressif-decoded PCM as hex (`[DF]` / `[DP]` lines) for a PC comparison against liblc3 |
 | `i2scap` | Capture BCLK / WS / DOUT on the pins with the CPU (~250 ns per sample, 16-bit slots) while the SINK sends test words (left `0x4B2D`, right `0x1E87`), and report where each word starts after the WS edge (1 = Philips I2S, 0 = left-justified) |
 | `clkmeas` | CPU clock (reported and measured against esp_timer), APB, XTAL; BCLK and LRCLK counted in hardware (PCNT) over 20 x 10 ms, with their ratio |

@@ -341,12 +341,14 @@ public:
     }
 
     /**
-     * @brief Configure cascade as a Butterworth Low-Pass filter of order 1, 2, 3, or 4.
+     * @brief Configure cascade as a Butterworth Low-Pass filter of order 1, 2, 3, 4 or 6.
      *
      * Order 4 uses true 4th-order Butterworth pole Q factors (Q1 = 0.54119610, Q2 = 1.30656296)
-     * matching scipy.signal.butter(4, cutoff_hz, btype='low', fs=fs, output='sos').
+     * matching scipy.signal.butter(4, cutoff_hz, btype='low', fs=fs, output='sos'); order 6 (needs
+     * MaxSections >= 3) uses Q = 0.51763809, 0.70710678, 1.93185165. Sections beyond the active ones
+     * are left as they are; callers that always run all sections reset them to pass-through.
      *
-     * @param order Filter order in {1, 2, 3, 4} (0 = bypass) [dimensionless].
+     * @param order Filter order in {1, 2, 3, 4, 6} (0 = bypass; 5 and above -> 6 if possible, else 4) [dimensionless].
      * @param cutoff_hz -3 dB cutoff frequency in Hertz [Hz].
      * @param fs Audio sampling rate in Hertz [Hz].
      */
@@ -365,6 +367,13 @@ public:
             sections_[0] = BiquadDF2T::design_first_order_lpf(cutoff_hz, fs);
             sections_[1] = BiquadDF2T::design_second_order_lpf(cutoff_hz, fs, 1.0f);
             num_active_ = 2;
+        } else if (order >= 5 && MaxSections >= 3) {
+            if constexpr (MaxSections >= 3) {
+                sections_[0] = BiquadDF2T::design_second_order_lpf(cutoff_hz, fs, 0.5176380902050415f);
+                sections_[1] = BiquadDF2T::design_second_order_lpf(cutoff_hz, fs, 0.7071067811865476f);
+                sections_[2] = BiquadDF2T::design_second_order_lpf(cutoff_hz, fs, 1.9318516525781366f);
+                num_active_ = 3;
+            }
         } else if (MaxSections >= 2) {
             constexpr float kQ4_0 = 0.541196100146197f;
             constexpr float kQ4_1 = 1.3065629648763766f;

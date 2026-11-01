@@ -296,6 +296,10 @@ public:
         return pre_stage_.cutoff_hz();
     }
 
+    /** @brief Pre-stage Butterworth LP order {2, 3, 4, 6} (thread-safe, applied at the next block). */
+    void set_pre_lpf_order(int order) noexcept { pre_stage_.set_order(order); }
+    int pre_lpf_order() const noexcept { return pre_stage_.order(); }
+
     SubharmonicPreStage& pre_stage() noexcept { return pre_stage_; }
     const SubharmonicPreStage& pre_stage() const noexcept { return pre_stage_; }
     SubharmonicZcFlipper& zc_flipper() noexcept { return zc_flipper_; }

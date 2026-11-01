@@ -1,14 +1,16 @@
 #pragma once
 /**
  * @file cal_signal.hpp
- * @brief SOURCE calibration signal for speaker level matching with an SPL meter (console `caltone`).
+ * @brief SOURCE test tones pink / sine (parameter cal.mode, console `caltone`), e.g. for speaker level matching.
  *
- * Replaces the program input on the SOURCE (bypassing the crossover):
- * - satellites (ch 0..4): band-limited pink noise 500 Hz - 2 kHz (mid band, suits A-weighting and keeps
- *   room modes / tweeter differences out of the reading), or a sine (default 1 kHz);
- * - subwoofer (ch 5, 8 kHz stream): band-limited pink noise 40 - 100 Hz, or a sine (default 63 Hz).
- * Both are scaled to the same RMS level in dBFS. Noise is preferred over a sine: a sine in a room produces
- * standing waves, so the reading depends strongly on the meter position.
+ * Generated as the 48 kHz mono program input, exactly like the test synth: they go through the master volume,
+ * the crossover, the spatial upmix and the per-channel gains like any other input. One frame is the sum of
+ * - a satellite band: pink noise 500 Hz - 2 kHz (mid band, suits A-weighting and keeps room modes / tweeter
+ *   differences out of the reading), or a sine (default 1 kHz);
+ * - a sub band: pink noise 40 - 100 Hz, or a sine (default 63 Hz), which the crossover sends to the sub.
+ * Each band has the same RMS level (configure(), the SOURCE uses a fixed reference; the master volume sets
+ * the playback level). Noise is preferred over a sine: a sine in a room produces standing waves, so the
+ * reading depends strongly on the meter position.
  *
  * Static state only, no allocation; runs in the SOURCE DSP stage (core 0).
  */
@@ -41,10 +43,11 @@ public:
             m_sub_gain = m_sat_gain;
         } else if (mode == Mode::PINK) {
             m_sat.design(48000.0f, 500.0f, 2000.0f);
-            m_sub.design(8000.0f, 40.0f, 100.0f);
+            m_sub.design(48000.0f, 40.0f, 100.0f);
+            m_sub.rng = 0x9E3779B9u;  // own noise sequence (uncorrelated with the satellite band)
             // Normalize the band-limited noise to the requested RMS (measured over 2 s of the same generator)
             m_sat_gain = rms / measureRms(m_sat, 96000);
-            m_sub_gain = rms / measureRms(m_sub, 16000);
+            m_sub_gain = rms / measureRms(m_sub, 96000);
         }
     }
 
@@ -53,36 +56,25 @@ public:
     float satHz() const { return m_sat_hz; }
     float subHz() const { return m_sub_hz; }
 
-    /** @brief One satellite frame (48 kHz mono, n samples) into out. */
-    void satFrame(int16_t* out, size_t n) {
+    /**
+     * @brief One 48 kHz mono program-input frame: satellite band + sub band.
+     * @param out Output PCM (int16, 48 kHz) [samples].
+     * @param n   Samples (480 per 10 ms frame) [samples].
+     */
+    void frame48(int16_t* out, size_t n) {
         if (m_mode == Mode::SINE) {
-            const float inc = 6.28318531f * m_sat_hz / 48000.0f;
+            const float inc_sat = 6.28318531f * m_sat_hz / 48000.0f;
+            const float inc_sub = 6.28318531f * m_sub_hz / 48000.0f;
             for (size_t i = 0; i < n; ++i) {
-                out[i] = clamp16(m_sat_gain * std::sin(m_sat_phase));
-                m_sat_phase += inc;
+                out[i] = clamp16(m_sat_gain * std::sin(m_sat_phase) + m_sub_gain * std::sin(m_sub_phase));
+                m_sat_phase += inc_sat;
                 if (m_sat_phase > 6.28318531f) m_sat_phase -= 6.28318531f;
-            }
-        } else if (m_mode == Mode::PINK) {
-            for (size_t i = 0; i < n; ++i) {
-                out[i] = clamp16(m_sat_gain * m_sat.next());
-            }
-        } else {
-            for (size_t i = 0; i < n; ++i) out[i] = 0;
-        }
-    }
-
-    /** @brief One sub frame (8 kHz mono, n samples) into out. */
-    void subFrame(int16_t* out, size_t n) {
-        if (m_mode == Mode::SINE) {
-            const float inc = 6.28318531f * m_sub_hz / 8000.0f;
-            for (size_t i = 0; i < n; ++i) {
-                out[i] = clamp16(m_sub_gain * std::sin(m_sub_phase));
-                m_sub_phase += inc;
+                m_sub_phase += inc_sub;
                 if (m_sub_phase > 6.28318531f) m_sub_phase -= 6.28318531f;
             }
         } else if (m_mode == Mode::PINK) {
             for (size_t i = 0; i < n; ++i) {
-                out[i] = clamp16(m_sub_gain * m_sub.next());
+                out[i] = clamp16(m_sat_gain * m_sat.next() + m_sub_gain * m_sub.next());
             }
         } else {
             for (size_t i = 0; i < n; ++i) out[i] = 0;

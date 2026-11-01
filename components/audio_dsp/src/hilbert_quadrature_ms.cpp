@@ -60,6 +60,7 @@ void HilbertQuadratureMs::init(
     init_cfg_.hpf_cutoff_hz = std::clamp(init_cfg.hpf_cutoff_hz, kMinHpfCutoffHz, kMaxHpfCutoffHz);
     init_cfg_.hpf_q = (init_cfg.hpf_q > 0.05f) ? init_cfg.hpf_q : kDefaultQ;
     pending_hpf_cutoff_hz_.store(init_cfg_.hpf_cutoff_hz, std::memory_order_release);
+    pending_hpf_order_.store(init_cfg_.hpf_order, std::memory_order_release);
 
     if (init_cfg_.angle_smooth_ms <= 0.0f) {
         angle_smooth_coeff_ = 1.0f;
@@ -267,6 +268,16 @@ void HilbertQuadratureMs::sync_pending_channels_if_needed(float dt_sec) noexcept
             hpf_right_.section(1).z1 = r_z1_1;
             hpf_right_.section(1).z2 = r_z1_2;
         }
+    }
+
+    // Order change: new section structure, so the old filter state does not apply (cleared)
+    const int req_order = pending_hpf_order_.load(std::memory_order_acquire);
+    if (req_order != init_cfg_.hpf_order) {
+        init_cfg_.hpf_order = req_order;
+        hpf_left_.configure_hpf(req_order, init_cfg_.hpf_cutoff_hz, init_cfg_.fs, init_cfg_.hpf_q);
+        hpf_right_.configure_hpf(req_order, init_cfg_.hpf_cutoff_hz, init_cfg_.fs, init_cfg_.hpf_q);
+        hpf_left_.reset();
+        hpf_right_.reset();
     }
 }
 
